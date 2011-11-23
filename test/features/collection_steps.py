@@ -48,7 +48,4 @@ def pick(step, collection_name, key_name, value_list):
         doc[key_name] for doc in world.db[collection_name].find()
     )
 
-    print 'actual', actual
-    print 'expected', expected
-
     assert expected == actual
