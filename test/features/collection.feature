@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Feature: Collections
-    Test Mongo collections
+Feature: Structure.Databases.Collections.Operations.Drop
+    Drop operation deletes a collection as well as all of its indexes.
 
-    Scenario: Rename collection
-        Given a collection named test with 10 documents
-        When I rename it to foo
-        Then there are 10 documents in collection foo
-        And documents in collection foo have x = 0,1,2,3,4,5,6,7,8,9
-        And there are 0 documents in collection test
+    Background:
+        Given connection to "mongodb://localhost"
+        And "query-test" database selected
+
+    Scenario: Drop not empty collection
+        When "tmp" collection selected
+        And "tmp" collection truncated
+        And following documents inserted
+        | name     | age | dateOfVisit           |
+        | Lillith  | 21  | 2010-10-12T00:00:00Z  |
+        | Aubrey   | 36  | 2010-10-13T00:00:00Z  |
+        | Cheyenne | 78  | 2010-10-11T00:00:00Z  |
+        And "tmp" collection dropped
+        And find documents by
+        """
+         {}
+        """
+        Then result would be empty
