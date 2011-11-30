@@ -16,25 +16,54 @@ from freshen import *
 import json
 import pymongo
 
+@Transform('^"(.+)" database$')
+def transform_database_name(database_name):
+    """
+    Assuming feature file is encoded in utf-8, unicodify all database names
+    """
+    import sys
+    print >> sys.stderr, 'database_name', database_name
+    return database_name.decode('utf-8')
+
+@Transform('^"(.+)" collection$')
+def transform_collection_name(collection_name):
+    """
+    Assuming feature file is encoded in utf-8, unicodify all collection names
+    """
+    collection_name = collection_name.decode('utf-8')
+    import sys
+    print >> sys.stderr, 'collection_name', collection_name
+    return collection_name
+
 @Given('connection to "(.*)"')
 def connection(cx_str):
     scc.connection = pymongo.Connection(cx_str)
 
-@Given('"(.*)" database selected')
+@Given('(".*" database) selected')
 def select_db(db_str):
     scc.db = scc.connection[db_str]
 
-@When('"(.*)" collection selected')
-def select_collection(collection_str):
-    scc.collection = scc.db[collection_str]
+@Given('(".*" database) truncated')
+def truncate_db(db_str):
+    for c in scc.db.collection_names():
+        if not c.startswith('system.'):
+            scc.db.drop_collection(c)
 
-@When('"(.*)" collection truncated')
-def truncate_collection(collection_str):
-    scc.collection.remove()
+@When('(".*" collection) created')
+def create_collection(collection_name):
+    scc.db.create_collection(collection_name)
 
-@When('"(.*)" collection dropped')
-def drop_collection(collection_str):
-    scc.db.drop_collection(collection_str)
+@When('(".*" collection) selected')
+def select_collection(collection_name):
+    scc.collection = scc.db[collection_name]
+
+@When('(".*" collection) truncated')
+def truncate_collection(collection_name):
+    scc.db[collection_name].remove()
+
+@When('(".*" collection) dropped')
+def drop_collection(collection_name):
+    scc.db.drop_collection(collection_name)
 
 @When('following documents inserted')
 def insert_documents(table):
@@ -43,6 +72,19 @@ def insert_documents(table):
 @When('find documents by')
 def find(query):
     scc.find_result = list(scc.collection.find(json.loads(query)))
+
+@When('add "(.*)" index by')
+def create_index(index_params, index_name):
+    import sys
+    scc.collection.create_index(
+        json.loads(index_params).items(),
+        name=index_name,
+    )
+
+@Then('list of collections would be the following')
+def check_collections(table):
+    collections = set(scc.db.collection_names())
+    assert collections == set(row['name'] for row in table.iterrows())
 
 @Then('result would be empty')
 def check_empty():

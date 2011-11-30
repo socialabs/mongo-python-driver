@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 # Copyright 2011 10gen, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +20,26 @@ Feature: Structure.Databases.Collections.Operations.Drop
     Background:
         Given connection to "mongodb://localhost"
         And "query-test" database selected
+        And "query-test" database truncated
+
+    Scenario: Drop collection
+        When "tmp" collection created
+        And "tmp" collection dropped
+        Then list of collections would be the following
+        | name           |
+        | system.indexes |
+
+
+    Scenario: Drop collection with name in utf-8
+        When "имя" collection created
+        And "имя" collection dropped
+        Then list of collections would be the following
+        | name           |
+        | system.indexes |
+
 
     Scenario: Drop not empty collection
         When "tmp" collection selected
-        And "tmp" collection truncated
         And following documents inserted
         | name     | age | dateOfVisit           |
         | Lillith  | 21  | 2010-10-12T00:00:00Z  |
@@ -33,3 +51,21 @@ Feature: Structure.Databases.Collections.Operations.Drop
          {}
         """
         Then result would be empty
+
+    Scenario: Drop not empty collection with indexes
+        When "tmp" collection selected
+        And following documents inserted
+        | name     | age | dateOfVisit           |
+        | Lillith  | 21  | 2010-10-12T00:00:00Z  |
+        | Aubrey   | 36  | 2010-10-13T00:00:00Z  |
+        | Cheyenne | 78  | 2010-10-11T00:00:00Z  |
+        And add "index_age" index by
+        """
+        {"age":1}
+        """
+        And "tmp" collection dropped
+        And "tmp" collection created
+        Then list of collections would be the following
+        | name           |
+        | system.indexes |
+        | tmp            |
