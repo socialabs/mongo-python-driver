@@ -75,7 +75,6 @@ def find(query):
 
 @When('add "(.*)" index by')
 def create_index(index_params, index_name):
-    import sys
     scc.collection.create_index(
         json.loads(index_params).items(),
         name=index_name,
