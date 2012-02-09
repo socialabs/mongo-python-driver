@@ -34,6 +34,9 @@ class TestCommon(unittest.TestCase):
 
         warnings.simplefilter("ignore")
 
+        import logging
+        logging.error('foobar %s' % Connection)
+
         c = Connection(pair)
         self.assertFalse(c.slave_okay)
         self.assertFalse(c.safe)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tornado asynchronous Python driver for MongoDB."""
+import inspect
 import os
 
 import socket
@@ -34,7 +35,7 @@ import pymongo
 from pymongo.errors import InvalidOperation
 from pymongo import helpers, greenlet_pool
 
-__all__ = ['TornadoConnection']
+__all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 
 # TODO: sphinx-formatted docstrings
 
@@ -176,6 +177,11 @@ class TornadoPool(greenlet_pool.GreenletPool):
         return tornado_sock
 
 
+# list of overridden async operations on a TornadoConnection instance
+async_connection_ops = set([
+    'drop_database', 'database_names',
+])
+
 class TornadoConnection(object):
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -192,6 +198,10 @@ class TornadoConnection(object):
         @param callback: Optional function taking parameters (connection, error)
         """
         check_callable(callback)
+
+        if self.connected:
+            callback(self, None)
+            return
         
         def connect():
             # Run on child greenlet
@@ -220,32 +230,95 @@ class TornadoConnection(object):
         # Actually connect on a child greenlet
         greenlet.greenlet(connect).switch()
 
-    def __getattr__(self, name):
-        """Get a database by name.
+#    def _is_db_name(self, name):
+#        sync_attr = getattr(self.sync_connection, name)
+#
+#        # TODO: wasteful to actually let the Connection instantiate a Database here, right? Any way to know if
+#        # Connection really has an attr or if it's faking it with __getattr__()?
+#        return isinstance(sync_attr, pymongo.database.Database)
 
-        Raises :class:`~pymongo.errors.InvalidName` if an invalid
-        database name is used.
-
-        :Parameters:
-          - `name`: the name of the database to get
+    def __getattr__(self, operation_name):
         """
-        if not self.connected:
-            raise InvalidOperation(
-                "Can't access database on TornadoConnection before calling"
-                " connect()"
-            )
-        return TornadoDatabase(self.sync_connection, name)
+        Override pymongo Connection's attributes to replace blocking operations
+        with async alternatives, and to get references to TornadoDatabase
+        instances instead of Database.
+        # TODO: Note why this is __getattribute__
+        @param operation_name:  Like 'drop_database', 'database_names', ...
+        @return:                A proxy method that will implement the operation
+                                asynchronously if provided a callback
+        """
+        # Get pymongo's synchronous method for this operation
+        try:
+            if operation_name not in async_connection_ops:
+                if operation_name not in dir(pymongo.database.Database):
+                    return TornadoDatabase(self.sync_connection, operation_name)
+                else:
+                    # Just a regular attribute that doesn't use the network, e.g.
+                    # self.max_pool_size
+                    return getattr(self.sync_connection, operation_name)
+            else:
+                # Delegate to pymongo Connection for method calls like drop_database()
+    #            if not self._is_db_name(operation_name):
+    #                return getattr(self.sync_connection, name)
+
+    #            elif not self.connected:
+                if not self.connected and operation_name != 'open':
+                    raise InvalidOperation(
+                        "Can't access database on TornadoConnection before"
+                        " calling open()"
+                    )
+
+                else:
+                    sync_method = getattr(self.sync_connection, operation_name)
+
+                    # TODO: refactor w/ TornadoCollection!
+                    def method(*args, **kwargs):
+                        client_callback = kwargs.get('callback')
+                        check_callable(client_callback)
+
+                        if 'callback' in kwargs:
+                            kwargs = kwargs.copy()
+                            del kwargs['callback']
+
+                        # TODO: find another way, or at least cache this info
+                        # if getargspec() is expensive.
+                        # TODO: methods on TornadoConnection don't take 'safe',
+                        # only Collection methods do
+                        if 'safe' in inspect.getargspec(sync_method).args:
+                            kwargs['safe'] = bool(client_callback)
+
+                        def call_method():
+                            result, error = None, None
+                            try:
+                                result = sync_method(*args, **kwargs)
+                            except Exception, e:
+                                error = e
+
+                            # Schedule the callback to be run on the main greenlet
+                            if client_callback:
+                                tornado.ioloop.IOLoop.instance().add_callback(
+                                    lambda: client_callback(result, error)
+                                )
+
+                        # Start running the operation on greenlet
+                        greenlet.greenlet(call_method).switch()
+
+                    return method
+        except:
+            import traceback
+            traceback.print_exc()
+            raise
     
-    def __getitem__(self, name):
-        """Get a database by name.
-
-        Raises :class:`~pymongo.errors.InvalidName` if an invalid
-        database name is used.
-
-        :Parameters:
-          - `name`: the name of the database to get
-        """
-        return self.__getattr__(name)
+#    def __getitem__(self, name):
+#        """Get a database by name.
+#
+#        Raises :class:`~pymongo.errors.InvalidName` if an invalid
+#        database name is used.
+#
+#        :Parameters:
+#          - `name`: the name of the database to get
+#        """
+#        return self.__getattr__(name)
     
     def __repr__(self):
         return 'TornadoConnection(%s)' % (
@@ -256,6 +329,13 @@ class TornadoConnection(object):
                 ] if i
             ])
         )
+
+
+class TornadoReplicaSetConnection(object):
+    def __init__(self, *args, **kwargs):
+        # TODO
+        pass
+
 
 class TornadoDatabase(pymongo.database.Database):
     def __getattr__(self, collection_name):
@@ -269,12 +349,12 @@ class TornadoDatabase(pymongo.database.Database):
                 uuid_subtype=OLD_UUID_SUBTYPE, **kwargs):
         # TODO: What semantics exactly shall we support with check and callback?
         #   Is check still necessary to support the pymongo API internally ... ?
+        callback = kwargs.get('callback')
         if 'callback' in kwargs:
-            callback = kwargs['callback']
             del kwargs['callback']
 
-        if check and not callback:
-            raise InvalidOperation("Must pass a callback if check is True")
+#        if check and not callback:
+#            raise InvalidOperation("Must pass a callback if check is True")
 
         check_callable(callback)
 
@@ -303,9 +383,11 @@ class TornadoDatabase(pymongo.database.Database):
                         msg, allowable_errors)
 
                     # No exception thrown
-                    callback(result, error)
+                    if callback:
+                        callback(result, error)
                 except Exception, e:
-                    callback(result, e)
+                    if callback:
+                        callback(result, e)
 
         self["$cmd"].find_one(command,
                               _must_use_master=use_master,
@@ -315,6 +397,12 @@ class TornadoDatabase(pymongo.database.Database):
  
     def __repr__(self):
         return 'Tornado' + super(TornadoDatabase, self).__repr__()
+
+
+# list of overridden async operations on a TornadoCollection instance
+async_collection_ops = set([
+    'update', 'insert', 'remove', 'create_index', 'index_information',
+])
 
 class TornadoCollection(pymongo.collection.Collection):
     def __getattribute__(self, operation_name):
@@ -327,11 +415,22 @@ class TornadoCollection(pymongo.collection.Collection):
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
-        # Get pymongo's synchronous method for this operation
-        super_obj = super(TornadoCollection, self)
-        sync_method = super_obj.__getattribute__(operation_name)
+#        if operation_name not in dir(self):
+#            # This is dotted collection access, e.g. "db.system.indexes"
+#            assert isinstance(self._Collection__database, TornadoDatabase)
+#
+#            # TODO: no double-underscore hack
+#            return TornadoCollection(
+#                self._Collection__database,
+#                operation_name
+#            )
 
-        if operation_name not in ('update', 'insert', 'remove'):
+        # Get pymongo's synchronous method for this operation
+        sync_method = pymongo.collection.Collection.__getattribute__(
+            self, operation_name
+        )
+
+        if operation_name not in async_collection_ops:
             return sync_method
         else:
             def method(*args, **kwargs):
@@ -342,7 +441,10 @@ class TornadoCollection(pymongo.collection.Collection):
                     kwargs = kwargs.copy()
                     del kwargs['callback']
 
-                kwargs['safe'] = bool(client_callback)
+                # TODO: find another way, or at least cache this info in case
+                # getargspec is expensive.
+                if 'safe' in inspect.getargspec(sync_method).args:
+                    kwargs['safe'] = bool(client_callback)
 
                 def call_method():
                     result, error = None, None

@@ -18,6 +18,7 @@ import functools
 import os
 import time
 import unittest
+import random
 
 from nose.plugins.skip import SkipTest
 import sys
@@ -184,6 +185,65 @@ class TornadoTestBasic(TornadoTest):
         cx = async.TornadoConnection(host, port)
         self.check_callback_handling(cx.open)
         
+    def test_dotted_collection_name(self):
+        # Ensure that remove, insert, and find work on collections with dots
+        # in their names.
+        #   Sequence:
+        # 0: schedule cx.test.foo.bar.remove()
+        # 1: start the IOLoop
+        # 2: cx.test.foo.bar.remove() completes
+        # 3: run cx.test.foo.bar.baz.quux.remove()
+        # 4: cx.test.foo.bar.baz.quux.remove() completes
+        # 5: on both collections, do insert(), then find()
+        # 6: assert that inserted docs were found
+
+        cx = self.async_connection()
+
+        def removed0(result, error):
+            if error:
+                raise error
+
+            cx.test.foo.bar.baz.quux.remove(callback=removed1)
+
+        def removed1(result, error):
+            if error:
+                raise error
+
+            # Use sets instead of lists, since we don't know in what order
+            # things will complete
+            expected_results = set()
+            insert_results = set()
+            find_results = set()
+
+            def inserted(result, error):
+                if error:
+                    raise error
+
+                insert_results.add(result)
+
+            def found(result, error):
+                if error:
+                    raise error
+
+                find_results.add(result)
+
+            for coll in (cx.test.foo.bar, cx.test.foo.bar.baz.quux):
+                doc = {'i': random.randint()}
+                coll.insert(doc, callback=inserted)
+                expected_results.add(doc)
+
+            for coll in (cx.test.foo.bar, cx.test.foo.bar.baz.quux):
+                coll.find(callback=found)
+
+            self.assertEventuallyEqual(
+                expected_results,
+                lambda: find_results
+            )
+
+        cx.test.foo.bar.remove(callback=removed0)
+
+        tornado.ioloop.IOLoop.instance().start()
+
     def test_cursor(self):
         cx = self.async_connection()
         coll = cx.test.foo

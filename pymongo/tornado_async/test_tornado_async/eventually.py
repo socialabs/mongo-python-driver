@@ -20,7 +20,7 @@ class AssertEventuallyTest(unittest.TestCase):
     ):
         if timeout_sec is None:
             timeout_sec = 5
-        timeout_sec = max(timeout_sec, int(os.environ.get('TIMEOUT_SEC', 0)))
+        timeout_sec = max(timeout_sec, float(os.environ.get('TIMEOUT_SEC', 0)))
         start = time.time()
         loop = ioloop.IOLoop.instance()
 
