@@ -12,6 +12,7 @@ if __name__ == '__main__':
 
     for submod in [
         'connection',
+        'collection',
         'master_slave_connection',
         'replica_set_connection',
         'database',

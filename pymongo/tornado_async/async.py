@@ -19,12 +19,6 @@ import os
 import socket
 import sys
 
-have_ssl = True
-try:
-    import ssl
-except ImportError:
-    have_ssl = False
-
 import tornado.ioloop, tornado.iostream
 import greenlet
 
@@ -32,8 +26,16 @@ from bson.binary import OLD_UUID_SUBTYPE
 from bson.son import SON
 
 import pymongo
-from pymongo.errors import InvalidOperation
 from pymongo import helpers, greenlet_pool
+from pymongo.errors import InvalidOperation
+
+
+have_ssl = True
+try:
+    import ssl
+except ImportError:
+    have_ssl = False
+
 
 __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 
@@ -177,17 +179,55 @@ class TornadoPool(greenlet_pool.GreenletPool):
         return tornado_sock
 
 
+def asynchronize(sync_method):
+    # TODO doc
+    def method(*args, **kwargs):
+        client_callback = kwargs.get('callback')
+        check_callable(client_callback)
+
+        if 'callback' in kwargs:
+            kwargs = kwargs.copy()
+            del kwargs['callback']
+
+        # TODO: find another way, or at least cache this info in case
+        # getargspec is expensive.
+        if 'safe' in inspect.getargspec(sync_method).args:
+            kwargs['safe'] = bool(client_callback)
+
+        def call_method():
+            result, error = None, None
+            try:
+                result = sync_method(*args, **kwargs)
+            except Exception, e:
+                error = e
+
+            # Schedule the callback to be run on the main greenlet
+            if client_callback:
+                tornado.ioloop.IOLoop.instance().add_callback(
+                    lambda: client_callback(result, error)
+                )
+
+        # Start running the operation on greenlet
+        greenlet.greenlet(call_method).switch()
+
+    return method
+
+
 # list of overridden async operations on a TornadoConnection instance
+# TODO: again, there may be more methods that need overriding than methods
+# that *don't*, perhaps this should be a list of methods not to override
 async_connection_ops = set([
-    'drop_database', 'database_names',
+    'drop_database', 'database_names', 'close_cursor', 'kill_cursors',
+    'server_info', 'database_names', 'drop_database', 'copy_database',
+    'is_locked', 'fsync', 'unlock',
 ])
 
 # TODO: better name, with 'Mongo' in it!
 class TornadoConnection(object):
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
-        self.__init_args = args
-        self.__init_kwargs = kwargs
+        self._init_args = args
+        self._init_kwargs = kwargs
 
         # The synchronous pymongo Connection
         self.sync_connection = None
@@ -209,9 +249,9 @@ class TornadoConnection(object):
             error = None
             try:
                 self.sync_connection = pymongo.Connection(
-                    *self.__init_args,
+                    *self._init_args,
                     _pool_class=TornadoPool,
-                    **self.__init_kwargs
+                    **self._init_kwargs
                 )
                 
                 self.connected = True
@@ -245,70 +285,57 @@ class TornadoConnection(object):
         instances instead of Database.
         @param name:            Like 'drop_database', 'database_names', ...
         @return:                A proxy method that will implement the operation
-                                asynchronously if provided a callback
+                                asynchronously, and requires a 'callback' kwarg
         """
-        # Get pymongo's synchronous method for this operation
-        try:
-            if name not in async_connection_ops:
-                if name not in dir(pymongo.database.Database):
-                    return TornadoDatabase(self, name)
-                else:
-                    # Just a regular attribute that doesn't use the network, e.g.
-                    # self.max_pool_size
-                    return getattr(self.sync_connection, name)
-            else:
-                # Delegate to pymongo Connection for method calls like drop_database()
-    #            if not self._is_db_name(operation_name):
-    #                return getattr(self.sync_connection, name)
-
-    #            elif not self.connected:
-                if not self.connected and name != 'open':
+        if name not in async_connection_ops:
+            if name not in dir(pymongo.connection.Connection):
+                # We're getting a database from the connection
+                if not self.connected:
                     raise InvalidOperation(
                         "Can't access database on TornadoConnection before"
                         " calling open()"
                     )
+                return TornadoDatabase(self, name)
+            else:
+                # Non-socket operation on a connection, e.g.
+                # connection.max_pool_size
+                return getattr(self.sync_connection, name)
+        else:
+            sync_method = getattr(self.sync_connection, name)
+            # TODO: use asynchronize()?
+            def method(*args, **kwargs):
+                client_callback = kwargs.get('callback')
+                check_callable(client_callback)
 
-                else:
-                    sync_method = getattr(self.sync_connection, name)
+                if 'callback' in kwargs:
+                    kwargs = kwargs.copy()
+                    del kwargs['callback']
 
-                    # TODO: refactor w/ TornadoCollection!
-                    def method(*args, **kwargs):
-                        client_callback = kwargs.get('callback')
-                        check_callable(client_callback)
+                # TODO: find another way, or at least cache this info
+                # if getargspec() is expensive.
+                # TODO: methods on TornadoConnection don't take 'safe',
+                # only Collection methods do
+                if 'safe' in inspect.getargspec(sync_method).args:
+                    kwargs['safe'] = bool(client_callback)
 
-                        if 'callback' in kwargs:
-                            kwargs = kwargs.copy()
-                            del kwargs['callback']
+                def call_method():
+                    result, error = None, None
+                    try:
+                        result = sync_method(*args, **kwargs)
+                    except Exception, e:
+                        error = e
 
-                        # TODO: find another way, or at least cache this info
-                        # if getargspec() is expensive.
-                        # TODO: methods on TornadoConnection don't take 'safe',
-                        # only Collection methods do
-                        if 'safe' in inspect.getargspec(sync_method).args:
-                            kwargs['safe'] = bool(client_callback)
+                    # Schedule the callback to be run on the main greenlet
+                    if client_callback:
+                        tornado.ioloop.IOLoop.instance().add_callback(
+                            lambda: client_callback(result, error)
+                        )
 
-                        def call_method():
-                            result, error = None, None
-                            try:
-                                result = sync_method(*args, **kwargs)
-                            except Exception, e:
-                                error = e
+                # Start running the operation on greenlet
+                greenlet.greenlet(call_method).switch()
 
-                            # Schedule the callback to be run on the main greenlet
-                            if client_callback:
-                                tornado.ioloop.IOLoop.instance().add_callback(
-                                    lambda: client_callback(result, error)
-                                )
+            return method
 
-                        # Start running the operation on greenlet
-                        greenlet.greenlet(call_method).switch()
-
-                    return method
-        except:
-            import traceback
-            traceback.print_exc()
-            raise
-    
 #    def __getitem__(self, name):
 #        """Get a database by name.
 #
@@ -319,13 +346,13 @@ class TornadoConnection(object):
 #          - `name`: the name of the database to get
 #        """
 #        return self.__getattr__(name)
-    
+
     def __repr__(self):
         return 'TornadoConnection(%s)' % (
             ','.join([
                 i for i in [
-                    ','.join([str(i) for i in self.__init_args]),
-                    ','.join(['%s=%s' for k, v in self.__init_kwargs.items()]),
+                    ','.join([str(i) for i in self._init_args]),
+                    ','.join(['%s=%s' for k, v in self._init_kwargs.items()]),
                 ] if i
             ])
         )
@@ -336,7 +363,16 @@ class TornadoReplicaSetConnection(object):
         # TODO
         pass
 
+# list of overridden async operations on a TornadoDatabase instance
+# TODO: maybe *all* public methods should be assumed async, and this list
+# should be a list of non-async ops that don't need to be wrapped. same for
+# async_connection_ops and async_collection_ops.
 async_db_ops = set([
+    'create_collection', 'drop_collection', 'collection_names',
+    'validate_collection', 'current_op', 'profiling_level',
+    'set_profiling_level', 'profiling_info', 'error', 'last_status',
+    'previous_error', 'reset_error_history', 'add_user', 'remove_user',
+    'authenticate', 'logout', 'dereference', 'eval',
 
 ])
 
@@ -345,6 +381,7 @@ class TornadoDatabase(object):
         # *args and **kwargs are not currently supported by pymongo Database,
         # but it doesn't cost us anything to include them and future-proof
         # this method
+        self.name = name
         if isinstance(connection, TornadoConnection):
             self.connection = connection
             self.sync_database = pymongo.database.Database(
@@ -361,12 +398,26 @@ class TornadoDatabase(object):
 
     def __getattr__(self, name):
         """
-        Return an async Collection instead of a pymongo Collection
+        Override pymongo Database's attributes to replace blocking operations
+        with async alternatives, and to get references to TornadoCollection
+        instances instead of Database.
+        @param name:            Like 'drop_collection', 'collection_names', ...
+        @return:                A proxy method that will implement the operation
+                                asynchronously if provided a callback
         """
-        return TornadoCollection(self, name)
+        if name not in async_db_ops:
+            if name not in dir(pymongo.database.Database):
+                return TornadoCollection(self, name)
+            else:
+                # Just a regular attribute that doesn't use the network, e.g.
+                # self.name
+                return getattr(self.sync_database, name)
+        else:
+            # Get pymongo's synchronous method for this operation
+            sync_method = getattr(self.sync_database, name)
+            return asynchronize(sync_method)
 
-    # TODO: do we need a special command override, or is it enough to put
-    # 'command' in async_db_ops?
+    # TODO: necessary? or just add 'command' to async_db_ops?
     def command(self, command, value=1,
                 check=True, allowable_errors=[],
                 uuid_subtype=OLD_UUID_SUBTYPE, **kwargs):
@@ -417,9 +468,23 @@ class TornadoDatabase(object):
                               _is_command=True,
                               _uuid_subtype=uuid_subtype,
                               callback=command_callback)
- 
+
+    def __getitem__(self, name):
+        """Get a database by name.
+
+        Raises :class:`~pymongo.errors.InvalidName` if an invalid
+        database name is used.
+
+        :Parameters:
+          - `name`: the name of the database to get
+        """
+        return self.__getattr__(name)
+
     def __repr__(self):
-        return 'Tornado' + super(TornadoDatabase, self).__repr__()
+        return 'Tornado' + self.sync_database.__repr__()
+
+    def __cmp__(self, other):
+        return cmp(self.sync_database, other.sync_database)
 
 
 # list of overridden async operations on a TornadoCollection instance
@@ -439,6 +504,11 @@ class TornadoCollection(object):
             )
         else:
             assert isinstance(database, pymongo.database.Database)
+            assert False, (
+                "TODO: support creating TornadoCollection from pymongo"
+                "Database?"
+            )
+
             self.database = TornadoDatabase(
                 database.connection, name, *args, **kwargs
             )
@@ -451,63 +521,35 @@ class TornadoCollection(object):
         """
         Override pymongo Collection's attributes to replace the basic CRUD
         operations with async alternatives.
-        # TODO: Note why this is __getattribute__
         # TODO: Just override them explicitly?
         @param name:            Like 'find', 'remove', 'update', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
-#        if operation_name not in dir(self):
-#            # This is dotted collection access, e.g. "db.system.indexes"
-#            assert isinstance(self._Collection__database, TornadoDatabase)
-#
-#            # TODO: no double-underscore hack
-#            return TornadoCollection(
-#                self._Collection__database,
-#                operation_name
-#            )
-
         # Get pymongo's synchronous method for this operation
         sync_method = getattr(self.sync_collection, name)
 
         if name not in async_collection_ops:
+            # TODO: cheaper way to find if something's a collection than
+            # actually instantiating one? what about:
+            # name in dir(self.sync_collection)
+            if isinstance(sync_method, pymongo.collection.Collection):
+                # dotted collection name, like foo.bar
+                return TornadoCollection(
+                    self.database,
+                    self.sync_collection.name + '.' + sync_method.name
+                )
+
             return sync_method
         else:
-            def method(*args, **kwargs):
-                client_callback = kwargs.get('callback')
-                check_callable(client_callback)
-
-                if 'callback' in kwargs:
-                    kwargs = kwargs.copy()
-                    del kwargs['callback']
-
-                # TODO: find another way, or at least cache this info in case
-                # getargspec is expensive.
-                if 'safe' in inspect.getargspec(sync_method).args:
-                    kwargs['safe'] = bool(client_callback)
-
-                def call_method():
-                    result, error = None, None
-                    try:
-                        result = sync_method(*args, **kwargs)
-                    except Exception, e:
-                        error = e
-
-                    # Schedule the callback to be run on the main greenlet
-                    if client_callback:
-                        tornado.ioloop.IOLoop.instance().add_callback(
-                            lambda: client_callback(result, error)
-                        )
-
-                # Start running the operation on greenlet
-                greenlet.greenlet(call_method).switch()
-
-            return method
+            return asynchronize(sync_method)
 
     # TODO: necessary to override explicitly, or just put in
     # async_collection_ops?
     def save(self, to_save, manipulate=True, safe=False, **kwargs):
         """Save a document in this collection."""
+        # TODO: need to override find and find_one distinctly, or can we just
+        # add them to async_collection_ops?
         if not isinstance(to_save, dict):
             raise TypeError("cannot save object of type %s" % type(to_save))
 
@@ -581,6 +623,9 @@ class TornadoCollection(object):
 
     def __repr__(self):
         return 'Tornado' + repr(self.sync_collection)
+
+    def __cmp__(self, other):
+        return cmp(self.sync_collection, other.sync_collection)
 
 
 class TornadoCursor(object):

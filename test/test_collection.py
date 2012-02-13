@@ -105,7 +105,7 @@ class TestCollection(unittest.TestCase):
         db.test.insert({}, safe=True)
         db.test.drop_indexes()
 
-        # Only the _id index remains
+        # Only the _id index, which cannot be dropped, remains
         self.assertEqual(db.system.indexes.find({"ns": u"pymongo_test.test"})
                          .count(), 1)
 
