@@ -40,6 +40,8 @@ except ImportError:
 __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 
 # TODO: sphinx-formatted docstrings
+# TODO: note you can't use from multithreaded app, consider special checks
+# to prevent it?
 
 def check_callable(kallable, required=False):
     if required and not kallable:

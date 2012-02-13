@@ -28,10 +28,15 @@ if __name__ == '__main__':
     test_dir = path.normpath(path.join(this_dir, '../../../test'))
     print 'Running tests in %s' % test_dir
 
-    # Exclude a test that hangs and prevents the run from completing
+    # Exclude a test that hangs and prevents the run from completing - we should
+    # fix the test for async, eventually
+    # TODO: fix test_multiprocessing
     print 'WARNING: excluding test_multiprocessing, which would hang'
     config = Config(
-        exclude=[re.compile(r'test_multiprocessing')]
+        exclude=[
+            re.compile(r'test_multiprocessing'),
+            re.compile(r'test_ensure_unique_index_threaded'),
+        ]
     )
 
     nose.run(defaultTest=this_dir, config=config)

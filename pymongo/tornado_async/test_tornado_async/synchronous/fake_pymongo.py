@@ -263,7 +263,7 @@ class Cursor(object):
         else:
             if not self.tornado_cursor.alive:
                 raise StopIteration
-            
+
             # Continue the query
             loop_timeout(
                 kallable=self.tornado_cursor.get_more,
