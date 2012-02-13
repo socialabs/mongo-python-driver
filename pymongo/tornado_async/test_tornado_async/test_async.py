@@ -43,6 +43,8 @@ import tornado.ioloop
 from pymongo.tornado_async import eventually, puritanical
 
 # TODO: sphinx-compat?
+# TODO: test map_reduce and inline_map_reduce
+
 
 host = os.environ.get("DB_IP", "localhost")
 port = int(os.environ.get("DB_PORT", 27017))

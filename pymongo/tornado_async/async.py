@@ -182,6 +182,7 @@ async_connection_ops = set([
     'drop_database', 'database_names',
 ])
 
+# TODO: better name, with 'Mongo' in it!
 class TornadoConnection(object):
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -237,39 +238,38 @@ class TornadoConnection(object):
 #        # Connection really has an attr or if it's faking it with __getattr__()?
 #        return isinstance(sync_attr, pymongo.database.Database)
 
-    def __getattr__(self, operation_name):
+    def __getattr__(self, name):
         """
         Override pymongo Connection's attributes to replace blocking operations
         with async alternatives, and to get references to TornadoDatabase
         instances instead of Database.
-        # TODO: Note why this is __getattribute__
-        @param operation_name:  Like 'drop_database', 'database_names', ...
+        @param name:            Like 'drop_database', 'database_names', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
         # Get pymongo's synchronous method for this operation
         try:
-            if operation_name not in async_connection_ops:
-                if operation_name not in dir(pymongo.database.Database):
-                    return TornadoDatabase(self.sync_connection, operation_name)
+            if name not in async_connection_ops:
+                if name not in dir(pymongo.database.Database):
+                    return TornadoDatabase(self, name)
                 else:
                     # Just a regular attribute that doesn't use the network, e.g.
                     # self.max_pool_size
-                    return getattr(self.sync_connection, operation_name)
+                    return getattr(self.sync_connection, name)
             else:
                 # Delegate to pymongo Connection for method calls like drop_database()
     #            if not self._is_db_name(operation_name):
     #                return getattr(self.sync_connection, name)
 
     #            elif not self.connected:
-                if not self.connected and operation_name != 'open':
+                if not self.connected and name != 'open':
                     raise InvalidOperation(
                         "Can't access database on TornadoConnection before"
                         " calling open()"
                     )
 
                 else:
-                    sync_method = getattr(self.sync_connection, operation_name)
+                    sync_method = getattr(self.sync_connection, name)
 
                     # TODO: refactor w/ TornadoCollection!
                     def method(*args, **kwargs):
@@ -336,14 +336,37 @@ class TornadoReplicaSetConnection(object):
         # TODO
         pass
 
+async_db_ops = set([
 
-class TornadoDatabase(pymongo.database.Database):
-    def __getattr__(self, collection_name):
+])
+
+class TornadoDatabase(object):
+    def __init__(self, connection, name, *args, **kwargs):
+        # *args and **kwargs are not currently supported by pymongo Database,
+        # but it doesn't cost us anything to include them and future-proof
+        # this method
+        if isinstance(connection, TornadoConnection):
+            self.connection = connection
+            self.sync_database = pymongo.database.Database(
+                connection.sync_connection, name, *args, **kwargs
+            )
+        else:
+            # TODO: should we support this?
+            assert isinstance(connection, pymongo.connection.Connection)
+            assert False, "Can't make TornadoDatabase from pymongo Connection"
+            self.connection = TornadoConnection(connection)
+            self.sync_database = pymongo.database.Database(
+                connection, name, *args, **kwargs
+            )
+
+    def __getattr__(self, name):
         """
         Return an async Collection instead of a pymongo Collection
         """
-        return TornadoCollection(self, collection_name)
+        return TornadoCollection(self, name)
 
+    # TODO: do we need a special command override, or is it enough to put
+    # 'command' in async_db_ops?
     def command(self, command, value=1,
                 check=True, allowable_errors=[],
                 uuid_subtype=OLD_UUID_SUBTYPE, **kwargs):
@@ -402,16 +425,35 @@ class TornadoDatabase(pymongo.database.Database):
 # list of overridden async operations on a TornadoCollection instance
 async_collection_ops = set([
     'update', 'insert', 'remove', 'create_index', 'index_information',
+    'drop_indexes', 'drop_index', 'drop', 'count', 'ensure_index', 'reindex',
+    'options', 'group', 'rename', 'distinct', 'map_reduce', 'inline_map_reduce',
+    'find_and_modify',
 ])
 
-class TornadoCollection(pymongo.collection.Collection):
-    def __getattribute__(self, operation_name):
+class TornadoCollection(object):
+    def __init__(self, database, name, *args, **kwargs):
+        if isinstance(database, TornadoDatabase):
+            self.database = database
+            self.sync_collection = pymongo.collection.Collection(
+                database.sync_database, name, *args, **kwargs
+            )
+        else:
+            assert isinstance(database, pymongo.database.Database)
+            self.database = TornadoDatabase(
+                database.connection, name, *args, **kwargs
+            )
+
+            self.sync_collection = pymongo.collection.Collection(
+                database, name, *args, **kwargs
+            )
+
+    def __getattr__(self, name):
         """
         Override pymongo Collection's attributes to replace the basic CRUD
         operations with async alternatives.
         # TODO: Note why this is __getattribute__
         # TODO: Just override them explicitly?
-        @param operation_name:  Like 'find', 'remove', 'update', ...
+        @param name:            Like 'find', 'remove', 'update', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
@@ -426,11 +468,9 @@ class TornadoCollection(pymongo.collection.Collection):
 #            )
 
         # Get pymongo's synchronous method for this operation
-        sync_method = pymongo.collection.Collection.__getattribute__(
-            self, operation_name
-        )
+        sync_method = getattr(self.sync_collection, name)
 
-        if operation_name not in async_collection_ops:
+        if name not in async_collection_ops:
             return sync_method
         else:
             def method(*args, **kwargs):
@@ -464,6 +504,8 @@ class TornadoCollection(pymongo.collection.Collection):
 
             return method
 
+    # TODO: necessary to override explicitly, or just put in
+    # async_collection_ops?
     def save(self, to_save, manipulate=True, safe=False, **kwargs):
         """Save a document in this collection."""
         if not isinstance(to_save, dict):
@@ -504,7 +546,9 @@ class TornadoCollection(pymongo.collection.Collection):
         kwargs = kwargs.copy()
         del kwargs['callback']
 
-        cursor = super(TornadoCollection, self).find(*args, **kwargs)
+        # Getting the cursor doesn't actually use a socket yet; it's get_more
+        # that we have to make non-blocking
+        cursor = self.sync_collection.find(*args, **kwargs)
         tornado_cursor = TornadoCursor(cursor)
         tornado_cursor.get_more(client_callback)
 
@@ -536,7 +580,7 @@ class TornadoCollection(pymongo.collection.Collection):
         self.find(*args, limit=-1, callback=find_one_callback, **kwargs)
 
     def __repr__(self):
-        return 'Tornado' + super(TornadoCollection, self).__repr__()
+        return 'Tornado' + repr(self.sync_collection)
 
 
 class TornadoCursor(object):

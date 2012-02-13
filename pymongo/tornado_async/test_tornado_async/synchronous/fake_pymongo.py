@@ -3,10 +3,12 @@ import time
 from tornado.ioloop import IOLoop
 
 
+import pymongo as sync_pymongo
+from pymongo.tornado_async import async
+
 # So that synchronous unittests can import these names from fake_pymongo,
 # thinking it's really pymongo
 from pymongo import ASCENDING, DESCENDING, GEO2D, GEOHAYSTACK, ReadPreference
-from pymongo.tornado_async import async
 from pymongo.errors import ConnectionFailure
 
 
@@ -47,11 +49,13 @@ class Connection(object):
     tornado_connection_class = async.TornadoConnection
 
     def __init__(self, host, port, *args, **kwargs):
-        self._tc = self.tornado_connection_class(host, port, *args, **kwargs)
+        self.host = host
+        self.port = port
+        self._tconn = self.tornado_connection_class(host, port, *args, **kwargs)
 
         # Try to connect the TornadoConnection before continuing
         loop = IOLoop.instance()
-        loop_timeout(timeout_sec, self._tc.open, ConnectionFailure(
+        loop_timeout(timeout_sec, self._tconn.open, ConnectionFailure(
             "fake_pymongo.Connection: Can't connect to %s:%s" % (
                 host, port
             )
@@ -59,32 +63,38 @@ class Connection(object):
 
         loop.start()
 
-    def __getattr__(self, dbname):
-        tornado_attr = getattr(self._tc, dbname)
+    def __getattr__(self, name):
+        tornado_attr = getattr(self._tconn, name)
         if isinstance(tornado_attr, async.TornadoDatabase):
-            return Database(self._tc, dbname=dbname)
+            return Database(self, name=name)
         else:
-            return getattr(self._tc, dbname)
+            return tornado_attr
 
 
 class ReplicaSetConnection(Connection):
+    # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
+    # except it wraps a TornadoReplicaSetConnection instead of a
+    # TornadoConnection.
     tornado_connection_class = async.TornadoReplicaSetConnection
 
 
 class Database(object):
-    def __init__(self, tornado_connection, dbname):
+    def __init__(self, connection, name):
+        assert isinstance(connection, Connection)
+        self.name = name
+        self.connection = connection
+
         # Get a TornadoDatabase
-        self.__td = getattr(tornado_connection, dbname)
-        self.dbname = dbname
+        self._tdb = getattr(connection._tconn, name)
+        assert isinstance(self._tdb, async.TornadoDatabase)
 
-    def __getattr__(self, collection_name):
-        return Collection(self.__td, collection_name)
+    def __getattr__(self, name):
+        return Collection(self, name)
 
-    def __getitem__(self, collection_name):
-        return Collection(self.__td, collection_name)
+    __getitem__ = __getattr__
 
 #    def command(self, *args, **kwargs):
-#        real_method = self.__td.command
+#        real_method = self._tdb.command
 #        def method(*args, **kwargs):
 #            results = {}
 #            loop = IOLoop.instance()
@@ -117,20 +127,34 @@ class Database(object):
 
 
 class Collection(object):
-    def __init__(self, tornado_database, collection_name):
-        # Get a TornadoDatabase
-        self.__tc = getattr(tornado_database, collection_name)
-        self.collection_name = collection_name
+    async_collection_ops = async.async_collection_ops.union(set([
+        'find', 'find_one'
+    ]))
 
-    def __getattr__(self, operation_name):
+    def __init__(self, database, name):
+        assert isinstance(database, Database)
+        self.name = name
+        self.database = database
+
+        # Get a TornadoCollection
+        self._tcoll = getattr(database._tdb, name)
+        assert isinstance(self._tcoll, async.TornadoCollection)
+
+    def __getattr__(self, name):
         """
-        @param operation_name:  Like 'find', 'remove', 'update', ...
+        @param name:            Like 'find', 'remove', 'update', ...
         @return:                A proxy method that will implement the
                                 operation synchronously
         """
-        real_method = getattr(self.__tc, operation_name)
-        if operation_name not in async.async_collection_ops:
-            return real_method
+        real_method = getattr(self._tcoll, name)
+
+        if name not in self.async_collection_ops:
+            if isinstance(real_method, sync_pymongo.collection.Collection):
+                # This is dotted collection access, e.g. "db.system.indexes"
+                assert isinstance(self._tcoll, async.TornadoCollection)
+                return Collection(self.database, u"%s.%s" % (self.name, name))
+            else:
+                return real_method
         else:
             def method(*args, **kwargs):
                 results = {}
