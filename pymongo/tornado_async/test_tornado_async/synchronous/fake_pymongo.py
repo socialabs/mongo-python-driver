@@ -1,4 +1,5 @@
 from collections import deque
+import inspect
 import os
 import time
 from tornado.ioloop import IOLoop
@@ -74,11 +75,11 @@ def synchronize(async_method):
             outcome
         )
 
-        assert async_rv is None, (
-            "Can't use synchronize() if you need to use return value for %s" % (
-                async_method
-            )
-        )
+#        assert async_rv is None, (
+#            "Can't use synchronize() if you need to use return value for %s" % (
+#                async_method
+#            )
+#        )
 
         loop.start()
 
@@ -129,7 +130,6 @@ class ReplicaSetConnection(Connection):
 class Database(object):
     def __init__(self, connection, name):
         assert isinstance(connection, Connection)
-        self.name = name
         self.connection = connection
 
         # Get a TornadoDatabase
@@ -197,7 +197,6 @@ class Collection(object):
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
-        self.name = name
         self.database = database
 
         # Get a TornadoCollection
@@ -220,7 +219,7 @@ class Collection(object):
             if isinstance(real_method, async.TornadoCollection):
                 # This is dotted collection access, e.g. "db.system.indexes"
                 assert isinstance(self._tcoll, async.TornadoCollection)
-                return Collection(self.database, u"%s.%s" % (self.name, name))
+                return Collection(self.database, u"%s.%s" % (self._tcoll.name, name))
             else:
                 return real_method
 
@@ -228,6 +227,18 @@ class Collection(object):
             return synchronize(real_method)
 
     __getitem__ = __getattr__
+
+    def __setattr__(self, key, value):
+        # Support weird @attributes like uuid_subtype
+        # TODO: cache
+        if key in [i[0] for i in inspect.getmembers(
+            async.TornadoCollection, inspect.isdatadescriptor
+        ) + inspect.getmembers(
+            sync_pymongo.collection.Collection, inspect.isdatadescriptor
+        )]:
+            setattr(self._tcoll, key, value)
+        else:
+            self.__dict__[key] = value
 
     def __cmp__(self, other):
         return cmp(self._tcoll, other._tcoll)
@@ -301,4 +312,12 @@ class Cursor(object):
             return 0
         return int(outcome['result']['n'])
 
+    def explain(self):
+        if '$query' not in self.spec:
+            spec = {'$query': self.spec}
+        else:
+            spec = self.spec
 
+        spec['$explain'] = True
+
+        return synchronize(self.tornado_coll.find)(spec)[0]

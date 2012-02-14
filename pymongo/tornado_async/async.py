@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tornado asynchronous Python driver for MongoDB."""
+"""Tornado asynchronous Python driver for MongoDB.
+
+Not implemented:
+Various methods on pymongo Cursor, like explain(), count(), distinct(), hint(),
+or where() on a cursor -- use arguments to find() or database commands directly
+instead.
+"""
 import inspect
 import os
 
@@ -42,6 +48,8 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: sphinx-formatted docstrings
 # TODO: note you can't use from multithreaded app, consider special checks
 # to prevent it?
+# TODO: convenience method for count()? How does Node do it?
+# TODO: maybe Tornado classes should inherit from pymongo classes after all
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -500,8 +508,9 @@ async_collection_ops = set([
 class TornadoCollection(object):
     def __init__(self, database, name, *args, **kwargs):
         if isinstance(database, TornadoDatabase):
-            self.database = database
-            self.sync_collection = pymongo.collection.Collection(
+            # Bypass __setattr__
+            self.__dict__['database'] = database
+            self.__dict__['sync_collection'] = pymongo.collection.Collection(
                 database.sync_database, name, *args, **kwargs
             )
         else:
@@ -511,11 +520,11 @@ class TornadoCollection(object):
                 "Database?"
             )
 
-            self.database = TornadoDatabase(
+            self.__dict__['database'] = TornadoDatabase(
                 database.connection, name, *args, **kwargs
             )
 
-            self.sync_collection = pymongo.collection.Collection(
+            self.__dict__['sync_collection'] = pymongo.collection.Collection(
                 database, name, *args, **kwargs
             )
 
@@ -545,6 +554,16 @@ class TornadoCollection(object):
             return sync_method
         else:
             return asynchronize(sync_method)
+
+    def __setattr__(self, key, value):
+        # Support weird @attributes like uuid_subtype
+        # TODO: cache
+        if key in [i[0] for i in inspect.getmembers(
+            async.TornadoCollection, inspect.isdatadescriptor
+        )]:
+            setattr(self._tcoll, key, value)
+        else:
+            self.__dict__[key] = value
 
     # TODO: necessary to override explicitly, or just put in
     # async_collection_ops?
@@ -635,7 +654,7 @@ class TornadoCursor(object):
         """
         @param cursor:  Synchronous pymongo.Cursor
         """
-        self.__sync_cursor = cursor
+        self.sync_cursor = cursor
         self.started = False
 
     def get_more(self, callback):
@@ -645,7 +664,7 @@ class TornadoCursor(object):
         @param callback:    Optional function taking parameters (result, error)
         """
         check_callable(callback)
-        assert not self.__sync_cursor._Cursor__killed
+        assert not self.sync_cursor._Cursor__killed
         if self.started and not self.alive:
             raise InvalidOperation(
                 "Can't call get_more() on an TornadoCursor that has been"
@@ -657,11 +676,11 @@ class TornadoCursor(object):
             result, error = None, None
             try:
                 self.started = True
-                self.__sync_cursor._refresh()
+                self.sync_cursor._refresh()
 
                 # TODO: Make this accessible w/o underscore hack
-                result = self.__sync_cursor._Cursor__data
-                self.__sync_cursor._Cursor__data = []
+                result = self.sync_cursor._Cursor__data
+                self.sync_cursor._Cursor__data = []
             except Exception, e:
                 error = e
 
@@ -680,13 +699,13 @@ class TornadoCursor(object):
     def alive(self):
         """Does this cursor have the potential to return more data?"""
         return bool(
-            self.__sync_cursor.alive and self.__sync_cursor._Cursor__id
+            self.sync_cursor.alive and self.sync_cursor._Cursor__id
         )
 
     def close(self):
         """Explicitly close this cursor.
         """
-        greenlet.greenlet(self.__sync_cursor.close).switch()
+        greenlet.greenlet(self.sync_cursor.close).switch()
 
     def __del__(self):
         if self.alive:
