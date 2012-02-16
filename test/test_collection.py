@@ -809,6 +809,9 @@ class TestCollection(unittest.TestCase):
         docs.append({"five": 5})
 
         db.test.insert(docs, manipulate=False)
+
+        # TODO: does this rely on using a single connection? If so, why isn't
+        # motor using a single connection?
         self.assertEqual(11000, db.error()['code'])
         self.assertEqual(1, db.test.count())
 

@@ -5,6 +5,8 @@ import time
 from tornado.ioloop import IOLoop
 
 # TODO doc WTF this module does
+# TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
+# everything should be called 'motor'?
 
 import pymongo as sync_pymongo
 from pymongo.tornado_async import async
@@ -13,6 +15,7 @@ from pymongo.errors import ConnectionFailure, TimeoutError
 # So that synchronous unittests can import these names from fake_pymongo,
 # thinking it's really pymongo
 from pymongo import ASCENDING, DESCENDING, GEO2D, GEOHAYSTACK, ReadPreference
+
 
 __all__ = [
     'ASCENDING', 'DESCENDING', 'GEO2D', 'GEOHAYSTACK', 'ReadPreference',
@@ -26,6 +29,7 @@ timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
 class StopAndFail(object):
     # TODO: doc
+    # TODO: unnecessary with IOLoop.remove_timeout()?
     def __init__(self, exc):
         self.exc = exc
         self.abort = False
@@ -70,20 +74,16 @@ def synchronize(async_method):
 
         assert 'callback' not in kwargs
 
-        async_rv = loop_timeout(
+        loop_timeout(
             lambda cb: async_method(*args, callback=cb, **kwargs),
             outcome
         )
 
-#        assert async_rv is None, (
-#            "Can't use synchronize() if you need to use return value for %s" % (
-#                async_method
-#            )
-#        )
-
         loop.start()
 
-        if outcome['error']:
+        # Ignore errors if caller explicitly passed safe=False; synchronous
+        # pymongo wouldn't have known the operation failed.
+        if outcome['error'] and kwargs.get('safe'):
             raise outcome['error']
 
         return outcome['result']
@@ -91,13 +91,45 @@ def synchronize(async_method):
     return synchronized_method
 
 
-class Connection(object):
-    tornado_connection_class = async.TornadoConnection
+class Fake(object):
+    """
+    Wraps a TornadoConnection, TornadoDatabase, or TornadoCollection and
+    makes it act like the synchronous pymongo equivalent
+    """
+    def __getattr__(self, name):
+        async_obj = getattr(self, self.async_attr, None)
+        async_attr = getattr(async_obj, name)
+
+        if name in self.async_ops:
+            # async_attr is an async method on a TornadoConnection or something
+            return synchronize(async_attr)
+        else:
+            # If this is like connection.db, or db.test, then wrap the
+            # outgoing object in a Fake
+            if isinstance(async_attr, async.TornadoDatabase):
+                return Database(self, name)
+            elif isinstance(async_attr, async.TornadoCollection):
+                if isinstance(self, Collection):
+                    # Dotted access, like db.test.mike
+                    return Collection(self.database, self.name + '.' + name)
+                else:
+                    return Collection(self, name)
+            else:
+                # Non-socket operation on a pymongo Database, like
+                # database.system_js or _fix_outgoing()
+                return async_attr
+
+    __getitem__ = __getattr__
+
+class Connection(Fake):
+    async_attr = '_tconn'
+    async_connection_class = async.TornadoConnection
+    async_ops = async.TornadoConnection.async_ops
 
     def __init__(self, host, port, *args, **kwargs):
         self.host = host
         self.port = port
-        self._tconn = self.tornado_connection_class(host, port, *args, **kwargs)
+        self._tconn = self.async_connection_class(host, port, *args, **kwargs)
 
         # Try to connect the TornadoConnection before continuing
         loop_timeout(
@@ -112,22 +144,18 @@ class Connection(object):
 
         IOLoop.instance().start()
 
-    def __getattr__(self, name):
-        tornado_attr = getattr(self._tconn, name)
-        if isinstance(tornado_attr, async.TornadoDatabase):
-            return Database(self, name=name)
-        else:
-            return tornado_attr
-
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
     # except it wraps a TornadoReplicaSetConnection instead of a
     # TornadoConnection.
-    tornado_connection_class = async.TornadoReplicaSetConnection
+    async_connection_class = async.TornadoReplicaSetConnection
 
 
-class Database(object):
+class Database(Fake):
+    async_attr = '_tdb'
+    async_ops = async.TornadoDatabase.async_ops
+
     def __init__(self, connection, name):
         assert isinstance(connection, Connection)
         self.connection = connection
@@ -136,113 +164,43 @@ class Database(object):
         self._tdb = getattr(connection._tconn, name)
         assert isinstance(self._tdb, async.TornadoDatabase)
 
-    def __getattr__(self, name):
-        real_method = getattr(self._tdb, name)
+class Collection(Fake):
+    # If async_ops changes, we'll need to update this
+    assert 'find' not in async.TornadoCollection.async_ops
+    assert 'find_one' not in async.TornadoCollection.async_ops
+    assert 'save' not in async.TornadoCollection.async_ops
+    assert 'command' not in async.TornadoCollection.async_ops
 
-        if name not in async.async_db_ops:
-            if isinstance(real_method, async.TornadoCollection):
-                return Collection(self, name)
-            else:
-                # Non-socket operation on a pymongo Database, like
-                # database.system_js or _fix_outgoing()
-                return real_method
-        else:
-            return synchronize(real_method)
-
-    # TODO: some way to find a collection called, e.g., 'drop_collection'
-    # like db['drop_collection']?
-    __getitem__ = __getattr__
-
-#    def command(self, *args, **kwargs):
-#        real_method = self._tdb.command
-#        def method(*args, **kwargs):
-#            results = {}
-#            loop = IOLoop.instance()
-#
-#            def callback(result, error):
-#                results['result'] = result
-#                results['error'] = error
-#                loop.stop()
-#
-#            assert 'callback' not in kwargs
-#            kwargs['callback'] = callback
-#            real_method(*args, **kwargs)
-#
-#            # IOLoop's start() will exit once the callback is called and calls
-#            # stop(), or after the timeout
-#            def stop_and_fail():
-#                loop.stop()
-#                raise Exception("Callback not called before timeout")
-#
-#            timeout_sec = os.environ.get('TIMEOUT_SEC', 5)
-#            loop.add_timeout(time.time() + timeout_sec, stop_and_fail)
-#            loop.start()
-#
-#            if results['error']:
-#                raise results['error']
-#
-#            return results['result']
-#
-#        return method
-
-
-class Collection(object):
-    # If 'find' or 'find_one' are turned into regular async_collection_ops
-    # instead of special cases, we'll need to update this
-    assert 'find' not in async.async_collection_ops
-    assert 'find_one' not in async.async_collection_ops
-    async_collection_ops = async.async_collection_ops.union(set([
-        'find', 'find_one'
+    async_attr = '_tcoll'
+    async_ops = async.TornadoCollection.async_ops.union(set([
+        'find', 'find_one', 'save', 'command'
     ]))
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
-        self.database = database
-
         # Get a TornadoCollection
         self._tcoll = getattr(database._tdb, name)
         assert isinstance(self._tcoll, async.TornadoCollection)
+
+        self.database = database
 
     def find(self, *args, **kwargs):
         # Return a fake Cursor that wraps the call to TornadoCollection.find()
         return Cursor(self._tcoll, *args, **kwargs)
 
-    def __getattr__(self, name):
-        """
-        @param name:            Like 'find', 'remove', 'update', ...
-        @return:                A proxy method that will implement the
-                                operation synchronously
-        """
-        real_method = getattr(self._tcoll, name)
-
-        if name not in self.async_collection_ops:
-            if isinstance(real_method, async.TornadoCollection):
-                # This is dotted collection access, e.g. "db.system.indexes"
-                assert isinstance(self._tcoll, async.TornadoCollection)
-                return Collection(self.database, u"%s.%s" % (self._tcoll.name, name))
-            else:
-                return real_method
-
-        else:
-            return synchronize(real_method)
-
-    __getitem__ = __getattr__
-
-    def __setattr__(self, key, value):
-        # Support weird @attributes like uuid_subtype
-        # TODO: cache
-        if key in [i[0] for i in inspect.getmembers(
-            async.TornadoCollection, inspect.isdatadescriptor
-        ) + inspect.getmembers(
-            sync_pymongo.collection.Collection, inspect.isdatadescriptor
-        )]:
-            setattr(self._tcoll, key, value)
-        else:
-            self.__dict__[key] = value
-
     def __cmp__(self, other):
         return cmp(self._tcoll, other._tcoll)
 
+    # Delegate to TornadoCollection's uuid_subtype property -- TornadoCollection
+    # in turn delegates to pymongo.collection.Collection. This is all to get
+    # test_uuid_subtype to pass.
+    def __get_uuid_subtype(self):
+        return self._tcoll.uuid_subtype
+
+    def __set_uuid_subtype(self, subtype):
+        self._tcoll.uuid_subtype = subtype
+
+    uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
 class Cursor(object):
     def __init__(self, tornado_coll, spec=None, fields=None, *args, **kwargs):
@@ -294,7 +252,7 @@ class Cursor(object):
         command = {"query": self.spec, "fields": self.fields}
         outcome = {}
         loop_timeout(
-            kallable=lambda callback: self.tornado_coll.database.command(
+            kallable=lambda callback: self.tornado_coll._tdb.command(
                 "count", self.tornado_coll.name,
                 allowable_errors=["ns missing"],
                 callback=callback,
