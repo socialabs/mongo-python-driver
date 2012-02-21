@@ -10,7 +10,7 @@ from tornado.ioloop import IOLoop
 
 import pymongo as sync_pymongo
 from pymongo.tornado_async import async
-from pymongo.errors import ConnectionFailure, TimeoutError
+from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
 # So that synchronous unittests can import these names from fake_pymongo,
 # thinking it's really pymongo
@@ -62,6 +62,24 @@ def loop_timeout(kallable, outcome, exc=None, seconds=timeout_sec):
     return kallable(callback)
 
 
+# Methods that don't take a 'safe' argument
+methods_without_safe_arg = {}
+
+for klass in (
+    sync_pymongo.connection.Connection,
+    sync_pymongo.database.Database,
+    sync_pymongo.collection.Collection,
+):
+    for method_name, method in inspect.getmembers(
+        klass,
+        inspect.ismethod
+    ):
+        if 'safe' not in inspect.getargspec(method).args:
+            methods_without_safe_arg.setdefault(
+                'Tornado' + klass.__name__, set()
+            ).add(method.func_name)
+
+
 def synchronize(async_method):
     """
     @param async_method:  An asynchronous method defined on a TornadoConnection,
@@ -73,6 +91,15 @@ def synchronize(async_method):
         loop = IOLoop.instance()
 
         assert 'callback' not in kwargs
+        classname = async_method.im_self.__class__.__name__
+        has_safe_arg = (
+            async_method.func_name not in methods_without_safe_arg[classname]
+        )
+
+        if 'safe' not in kwargs and has_safe_arg:
+            # By default, Motor passes safe=True if there's a callback, but
+            # we don't want that, so we explicitly override.
+            kwargs['safe'] = False
 
         loop_timeout(
             lambda cb: async_method(*args, callback=cb, **kwargs),
@@ -81,9 +108,13 @@ def synchronize(async_method):
 
         loop.start()
 
-        # Ignore errors if caller explicitly passed safe=False; synchronous
-        # pymongo wouldn't have known the operation failed.
-        if outcome['error'] and kwargs.get('safe'):
+        # Ignore OperationFailure for unsafe writes; synchronous pymongo
+        # wouldn't have known the operation failed.
+        if outcome['error'] and (
+            kwargs.get('safe')
+            or not has_safe_arg
+            or not isinstance(outcome['error'], OperationFailure)
+        ):
             raise outcome['error']
 
         return outcome['result']
@@ -98,7 +129,14 @@ class Fake(object):
     """
     def __getattr__(self, name):
         async_obj = getattr(self, self.async_attr, None)
-        async_attr = getattr(async_obj, name)
+
+        # This if-else seems to replicate the logic of getattr(), except,
+        # weirdly, for non-ASCII names like in
+        # TestCollection.test_messages_with_unicode_collection_names().
+        if name in dir(async_obj):
+            async_attr = getattr(async_obj, name)
+        else:
+            async_attr = async_obj.__getattr__(name)
 
         if name in self.async_ops:
             # async_attr is an async method on a TornadoConnection or something
@@ -167,19 +205,16 @@ class Database(Fake):
 class Collection(Fake):
     # If async_ops changes, we'll need to update this
     assert 'find' not in async.TornadoCollection.async_ops
-    assert 'find_one' not in async.TornadoCollection.async_ops
-    assert 'save' not in async.TornadoCollection.async_ops
-    assert 'command' not in async.TornadoCollection.async_ops
 
     async_attr = '_tcoll'
     async_ops = async.TornadoCollection.async_ops.union(set([
-        'find', 'find_one', 'save', 'command'
+        'find', 'map_reduce'
     ]))
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
         # Get a TornadoCollection
-        self._tcoll = getattr(database._tdb, name)
+        self._tcoll = database._tdb.__getattr__(name)
         assert isinstance(self._tcoll, async.TornadoCollection)
 
         self.database = database
@@ -187,6 +222,16 @@ class Collection(Fake):
     def find(self, *args, **kwargs):
         # Return a fake Cursor that wraps the call to TornadoCollection.find()
         return Cursor(self._tcoll, *args, **kwargs)
+
+    def map_reduce(self, *args, **kwargs):
+        # We need to override map_reduce specially, because we have to wrap the
+        # TornadoCollection it returns in a fake Collection.
+        fake_map_reduce = super(Collection, self).__getattr__('map_reduce')
+        rv = fake_map_reduce(*args, **kwargs)
+        if isinstance(rv, async.TornadoCollection):
+            return Collection(self.database, rv.name)
+        else:
+            return rv
 
     def __cmp__(self, other):
         return cmp(self._tcoll, other._tcoll)
@@ -203,10 +248,8 @@ class Collection(Fake):
     uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
 class Cursor(object):
-    def __init__(self, tornado_coll, spec=None, fields=None, *args, **kwargs):
+    def __init__(self, tornado_coll, *args, **kwargs):
         self.tornado_coll = tornado_coll
-        self.spec = spec
-        self.fields = fields
         self.args = args
         self.kwargs = kwargs
         self.tornado_cursor = None
@@ -215,10 +258,7 @@ class Cursor(object):
     def __iter__(self):
         return self
 
-    def next(self):
-        if self.data:
-            return self.data.popleft()
-
+    def _next_batch(self):
         outcome = {}
 
         if not self.tornado_cursor:
@@ -246,7 +286,16 @@ class Cursor(object):
 
         self.data += outcome['result']
 
-        return self.data.popleft()
+    def next(self):
+        if self.data:
+            return self.data.popleft()
+
+        self._next_batch()
+
+        if len(self.data):
+            return self.data.popleft()
+        else:
+            raise StopIteration
 
     def count(self):
         command = {"query": self.spec, "fields": self.fields}
@@ -266,9 +315,29 @@ class Cursor(object):
         if outcome.get('error'):
             raise outcome['error']
 
-        if outcome['result'].get("errmsg", "") == "ns missing":
-            return 0
+        # TODO: remove?:
+#        if outcome['result'].get("errmsg", "") == "ns missing":
+#            return 0
         return int(outcome['result']['n'])
+
+    def distinct(self, key):
+        command = {"query": self.spec, "fields": self.fields, "key": key}
+        outcome = {}
+        loop_timeout(
+            kallable=lambda callback: self.tornado_coll._tdb.command(
+                "distinct", self.tornado_coll.name,
+                callback=callback,
+                **command
+            ),
+            outcome=outcome
+        )
+
+        IOLoop.instance().start()
+
+        if outcome.get('error'):
+            raise outcome['error']
+
+        return outcome['result']['values']
 
     def explain(self):
         if '$query' not in self.spec:

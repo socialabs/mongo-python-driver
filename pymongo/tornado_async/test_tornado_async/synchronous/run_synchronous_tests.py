@@ -8,6 +8,7 @@ import fake_pymongo
 if __name__ == '__main__':
     # Monkey-patch all pymongo's unittests so they think our fake pymongo is the
     # real one
+    # TODO: try using 'from imp import new_module' instead of this?
     sys.modules['pymongo'] = fake_pymongo
 
     for submod in [

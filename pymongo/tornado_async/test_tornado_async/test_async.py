@@ -18,10 +18,10 @@ import functools
 import os
 import time
 import unittest
-import random
+import datetime
+from twisted.conch.test import test_connection
 
 from nose.plugins.skip import SkipTest
-import sys
 
 have_ssl = True
 try:
@@ -29,18 +29,26 @@ try:
 except ImportError:
     have_ssl = False
 
+# Don't know why this is necessary for importing pymongo when running in the
+# PyCharm debugger
+import sys
+sys.path.insert(
+    0,
+    os.path.normpath(os.path.join(os.path.dirname(__file__), '../../..'))
+)
+
 import pymongo
-import pymongo.objectid
+from pymongo.objectid import ObjectId
 from pymongo.tornado_async import async
 from pymongo.errors import InvalidOperation, ConfigurationError, \
-    ConnectionFailure
+    DuplicateKeyError
 
-from test.testutils import delay
+from test.utils import delay
 
 import tornado.ioloop
 
 # Tornado testing tools
-from pymongo.tornado_async import eventually, puritanical
+from pymongo.tornado_async.test_tornado_async import eventually, puritanical
 
 # TODO: sphinx-compat?
 # TODO: test map_reduce and inline_map_reduce
@@ -65,9 +73,9 @@ class TornadoTest(
         )
         self.sync_db = self.sync_cx.test
         self.sync_coll = self.sync_db.test_collection
+        self.sync_coll.drop()
 
         # Make some test data
-        self.sync_coll.remove()
         self.sync_coll.ensure_index([('s', pymongo.ASCENDING)], unique=True)
         self.sync_coll.insert(
             [{'_id': i, 's': hex(i)} for i in range(200)],
@@ -113,8 +121,6 @@ class TornadoTest(
         fn(callback=lambda result, error: None)
 
     def tearDown(self):
-        self.sync_coll.remove()
-
         actual_open_cursors = self.get_open_cursors()
 
         if actual_open_cursors != self.open_cursors:
@@ -135,6 +141,7 @@ class TornadoTest(
             )
         )
 
+        self.sync_coll.drop()
         super(TornadoTest, self).tearDown()
 
 
@@ -180,7 +187,6 @@ class TornadoTestBasic(TornadoTest):
         )
 
         cx.open(callback)
-
         tornado.ioloop.IOLoop.instance().start()
 
     def test_connection_callback(self):
@@ -190,61 +196,56 @@ class TornadoTestBasic(TornadoTest):
     def test_dotted_collection_name(self):
         # Ensure that remove, insert, and find work on collections with dots
         # in their names.
-        #   Sequence:
-        # 0: schedule cx.test.foo.bar.remove()
-        # 1: start the IOLoop
-        # 2: cx.test.foo.bar.remove() completes
-        # 3: run cx.test.foo.bar.baz.quux.remove()
-        # 4: cx.test.foo.bar.baz.quux.remove() completes
-        # 5: on both collections, do insert(), then find()
-        # 6: assert that inserted docs were found
-
         cx = self.async_connection()
+        for coll in (
+            cx.test.foo,
+            cx.test.foo.bar,
+            cx.test.foo.bar.baz.quux
+        ):
+            results = []
 
-        def removed0(result, error):
-            if error:
-                raise error
+            def removed1(result, error):
+                if error:
+                    raise error
 
-            cx.test.foo.bar.baz.quux.remove(callback=removed1)
-
-        def removed1(result, error):
-            if error:
-                raise error
-
-            # Use sets instead of lists, since we don't know in what order
-            # things will complete
-            expected_results = set()
-            insert_results = set()
-            find_results = set()
+                results.append('removed1')
+                coll.insert({'_id':'xyzzy'}, callback=inserted)
 
             def inserted(result, error):
                 if error:
                     raise error
 
-                insert_results.add(result)
+                results.append(result)
+                coll.find_one({'_id':'xyzzy'}, callback=found1)
 
-            def found(result, error):
+            def found1(result, error):
                 if error:
                     raise error
 
-                find_results.add(result)
+                results.append(result)
+                coll.remove(callback=removed2)
 
-            for coll in (cx.test.foo.bar, cx.test.foo.bar.baz.quux):
-                doc = {'i': random.randint()}
-                coll.insert(doc, callback=inserted)
-                expected_results.add(doc)
+            def removed2(result, error):
+                if error:
+                    raise error
 
-            for coll in (cx.test.foo.bar, cx.test.foo.bar.baz.quux):
-                coll.find(callback=found)
+                results.append('removed2')
+                coll.find_one({'_id':'xyzzy'}, callback=found2)
+
+            def found2(result, error):
+                if error:
+                    raise error
+
+                results.append(result)
 
             self.assertEventuallyEqual(
-                expected_results,
-                lambda: find_results
+                ['removed1', 'xyzzy', {'_id':'xyzzy'}, 'removed2', None],
+                lambda: results
             )
 
-        cx.test.foo.bar.remove(callback=removed0)
+            coll.remove(callback=removed1)
 
-        tornado.ioloop.IOLoop.instance().start()
+            tornado.ioloop.IOLoop.instance().start()
 
     def test_cursor(self):
         cx = self.async_connection()
@@ -420,7 +421,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result',result
             if error:
                 raise error
             results.append(result)
@@ -508,7 +508,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result',result
             if error:
                 raise error
             results.append(result)
@@ -618,7 +617,7 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            self.assert_(isinstance(error, pymongo.errors.DuplicateKeyError))
+            self.assert_(isinstance(error, DuplicateKeyError))
             self.assertEqual(None, result)
             results.append(result)
 
@@ -642,7 +641,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
             if error:
                 raise error
             results.append(result)
@@ -662,7 +660,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
             if error:
                 raise error
             results.append(result)
@@ -684,8 +681,7 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
-            self.assert_(isinstance(error, pymongo.errors.DuplicateKeyError))
+            self.assert_(isinstance(error, DuplicateKeyError))
             self.assertEqual(None, result)
             results.append(result)
 
@@ -706,8 +702,7 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
-            self.assert_(isinstance(error, pymongo.errors.DuplicateKeyError))
+            self.assert_(isinstance(error, DuplicateKeyError))
             results.append(result)
 
         self.async_connection().test.test_collection.insert(
@@ -749,7 +744,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
             if error:
                 raise error
             results.append(result)
@@ -769,7 +763,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result', result
             if error:
                 raise error
             results.append(result)
@@ -782,7 +775,7 @@ class TornadoTestBasic(TornadoTest):
         # save() returns the new _id
         self.assertEventuallyEqual(
             True,
-            lambda: isinstance(results[0], pymongo.objectid.ObjectId)
+            lambda: isinstance(results[0], ObjectId)
         )
 
         tornado.ioloop.IOLoop.instance().start()
@@ -795,7 +788,7 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            self.assert_(isinstance(error, pymongo.errors.DuplicateKeyError))
+            self.assert_(isinstance(error, DuplicateKeyError))
             self.assertEqual(None, result)
             results.append(result)
 
@@ -816,7 +809,6 @@ class TornadoTestBasic(TornadoTest):
         results = []
 
         def callback(result, error):
-            # print >> sys.stderr, 'result',result
             if error:
                 raise error
             results.append(result)
@@ -906,8 +898,13 @@ class TornadoTestBasic(TornadoTest):
         """
         Test that unsafe inserts with no callback still work
         """
+        # id 201 not present
+        self.assertEqual(0, self.sync_coll.find({'_id': 201}).count())
+
+        # insert id 201 without a callback or safe=True
         self.async_connection().test.test_collection.insert({'_id': 201})
 
+        # the insert is executed
         self.assertEventuallyEqual(
             1,
             lambda: len(list(self.sync_db.test_collection.find({'_id': 201})))
@@ -932,11 +929,6 @@ class TornadoTestBasic(TornadoTest):
         cx = self.async_connection()
         results = []
 
-        self.assertRaises(
-            InvalidOperation,
-            lambda: cx.admin.command("buildinfo", check=True, callback=None)
-        )
-
         def callback(result, error):
             if error:
                 raise error
@@ -955,11 +947,6 @@ class TornadoTestBasic(TornadoTest):
         cx = self.async_connection()
         self.check_callback_handling(
             functools.partial(cx.admin.command, 'buildinfo', check=False)
-        )
-
-        self.assertRaises(
-            InvalidOperation,
-            lambda: cx.admin.command('buildinfo', check=True, callback=None)
         )
 
     def test_nested_callbacks(self):
@@ -993,7 +980,6 @@ class TornadoTestBasic(TornadoTest):
         tornado.ioloop.IOLoop.instance().start()
 
     def test_nested_callbacks_2(self):
-        loop = tornado.ioloop.IOLoop.instance()
         cx = async.TornadoConnection(host, port)
         results = []
 
@@ -1025,8 +1011,221 @@ class TornadoTestBasic(TornadoTest):
             lambda: results
         )
 
-        loop.start()
+        tornado.ioloop.IOLoop.instance().start()
 
+    def test_get_last_error(self):
+        """
+        Create a unique index on 'x', insert the same value for x twice,
+        assert DuplicateKeyError is passed to callback for second insert.
+        Try again in a request, with an unsafe insert followed by an explicit
+        call to database.error(), which raises InvalidOperation because we
+        can't make two concurrent operations in a request. Finally, insert
+        unsafely and call error() again, check that we get the getLastError
+        result correctly, which checks that we're using a single socket in the
+        request as expected.
+        """
+        # Use a special collection for this test
+        self.sync_db.test_get_last_error.drop()
+        cx = self.async_connection()
+        results = []
+
+        def ensured_index(result, error):
+            if error:
+                raise error
+
+            results.append(result)
+            cx.test.test_get_last_error.insert({'x':1}, callback=inserted1)
+
+        def inserted1(result, error):
+            if error:
+                raise error
+
+            results.append(result)
+            cx.test.test_get_last_error.insert({'x':1}, callback=inserted2)
+
+        def inserted2(result, error):
+            self.assert_(isinstance(error, DuplicateKeyError))
+            results.append(result)
+
+            with cx.start_request():
+                cx.test.test_get_last_error.insert(
+                    {'x':1},
+                    safe=False,
+                    callback=inserted3
+                )
+
+        def inserted3(result, error):
+            # No error, since we passed safe=False to insert()
+            self.assertEqual(None, error)
+            results.append(result)
+
+            # We're still in the request begun in inserted2
+            cx.test.error(callback=on_get_last_error)
+
+        def on_get_last_error(result, error):
+            if error:
+                # This is unexpected -- Motor raised an exception trying to
+                # execute getLastError on the server
+                raise error
+
+            results.append(result)
+
+        # start the sequence of callbacks
+        # TODO: test that ensure_index calls the callback even if the index
+        # is already created and in the index cache - might be a special-case
+        # optimization
+        cx.test.test_get_last_error.ensure_index(
+            [('x', 1)], unique=True, callback=ensured_index
+        )
+
+        # index name
+        self.assertEventuallyEqual('x_1', lambda: results[0])
+
+        # result of first insert
+        self.assertEventuallyEqual(
+            True,
+            lambda: isinstance(results[1], ObjectId)
+        )
+
+        # result of second insert - failed with DuplicateKeyError
+        self.assertEventuallyEqual(None, lambda: results[2])
+
+        # result of third insert - failed, but safe=False
+        self.assertEventuallyEqual(
+            True,
+            lambda: isinstance(results[3], ObjectId)
+        )
+
+        # result of error()
+        self.assertEventuallyEqual(
+            11000,
+            lambda: results[4]['code']
+        )
+
+        tornado.ioloop.IOLoop.instance().start()
+        self.sync_db.test_get_last_error.drop()
+
+    def test_no_concurrent_ops_in_request(self):
+        # Check that an attempt to do two things at once in a request raises
+        # InvalidOperation
+        results = []
+        cx = self.async_connection()
+
+        def inserted(result, error):
+            results.append({
+                'result': result,
+                'error': error,
+            })
+
+        with cx.start_request():
+            cx.test.test_collection.insert({})
+            cx.test.test_collection.insert({}, callback=inserted)
+
+        self.assertEventuallyEqual(
+            None,
+            lambda: results[0]['result']
+        )
+
+        self.assertEventuallyEqual(
+            True,
+            lambda: isinstance(results[0]['error'], InvalidOperation)
+        )
+
+        tornado.ioloop.IOLoop.instance().start()
+
+    def _test_request(self, chain0_in_request, chain1_in_request):
+        # Sequence:
+        # We have two chains of callbacks, chain0 and chain1. A chain is a
+        # sequence of callbacks, each spawned by the previous callback on the
+        # chain. We test the following sequence:
+        #
+        # 0.00 sec: chain0 makes a bad insert
+        # 0.25 sec: chain1 makes a good insert
+        # 0.50 sec: chain0 checks getLastError
+        # 0.75 sec: chain1 checks getLastError
+        # 1.00 sec: IOLoop stops
+        #
+        # If start_request() works, then chain 0 gets the DuplicateKeyError
+        # when it runs in a request, and neither chain gets the error when
+        # they run with no request.
+        gap_seconds = 0.25
+        cx = self.async_connection()
+        loop = tornado.ioloop.IOLoop.instance()
+
+        # Results for chain 0 and chain 1
+        results = {
+            0: [],
+            1: [],
+        }
+
+        def insert(chain_num, use_request, doc):
+            request = None
+            if use_request:
+                request = cx.start_request()
+                request.__enter__()
+
+            # Perhaps causes DuplicateKeyError, depending on doc
+            cx.test.test_collection.insert(doc)
+            loop.add_timeout(
+                datetime.timedelta(seconds=2*gap_seconds),
+                lambda: inserted(chain_num)
+            )
+
+            if use_request:
+                request.__exit__(None, None, None)
+
+        def inserted(chain_num):
+            cb = lambda result, error: got_error(chain_num, result, error)
+            cx.test.error(callback=cb)
+
+        def got_error(chain_num, result, error):
+            if error:
+                raise error
+
+            results[chain_num].append(result)
+
+        # Start chain 0. Causes DuplicateKeyError.
+        insert(chain_num=0, use_request=chain0_in_request, doc={'s': hex(4)})
+
+        # Start chain 1, 0.25 seconds from now. Succeeds: no error on insert.
+        loop.add_timeout(
+            datetime.timedelta(seconds=gap_seconds),
+            lambda: insert(
+                chain_num=1, use_request=chain1_in_request, doc={'s': hex(201)}
+            )
+        )
+
+        loop.add_timeout(datetime.timedelta(seconds=4*gap_seconds), loop.stop)
+        loop.start()
+        return results
+
+    def test_start_request(self):
+        # getLastError works correctly only chain 0 is in a request
+        results = self._test_request(True, False)
+        self.assertEqual(11000, results[0][0]['code'])
+        self.assertEqual([None], results[1])
+
+    def test_start_request2(self):
+        # getLastError works correctly when *both* chains are in requests
+        results = self._test_request(True, True)
+        self.assertEqual(11000, results[0][0]['code'])
+        self.assertEqual([None], results[1])
+
+    def test_no_start_request(self):
+        # getLastError didn't get the error: chain0 and chain1 used the
+        # same socket, so chain0's getLastError was checking on chain1's
+        # insert, which had no error.
+        results = self._test_request(False, False)
+        self.assertEqual([None], results[0])
+        self.assertEqual([None], results[1])
+
+    def test_no_start_request2(self):
+        # getLastError didn't get the error: chain0 and chain1 used the
+        # same socket, so chain0's getLastError was checking on chain1's
+        # insert, which had no error.
+        results = self._test_request(False, True)
+        self.assertEqual([None], results[0])
+        self.assertEqual([None], results[1])
 
 class TornadoSSLTest(TornadoTest):
     def test_no_ssl(self):
@@ -1038,6 +1237,7 @@ class TornadoSSLTest(TornadoTest):
 
         self.assertRaises(ConfigurationError,
             async.TornadoConnection, host, port, ssl=True)
+        # TODO: test same thing with async ReplicaSetConnection
 #        self.assertRaises(ConfigurationError,
 #            ReplicaSetConnection, ssl=True)
 
@@ -1087,6 +1287,4 @@ class TornadoSSLTest(TornadoTest):
 # TODO: test deeply-nested callbacks
 
 if __name__ == '__main__':
-#    import greenlet
-#    print >> sys.stderr, "main greenlet:", greenlet.getcurrent()
     unittest.main()
