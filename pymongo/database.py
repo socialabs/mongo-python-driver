@@ -488,7 +488,7 @@ class Database(common.BaseObject):
         return list(self["system.profile"].find())
 
     def error(self):
-        """Get a database error if one occured on the last operation.
+        """Get a database error if one occurred on the last operation.
 
         Return None if the last operation was error-free. Otherwise return the
         error that occurred.
