@@ -16,7 +16,7 @@ import os
 import socket
 import threading
 
-from pymongo.errors import ConnectionFailure, OperationFailure
+from pymongo.errors import ConnectionFailure, OperationFailure, InvalidOperation
 
 
 have_ssl = True
@@ -56,6 +56,10 @@ class Pool(object):
 
         # Map thread -> socket, or (thread, greenlet) -> socket
         self.requests = {}
+
+        # Set of request keys for which we've lent sockets that haven't been
+        # returned
+        self.request_sockets_outstanding = set()
 
     def _request_key(self):
         """Overridable"""
@@ -126,6 +130,13 @@ class Pool(object):
 
         # Have we opened a socket for this request?
         request_key = self._request_key()
+        if request_key in self.request_sockets_outstanding:
+            # TODO: choose the right exc type to throw, good error message
+            raise InvalidOperation("Socket for this request is already in use")
+        elif request_key in self.requests:
+            # TODO: doc
+            self.request_sockets_outstanding.add(request_key)
+
         sock = self.requests.get(request_key)
         if sock:
             return sock, True
@@ -156,8 +167,14 @@ class Pool(object):
 
         if request_key in self.requests:
             del self.requests[request_key]
+            self.request_sockets_outstanding.discard(request_key)
 
         self.return_socket(request_sock)
+
+    def request_socket_outstanding(self):
+        # TODO: better name for this method?
+        # TODO: doc
+        return self._request_key() in self.request_sockets_outstanding
 
     def discard_socket(self, sock):
         """Close and discard the active socket.
@@ -169,6 +186,7 @@ class Pool(object):
 
             # We're ending the request
             if request_sock == sock:
+                self.request_sockets_outstanding.remove(request_key)
                 del self.requests[request_key]
 
     def return_socket(self, sock):
@@ -180,7 +198,11 @@ class Pool(object):
         elif sock:
             # Don't really return a socket if we're in a request
             request_key = self._request_key()
-            if sock is not self.requests.get(request_key):
+            if sock is self.requests.get(request_key):
+                # We're still in the request, but the request's socket is
+                # no longer outstanding.
+                self.request_sockets_outstanding.remove(request_key)
+            else:
                 # There's a race condition here, but we deliberately
                 # ignore it.  It means that if the pool_size is 10 we
                 # might actually keep slightly more than that.
