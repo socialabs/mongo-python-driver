@@ -582,6 +582,11 @@ class TornadoCollection(object):
         """
         Get a TornadoCursor.
         """
+        # TODO: better message
+        assert 'callback' not in kwargs, (
+            "Pass a callback to each() or to_list(), not find()"
+        )
+
         cursor = self.sync_collection.find(*args, **kwargs)
         tornado_cursor = TornadoCursor(cursor)
         return tornado_cursor
@@ -665,6 +670,10 @@ class TornadoCursor(object):
 
         @param callback: function taking (document, error)
         """
+        check_callable(callback, required=True)
+
+        # TODO: simplify, review
+
         # TODO: remove so we don't have to use double-underscore hack
         assert self.batched_size == len(self.sync_cursor._Cursor__data)
 
@@ -690,14 +699,17 @@ class TornadoCursor(object):
             if should_continue is False:
                 return
 
-        if self.sync_cursor.alive:
+        if self.alive:
             def got_more(batch_size, error):
-                print self.sync_cursor._Cursor__data
                 if error:
                     callback(None, error)
-                else:
+                elif batch_size:
+                    assert self.batched_size == 0
                     self.batched_size = batch_size
                     self.each(callback)
+                else:
+                    # Complete
+                    callback(None, None)
 
             self._get_more(got_more)
 
@@ -709,20 +721,20 @@ class TornadoCursor(object):
 
         @param callback: function taking (documents, error)
         """
+        check_callable(callback, required=True)
         the_list = []
 
         def for_each(doc, error):
-            assert isinstance(doc, dict)
-            print doc
             if error:
                 callback(None, error)
 
                 # stop iteration
                 return False
             elif doc is not None:
+                assert isinstance(doc, dict)
                 the_list.append(doc)
             else:
-                # iteration complete
+                # Iteration complete
                 callback(the_list, None)
 
         self.each(for_each)
@@ -735,6 +747,7 @@ class TornadoCursor(object):
     def close(self):
         """Explicitly close this cursor.
         """
+        # TODO: either use asynchronize() or explain why this works
         greenlet.greenlet(self.sync_cursor.close).switch()
 
     def __del__(self):

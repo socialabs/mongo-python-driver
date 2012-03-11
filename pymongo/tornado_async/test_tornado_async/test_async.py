@@ -19,7 +19,6 @@ import os
 import time
 import unittest
 import datetime
-from twisted.conch.test import test_connection
 
 from nose.plugins.skip import SkipTest
 
@@ -102,6 +101,29 @@ class TornadoTest(
         assert cx.connected, "Couldn't connect to MongoDB"
         return cx
 
+    def wait_for_cursors(self):
+        """
+        Useful if you need to ensure some operation completes, e.g. an each(),
+        so that all cursors are closed.
+        """
+        if self.get_open_cursors() > self.open_cursors:
+            loop = tornado.ioloop.IOLoop.instance()
+
+            def timeout_err():
+                loop.stop()
+
+            timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
+            timeout = loop.add_timeout(time.time() + timeout_sec, timeout_err)
+
+            def check():
+                if self.get_open_cursors() <= self.open_cursors:
+                    loop.remove_timeout(timeout)
+                    loop.stop()
+
+            period_ms = 500
+            tornado.ioloop.PeriodicCallback(check, period_ms).start()
+            loop.start()
+
     def check_callback_handling(self, fn, required=False):
         """
         Take a function and verify that it accepts a 'callback' parameter
@@ -113,6 +135,7 @@ class TornadoTest(
 
         if required:
             self.assertRaises(TypeError, fn)
+            self.assertRaises(TypeError, fn, None)
         else:
             # Should not raise
             fn(callback=None)
@@ -251,7 +274,7 @@ class TornadoTestBasic(TornadoTest):
         cx = self.async_connection()
         coll = cx.test.foo
         # We're not actually running the find(), so null callback is ok
-        cursor = coll.find(callback=lambda: None)
+        cursor = coll.find()
         self.assert_(isinstance(cursor, async.TornadoCursor))
         self.assertFalse(cursor.started, "Cursor shouldn't start immediately")
 
@@ -330,9 +353,14 @@ class TornadoTestBasic(TornadoTest):
 
     def test_find_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            cx.test.test_collection.find, required=True
-        )
+        cursor = cx.test.test_collection.find()
+        self.check_callback_handling(cursor.each, required=True)
+
+        # Ensure tearDown doesn't complain about open cursors
+        self.wait_for_cursors()
+
+        self.check_callback_handling(cursor.to_list, required=True)
+        self.wait_for_cursors()
 
     def test_find_is_async(self):
         """
@@ -447,7 +475,7 @@ class TornadoTestBasic(TornadoTest):
             sort=[('_id', 1)], fields=['_id']
         ).to_list(callback)
 
-#        self.assertEventuallyEqual([range(200)], lambda: results)
+        self.assertEventuallyEqual([range(200)], lambda: results)
         tornado.ioloop.IOLoop.instance().start()
         self.assertEqual(1, len(results))
 
@@ -544,26 +572,13 @@ class TornadoTestBasic(TornadoTest):
             cursor.close()
             loop.add_timeout(time.time() + .1, loop.stop)
 
-        cursor = cx.test.test_collection.find(callback=found)
+            # Cancel iteration, so the cursor isn't exhausted
+            return False
+
+        cursor = cx.test.test_collection.find()
+        cursor.each(callback=found)
 
         # Start the find(), the callback will close the cursor
-        loop.start()
-
-    def test_get_more_callback(self):
-        cx = self.async_connection()
-        loop = tornado.ioloop.IOLoop.instance()
-
-        def found(result, error):
-            if error:
-                raise error
-
-            self.check_callback_handling(cursor.get_more, required=True)
-            cursor.close()
-            loop.add_timeout(time.time() + .1, loop.stop)
-
-        cursor = cx.test.test_collection.find(callback=found)
-
-        # Start the cursor so we can correctly call get_more()
         loop.start()
 
     def test_update(self):
@@ -940,14 +955,12 @@ class TornadoTestBasic(TornadoTest):
                 cx.test.test_collection.find(
                     {'_id': 1},
                     {'s': False},
-                    callback=callback
-                )
+                ).each(callback)
 
         cx.test.test_collection.find(
             {'_id': 1},
             {'s': False},
-            callback=callback
-        )
+        ).each(callback)
 
         self.assertEventuallyEqual(
             [1000],
