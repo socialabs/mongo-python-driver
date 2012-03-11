@@ -579,8 +579,6 @@ class Connection(common.BaseObject):
                 if node:
                     return node
             except Exception, why:
-                import logging
-                logging.exception(why)
                 errors.append(str(why))
         # Try any hosts we discovered that were not in the seed list.
         for candidate in self.__nodes - seeds:

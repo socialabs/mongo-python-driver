@@ -26,40 +26,43 @@ __all__ = [
 
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
-
-class StopAndFail(object):
-    # TODO: doc
-    # TODO: unnecessary with IOLoop.remove_timeout()?
-    def __init__(self, exc):
-        self.exc = exc
-        self.abort = False
-
-    def __call__(self, *args, **kwargs):
-        if not self.abort:
-            IOLoop.instance().stop()
-            raise self.exc
-
+#
+#class StopAndFail(object):
+#    # TODO: doc
+#    # TODO: unnecessary with IOLoop.remove_timeout()?
+#    def __init__(self, exc):
+#        self.exc = exc
+#        self.abort = False
+#
+#    def __call__(self, *args, **kwargs):
+#        if not self.abort:
+#            IOLoop.instance().stop()
+#            raise self.exc
+#
 
 # TODO: better name or iface, document
-def loop_timeout(kallable, outcome, exc=None, seconds=timeout_sec):
-    assert isinstance(outcome, dict)
-
-    # Make sure outcome starts with result and error as None, and that caller
-    # isn't reusing an 'outcome' dict from previous run
-    assert outcome.setdefault('result') is None
-    assert outcome.setdefault('error') is None
-
-    fail_func = StopAndFail(exc or TimeoutError("timeout"))
+def loop_timeout(kallable, exc=None, seconds=timeout_sec):
     loop = IOLoop.instance()
-    loop.add_timeout(time.time() + seconds, fail_func)
+    outcome = {}
+
+    def raise_timeout_err():
+        loop.stop()
+        outcome['error'] = exc or TimeoutError("timeout")
+
+    timeout = loop.add_timeout(time.time() + seconds, raise_timeout_err)
 
     def callback(result, error):
+        loop.stop()
+        loop.remove_timeout(timeout)
         outcome['result'] = result
         outcome['error'] = error
-        fail_func.abort = True
-        loop.stop()
 
-    return kallable(callback)
+    kallable(callback)
+    IOLoop.instance().start()
+    if outcome.get('error'):
+        raise outcome['error']
+
+    return outcome['result']
 
 
 # Methods that don't take a 'safe' argument
@@ -87,13 +90,10 @@ def synchronize(async_method):
     @return:              A synchronous wrapper around the method
     """
     def synchronized_method(*args, **kwargs):
-        outcome = {}
-        loop = IOLoop.instance()
-
         assert 'callback' not in kwargs
-        classname = async_method.im_self.__class__.__name__
+        class_name = async_method.im_self.__class__.__name__
         has_safe_arg = (
-            async_method.func_name not in methods_without_safe_arg[classname]
+            async_method.func_name not in methods_without_safe_arg[class_name]
         )
 
         if 'safe' not in kwargs and has_safe_arg:
@@ -101,23 +101,18 @@ def synchronize(async_method):
             # we don't want that, so we explicitly override.
             kwargs['safe'] = False
 
-        loop_timeout(
-            lambda cb: async_method(*args, callback=cb, **kwargs),
-            outcome
-        )
+        rv = None
+        try:
+            rv = loop_timeout(
+                lambda cb: async_method(*args, callback=cb, **kwargs),
+            )
+        except OperationFailure:
+            # Ignore OperationFailure for unsafe writes; synchronous pymongo
+            # wouldn't have known the operation failed.
+            if kwargs.get('safe') or not has_safe_arg:
+                raise
 
-        loop.start()
-
-        # Ignore OperationFailure for unsafe writes; synchronous pymongo
-        # wouldn't have known the operation failed.
-        if outcome['error'] and (
-            kwargs.get('safe')
-            or not has_safe_arg
-            or not isinstance(outcome['error'], OperationFailure)
-        ):
-            raise outcome['error']
-
-        return outcome['result']
+        return rv
 
     return synchronized_method
 
@@ -159,29 +154,34 @@ class Fake(object):
 
     __getitem__ = __getattr__
 
+
 class Connection(Fake):
     async_attr = '_tconn'
     async_connection_class = async.TornadoConnection
     async_ops = async.TornadoConnection.async_ops
 
-    def __init__(self, host, port, *args, **kwargs):
+    def __init__(self, host=None, port=None, *args, **kwargs):
         self.host = host
         self.port = port
         self._tconn = self.async_connection_class(host, port, *args, **kwargs)
 
         # Try to connect the TornadoConnection before continuing
-        loop_timeout(
-            kallable=self._tconn.open,
-            outcome={},
-            exc=ConnectionFailure(
-                "fake_pymongo.Connection: Can't connect to %s:%s" % (
-                    host, port
-                )
-            )
+        exc = ConnectionFailure(
+            "fake_pymongo.Connection: Can't connect to %s:%s" % (host, port)
         )
+        loop_timeout(kallable=self._tconn.open, exc=exc)
 
-        IOLoop.instance().start()
+        # For unittests that examine this attribute
+        self.__pool = self._tconn.sync_connection._Connection__pool
 
+    def drop_database(self, name_or_database):
+        # Special case, since pymongo.Connection.drop_database does
+        # isinstance(name_or_database, database.Database)
+        if isinstance(name_or_database, Database):
+            name_or_database = name_or_database._tdb.name
+
+        drop = super(Connection, self).__getattr__('drop_database')
+        return drop(name_or_database)
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
@@ -195,7 +195,9 @@ class Database(Fake):
     async_ops = async.TornadoDatabase.async_ops
 
     def __init__(self, connection, name):
-        assert isinstance(connection, Connection)
+        assert isinstance(connection, Connection), (
+            "Expected Connection, got %s" % repr(connection)
+        )
         self.connection = connection
 
         # Get a TornadoDatabase

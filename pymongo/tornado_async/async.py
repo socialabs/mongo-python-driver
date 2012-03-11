@@ -304,7 +304,6 @@ class TornadoConnection(object):
         # Actually connect on a child greenlet
         greenlet.greenlet(connect).switch()
 
-
     def __getattr__(self, name):
         """
         Override pymongo Connection's attributes to replace blocking operations
@@ -332,7 +331,7 @@ class TornadoConnection(object):
             ','.join([
             i for i in [
                 ','.join([str(i) for i in self._init_args]),
-                ','.join(['%s=%s' for k, v in self._init_kwargs.items()]),
+                ','.join(['%s=%s' % (k, v) for k, v in self._init_kwargs.items()]),
                 ] if i
             ])
             )
