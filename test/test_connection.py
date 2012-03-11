@@ -490,7 +490,7 @@ with get_connection() as connection:
 """
 
     def get_sock(self, pool):
-        sock_info, from_pool = pool.get_socket((self.host, self.port))
+        sock_info = pool.get_socket((self.host, self.port))
         return sock_info
 
     def assertSameSock(self, pool):
@@ -508,13 +508,13 @@ with get_connection() as connection:
         self.assertNotEqual(sock_info0, sock_info1)
 
     def assertNoRequest(self, pool):
-        self.assertEqual(NO_REQUEST, pool._get_request_socket())
+        self.assertEqual(NO_REQUEST, pool._get_request_state())
 
     def assertNoSocketYet(self, pool):
-        self.assertEqual(NO_SOCKET_YET, pool._get_request_socket())
+        self.assertEqual(NO_SOCKET_YET, pool._get_request_state())
 
     def assertRequestSocket(self, pool):
-        self.assert_(isinstance(pool._get_request_socket(), SocketInfo))
+        self.assert_(isinstance(pool._get_request_state(), SocketInfo))
         
     def test_with_start_request(self):
         conn = get_connection(auto_start_request=False)

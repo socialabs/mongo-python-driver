@@ -155,7 +155,7 @@ class OneOp(threading.Thread):
         # find_one() causes the socket to be used in the request, so now it's
         # bound to this thread
         assert len(pool.sockets) == 0
-        assert pool._get_request_socket() == sock_info
+        assert pool._get_request_state() == sock_info
         self.c.end_request()
 
         # The socket is back in the pool
@@ -206,17 +206,17 @@ class TestPooling(unittest.TestCase):
 
     def assert_no_request(self):
         self.assertEqual(
-            NO_REQUEST, self.c._Connection__pool._get_request_socket()
+            NO_REQUEST, self.c._Connection__pool._get_request_state()
         )
 
     def assert_request_without_socket(self):
         self.assertEqual(
-            NO_SOCKET_YET, self.c._Connection__pool._get_request_socket()
+            NO_SOCKET_YET, self.c._Connection__pool._get_request_state()
         )
 
     def assert_request_with_socket(self):
         self.assert_(isinstance(
-            self.c._Connection__pool._get_request_socket(), SocketInfo
+            self.c._Connection__pool._get_request_state(), SocketInfo
         ))
 
     def assert_pool_size(self, pool_size):
@@ -327,9 +327,9 @@ class TestPooling(unittest.TestCase):
         a.test.test.find_one()
 
         self.assertEqual(b_sock,
-                         one(b._Connection__pool.get_socket((b.host, b.port))))
+                         b._Connection__pool.get_socket((b.host, b.port)))
         self.assertEqual(a_sock,
-                         one(a._Connection__pool.get_socket((a.host, a.port))))
+                         a._Connection__pool.get_socket((a.host, a.port)))
 
     def test_pool_with_fork(self):
         # Test that separate Connections have separate Pools, and that the
@@ -383,7 +383,7 @@ class TestPooling(unittest.TestCase):
         self.assert_(a_sock.sock.getsockname() != c_sock)
         self.assert_(b_sock != c_sock)
         self.assertEqual(a_sock,
-                         one(a._Connection__pool.get_socket((a.host, a.port))))
+                         a._Connection__pool.get_socket((a.host, a.port)))
 
     def test_request_with_fork(self):
         try:
@@ -430,46 +430,33 @@ class TestPooling(unittest.TestCase):
             use_ssl=False
         )
 
-        sock0, from_pool0 = cx_pool.get_socket()
-        sock1, from_pool1 = cx_pool.get_socket()
+        sock0 = cx_pool.get_socket()
+        sock1 = cx_pool.get_socket()
 
         self.assertNotEqual(sock0, sock1)
-        self.assertFalse(from_pool0)
-        self.assertFalse(from_pool1)
 
         # Now in a request, we'll get the same socket both times
         cx_pool.start_request()
 
-        sock2, from_pool2 = cx_pool.get_socket()
-        sock3, from_pool3 = cx_pool.get_socket()
+        sock2 = cx_pool.get_socket()
+        sock3 = cx_pool.get_socket()
+        self.assertEqual(sock2, sock3)
 
         # Pool didn't keep reference to sock0 or sock1; sock2 and 3 are new
         self.assertNotEqual(sock0, sock2)
         self.assertNotEqual(sock1, sock2)
 
-        # We're in a request, so get_socket() returned same sock both times
-        self.assertEqual(sock2, sock3)
-        self.assertFalse(from_pool2)
-
-        # Second call to get_socket() returned from_pool=True
-        self.assert_(from_pool3)
-
-        # Return the sock to pool
+        # Return the request sock to pool
         cx_pool.end_request()
 
-        sock4, from_pool4 = cx_pool.get_socket()
-        sock5, from_pool5 = cx_pool.get_socket()
+        sock4 = cx_pool.get_socket()
+        sock5 = cx_pool.get_socket()
 
         # Not in a request any more, we get different sockets
         self.assertNotEqual(sock4, sock5)
 
         # end_request() returned sock2 to pool
-        self.assert_(from_pool4)
         self.assertEqual(sock4, sock2)
-
-        # But since there was only one sock in the pool after end_request(),
-        # the final call to get_socket() made a new sock
-        self.assertFalse(from_pool5)
 
     def _test_max_pool_size(self, start_request, end_request):
         c = get_connection(max_pool_size=4)
@@ -540,7 +527,7 @@ class TestPooling(unittest.TestCase):
 
         def leak_request():
             cx_pool.start_request()
-            sock_info, from_pool = cx_pool.get_socket()
+            sock_info = cx_pool.get_socket()
             lock.release()
             cx_pool._reset()
             the_sock[0] = id(sock_info.sock)

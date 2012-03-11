@@ -36,8 +36,6 @@ access:
 import datetime
 import socket
 import struct
-import sys
-import time
 import warnings
 
 from bson.son import SON
@@ -55,21 +53,6 @@ from pymongo.errors import (AutoReconnect,
                             InvalidDocument,
                             InvalidURI,
                             OperationFailure)
-
-if sys.platform.startswith('java'):
-    from select import cpython_compatible_select as select
-else:
-    from select import select
-
-def _closed(sock):
-    """Return True if we know socket has been closed, False otherwise.
-    """
-    try:
-        rd, _, _ = select([sock], [], [], 0)
-    # Any exception here is equally bad (select.error, ValueError, etc.).
-    except:
-        return True
-    return len(rd) > 0
 
 
 def _partition_node(node):
@@ -97,7 +80,7 @@ class Connection(common.BaseObject):
 
     def __init__(self, host=None, port=None, max_pool_size=10,
                  network_timeout=None, document_class=dict,
-                 tz_aware=False, use_greenlets=False, _connect=True, **kwargs):
+                 tz_aware=False, _connect=True, **kwargs):
         """Create a new connection to a single MongoDB instance at *host:port*.
 
         The resultant connection object has connection-pooling built
@@ -272,10 +255,11 @@ class Connection(common.BaseObject):
                                      "2.6 you must install the ssl package "
                                      "from PyPI.")
 
-        common.validate('use_greenlets', use_greenlets)
-        if use_greenlets:
-            import greenlet_pool
-            self.pool_class = greenlet_pool.GreenletPool
+        if options.get('use_greenlets', False):
+            if not pool.have_greenlet:
+                raise ConfigurationError("The greenlet module is not available."
+                                         "Install the ssl package from PyPI.")
+            self.pool_class = pool.GreenletPool
         else:
             self.pool_class = pool.Pool
 
@@ -286,8 +270,6 @@ class Connection(common.BaseObject):
             self.__conn_timeout,
             self.__use_ssl
         )
-
-        self.__last_checkout = time.time()
 
         self.__document_class = document_class
         self.__tz_aware = tz_aware
@@ -599,14 +581,6 @@ class Connection(common.BaseObject):
 
     def __socket(self):
         """Get a SocketInfo from the pool.
-
-        If it's been > 1 second since the last time we checked out a
-        socket, we also check to see if the socket has been closed -
-        this let's us avoid seeing *some*
-        :class:`~pymongo.errors.AutoReconnect` exceptions on server
-        hiccups, etc. We only do this if it's been > 1 second since
-        the last socket checkout, to keep performance reasonable - we
-        can't avoid those completely anyway.
         """
         host, port = (self.__host, self.__port)
         if host is None or port is None:
@@ -617,17 +591,11 @@ class Connection(common.BaseObject):
                 # No effect if a request already started
                 self.start_request()
 
-            sock_info, from_pool = self.__pool.get_socket((host, port))
+            sock_info = self.__pool.get_socket((host, port))
         except socket.error, why:
             self.disconnect()
             raise AutoReconnect("could not connect to "
                                 "%s:%d: %s" % (host, port, str(why)))
-        t = time.time()
-        if t - self.__last_checkout > 1:
-            if _closed(sock_info.sock):
-                self.disconnect()
-                sock_info, from_pool = self.__pool.get_socket((host, port))
-        self.__last_checkout = t
         if self.__auth_credentials:
             self.__check_auth(sock_info)
         return sock_info

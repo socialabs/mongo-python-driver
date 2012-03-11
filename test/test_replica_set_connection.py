@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 import thread
+import traceback
 import unittest
 sys.path[0:0] = [""]
 
@@ -27,7 +28,7 @@ from nose.plugins.skip import SkipTest
 
 from bson.son import SON
 from bson.tz_util import utc
-from pymongo import ReadPreference
+from pymongo import ReadPreference, pool
 from pymongo.connection import Connection
 from pymongo.replica_set_connection import ReplicaSetConnection
 from pymongo.replica_set_connection import _partition_node
@@ -269,8 +270,11 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual("bar", c.pymongo_test1.test.find_one()["foo"])
 
         c.end_request()
+
+        self.assertFalse(c.in_request())
         c.copy_database("pymongo_test", "pymongo_test2", pair)
         # copy_database() didn't accidentally restart the request
+#        self.assertFalse(c.in_request())
         self.assertFalse(c.in_request())
 
         time.sleep(1)
@@ -309,7 +313,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertRaises(TypeError, iterate)
         connection.close()
 
-    # TODO this test is probably very dependent on the machine its running on
+    # TODO this test is probably very dependent on the machine it's running on
     # due to timing issues, but I want to get something in here.
     def test_low_network_timeout(self):
         c = None
@@ -372,6 +376,7 @@ class TestConnection(TestConnectionReplicaSetBase):
                     for _ in db.test.find():
                         pass
                 except:
+                    traceback.print_exc()
                     pipe.send(True)
                     os._exit(1)
 
@@ -612,6 +617,40 @@ class TestConnection(TestConnectionReplicaSetBase):
         finally:
             if old_signal_handler:
                 signal.signal(signal.SIGALRM, old_signal_handler)
+
+    def test_greenlet_pool(self):
+        if not pool.have_greenlet:
+            self.assertRaises(
+                OperationFailure,
+                self._get_connection,
+                use_greenlets=True
+            )
+        else:
+            # No error
+            rsc = self._get_connection(use_greenlets=True)
+            self.assertEqual(pool.GreenletPool, rsc.pool_class)
+
+    def test_auto_start_request(self):
+        for bad_horrible_value in (None, 5, 'hi!'):
+            self.assertRaises(
+                (TypeError, ConfigurationError),
+                lambda: self._get_connection(auto_start_request=bad_horrible_value)
+            )
+
+        # auto_start_request should default to True
+        conn = self._get_connection()
+        self.assertTrue(conn.in_request())
+        conn.end_request()
+        self.assertFalse(conn.in_request())
+        conn.start_request()
+        self.assertTrue(conn.in_request())
+
+        conn = self._get_connection(auto_start_request=False)
+        self.assertFalse(conn.in_request())
+        conn.start_request()
+        self.assertTrue(conn.in_request())
+        conn.end_request()
+        self.assertFalse(conn.in_request())
 
 
 if __name__ == "__main__":

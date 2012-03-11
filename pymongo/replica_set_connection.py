@@ -176,15 +176,16 @@ class ReplicaSetConnection(common.BaseObject):
           - `ssl`: If True, create the connection to the servers using SSL.
           - `read_preference`: The read preference for this connection.
             See :class:`~pymongo.ReadPreference` for available options.
-          - `auto_start_request`: If True, each thread that accesses this
-            Connection has a socket allocated to it for the thread's lifetime.
-            This ensures consistent reads, even if you read after an unsafe
-            write.
+          - `auto_start_request`: Stub. Does not actually start a request. This
+            is a placeholder so applications that want request semantics in
+            :class:`ReplicaSetConnection` in future versions of PyMongo can call
+            `start_request()` now, and so applications migrating from using
+            Connection can use ReplicaSetConnection the same way.
           - `slave_okay` or `slaveOk` (deprecated): Use `read_preference`
             instead.
 
         .. versionchanged:: 2.1.1+
-           Added `auto_start_request` option.
+           Added `auto_start_request` stub option.
         .. versionadded:: 2.1
         """
         self.__max_pool_size = max_pool_size
@@ -199,7 +200,6 @@ class ReplicaSetConnection(common.BaseObject):
         self.__pools = {}
         self.__index_cache = {}
         self.__auth_credentials = {}
-        self.pool_class = pool.Pool
 
         username = None
         db_name = None
@@ -218,6 +218,14 @@ class ReplicaSetConnection(common.BaseObject):
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
             self.__opts[option] = value
+
+        if self.__opts.get('use_greenlets', False):
+            if not pool.have_greenlet:
+                raise ConfigurationError("The greenlet module is not available."
+                                         "Install the ssl package from PyPI.")
+            self.pool_class = pool.GreenletPool
+        else:
+            self.pool_class = pool.Pool
 
         self.__auto_start_request = self.__opts.get('auto_start_request', True)
         self.__in_request = self.__auto_start_request
@@ -458,7 +466,7 @@ class ReplicaSetConnection(common.BaseObject):
         pool = self.pool_class(host, self.__max_pool_size,
                                self.__net_timeout, self.__conn_timeout,
                                self.__use_ssl)
-        sock_info, from_pool = pool.get_socket()
+        sock_info = pool.get_socket()
         response = self.__simple_command(
             sock_info, 'admin', {'ismaster': 1}
         )
@@ -514,7 +522,6 @@ class ReplicaSetConnection(common.BaseObject):
                     response = self.__simple_command(sock_info, 'admin',
                                                      {'ismaster': 1})
                     mongo['pool'].return_socket(sock_info)
-                    sock_info = None
                 else:
                     response, conn = self.__is_master(node)
 
@@ -619,24 +626,12 @@ class ReplicaSetConnection(common.BaseObject):
         can't avoid those completely anyway.
         """
         pool = mongo['pool']
-        if self.__auto_start_request:
-            # No effect if a request already started
-            pool.start_request()
+#        if self.__auto_start_request:
+#            # No effect if a request already started
+#            pool.start_request()
 
-        sock_info, from_pool = pool.get_socket()
+        sock_info = pool.get_socket()
 
-        now = time.time()
-        if from_pool and now - mongo['last_checkout'] > 1:
-            if _closed(sock_info.sock):
-                mongo['pool'] = self.pool_class(pool.host,
-                                                self.__max_pool_size,
-                                                self.__net_timeout,
-                                                self.__conn_timeout,
-                                                self.__use_ssl)
-                if self.__auto_start_request:
-                    pool.start_request()
-                sock_info, from_pool = pool.get_socket()
-        mongo['last_checkout'] = now
         if self.__auth_credentials:
             self.__check_auth(sock_info)
         return sock_info
@@ -851,55 +846,24 @@ class ReplicaSetConnection(common.BaseObject):
         raise AutoReconnect(', '.join(errors))
 
     def start_request(self):
-        """Ensure the current thread or greenlet always uses the same socket
-        until it calls :meth:`end_request`. This ensures consistent reads,
-        even if you read after an unsafe write.
-
-        In Python 2.6 and above, or in Python 2.5 with
-        "from __future__ import with_statement", :meth:`end_request` can be
-        used as a context manager:
-
-        >>> connection = pymongo.ReplicaSetConnection(
-        ...     'localhost:27017', replicaSet='repl0')
-        >>> db = connection.test
-        >>> _id = db.test_collection.insert({}, safe=True)
-        >>> with connection.start_request():
-        ...     for i in range(100):
-        ...         db.test_collection.update({'_id': _id}, {'$set': {'i':i}})
-        ...     # Definitely read the document after the final update completes
-        ...     print db.test_collection.find({'_id': _id})
-
-        .. versionadded:: 2.1.1+
-           The `Request` return value. `start_request` previously
-           returned None
+        """Stub. Does not actually start a request. This is a placeholder so
+        applications that want request semantics in
+        :class:`ReplicaSetConnection` in future versions of PyMongo can call
+        `start_request()` now, and so applications migrating from using
+        Connection can use ReplicaSetConnection the same way.
         """
-        for mongo in self.__pools.values():
-            mongo['pool'].start_request()
-
         self.__in_request = True
-
-        return pool.Request(self)
 
     def in_request(self):
         return self.__in_request
 
     def end_request(self):
-        """Undo :meth:`start_request` and allow this thread's connection to
-        return to the pool.
-
-        Calling :meth:`end_request` allows the :class:`~socket.socket` that has
-        been reserved for this thread by :meth:`start_request` to be returned to
-        the pool. Other threads will then be able to re-use that
-        :class:`~socket.socket`. If your application uses many threads, or has
-        long-running threads that infrequently perform MongoDB operations, then
-        judicious use of this method can lead to performance gains. Care should
-        be taken, however, to make sure that :meth:`end_request` is not called
-        in the middle of a sequence of operations in which ordering is
-        important. This could lead to unexpected results.
+        """Stub. Does not actually end a request. This is a placeholder so
+        applications that want request semantics in
+        :class:`ReplicaSetConnection` in future versions of PyMongo can call
+        `end_request()` now, and so applications migrating from using
+        Connection can use ReplicaSetConnection the same way.
         """
-        for mongo in self.__pools.values():
-            mongo['pool'].end_request()
-
         self.__in_request = False
 
     def __cmp__(self, other):
