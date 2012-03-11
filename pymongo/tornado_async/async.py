@@ -199,7 +199,8 @@ def asynchronize(sync_method, callback_required, sync_attr):
                         TornadoCollection
         """
         assert isinstance(self, (
-            TornadoConnection, TornadoDatabase, TornadoCollection
+            TornadoConnection, TornadoDatabase, TornadoCollection,
+            TornadoCursor
         ))
 
         callback = kwargs.get('callback')
@@ -359,7 +360,9 @@ class TornadoConnection(object):
         ...
         >>> with connection.start_request():
         ...     # unsafe inserts, second one violates unique index on _id
-        ...     db.collection.insert({'_id': 1})
+        ...     db.collection.insert({'_id': 1}, callback=next_step)
+        # TODO: update doc, or delete requests entirely from Motor
+        >>> def next_step(result, error):
         ...     db.collection.insert({'_id': 1})
         ...     # call getLastError. Because we're in a request, error() uses
         ...     # same socket as insert, and gets the error message from
@@ -577,22 +580,10 @@ class TornadoCollection(object):
 
     def find(self, *args, **kwargs):
         """
-        Run an async find(), and return a TornadoCursor, rather than returning a
-        pymongo Cursor for synchronous operations.
+        Get a TornadoCursor.
         """
-        callback = kwargs.get('callback')
-        check_callable(callback, required=True)
-        kwargs = kwargs.copy()
-        del kwargs['callback']
-
-        # Getting the cursor doesn't actually use a socket yet; it's get_more
-        # that we have to make non-blocking
         cursor = self.sync_collection.find(*args, **kwargs)
         tornado_cursor = TornadoCursor(cursor)
-        tornado_cursor.get_more(callback)
-
-        # When the greenlet has sent the query on the socket, it will switch
-        # back to the main greenlet, here, and we return to the caller.
         return tornado_cursor
 
     def map_reduce(self, *args, **kwargs):
@@ -638,56 +629,108 @@ for op in TornadoCollection.async_ops:
 class TornadoCursor(object):
     def __init__(self, cursor):
         """
-        @param cursor:  Synchronous pymongo.Cursor
+        @param cursor:  Synchronous pymongo Cursor
         """
         self.sync_cursor = cursor
         self.started = False
 
-    def get_more(self, callback):
+        # Number of documents buffered in sync_cursor
+        self.batched_size = 0
+
+    def _get_more(self, callback):
         """
         Get a batch of data asynchronously, either performing an initial query
         or getting more data from an existing cursor.
-        @param callback:    Optional function taking parameters (result, error)
+        @param callback:    function taking parameters (batch_size, error)
         """
-        # TODO: shorten somehow?
         check_callable(callback)
-        assert not self.sync_cursor._Cursor__killed
         if self.started and not self.alive:
             raise InvalidOperation(
                 "Can't call get_more() on an TornadoCursor that has been"
                 " exhausted or killed."
             )
 
-        def _get_more():
-            # This is executed on child greenlet
-            result, error = None, None
+        self.started = True
+        async_refresh = asynchronize(
+            pymongo.cursor.Cursor._refresh, True, 'sync_cursor',
+        )
+
+        async_refresh(self, callback=callback)
+
+    def each(self, callback):
+        """Iterates over all the documents for this cursor. Return False from
+        the callback to stop iteration. each returns immediately, and your
+        callback is executed asynchronously for each document. callback is
+        passed (None, None) when iteration is complete.
+
+        @param callback: function taking (document, error)
+        """
+        # TODO: remove so we don't have to use double-underscore hack
+        assert self.batched_size == len(self.sync_cursor._Cursor__data)
+
+        while self.batched_size > 0:
             try:
-                self.started = True
-                self.sync_cursor._refresh()
-
-                # TODO: Make this accessible w/o underscore hack
-                result = self.sync_cursor._Cursor__data
-                self.sync_cursor._Cursor__data = []
+                doc = self.sync_cursor.next()
+            except StopIteration:
+                # We're done
+                callback(None, None)
+                return
             except Exception, e:
-                error = e
+                callback(None, e)
+                return
 
-            # Execute callback on main greenlet
-            tornado.ioloop.IOLoop.instance().add_callback(
-                lambda: callback(result, error)
-            )
+            self.batched_size -= 1
 
-        greenlet.greenlet(_get_more).switch()
+            # TODO: remove so we don't have to use double-underscore hack
+            assert self.batched_size == len(self.sync_cursor._Cursor__data)
 
-        # When the greenlet has sent the query on the socket, it will switch
-        # back to the main greenlet, here, and we return to the caller.
-        return None
+            should_continue = callback(doc, None)
+
+            # Quit if callback returns exactly False (not None)
+            if should_continue is False:
+                return
+
+        if self.sync_cursor.alive:
+            def got_more(batch_size, error):
+                print self.sync_cursor._Cursor__data
+                if error:
+                    callback(None, error)
+                else:
+                    self.batched_size = batch_size
+                    self.each(callback)
+
+            self._get_more(got_more)
+
+    def to_list(self, callback):
+        """Get a list of documents. The caller is responsible for making sure
+        that there is enough memory to store the results. to_list returns
+        immediately, and your callback is executed asynchronously with the list
+        of documents.
+
+        @param callback: function taking (documents, error)
+        """
+        the_list = []
+
+        def for_each(doc, error):
+            assert isinstance(doc, dict)
+            print doc
+            if error:
+                callback(None, error)
+
+                # stop iteration
+                return False
+            elif doc is not None:
+                the_list.append(doc)
+            else:
+                # iteration complete
+                callback(the_list, None)
+
+        self.each(for_each)
 
     @property
     def alive(self):
         """Does this cursor have the potential to return more data?"""
-        return bool(
-            self.sync_cursor.alive and self.sync_cursor._Cursor__id
-        )
+        return self.sync_cursor.alive
 
     def close(self):
         """Explicitly close this cursor.

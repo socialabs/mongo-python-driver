@@ -253,7 +253,7 @@ class TornadoTestBasic(TornadoTest):
         # We're not actually running the find(), so null callback is ok
         cursor = coll.find(callback=lambda: None)
         self.assert_(isinstance(cursor, async.TornadoCursor))
-        self.assert_(cursor.started, "Cursor should start immediately")
+        self.assertFalse(cursor.started, "Cursor shouldn't start immediately")
 
     def test_find(self):
         results = []
@@ -266,26 +266,25 @@ class TornadoTestBasic(TornadoTest):
             if error:
                 raise error
 
-            def found(result, error):
+            def each(doc, error):
                 if error:
                     raise error
 
-                # 'cursor' should still be open
-                self.assertEqual(
-                    1 + self.open_cursors,
-                    self.get_open_cursors()
-                )
+                if doc:
+                    results.append(doc['_id'])
 
-                results.append(result)
-
-                cursor.get_more(got_more)
+                    # 'cursor' should still be open
+                    self.assertEqual(
+                        1 + self.open_cursors,
+                        self.get_open_cursors()
+                    )
 
             def got_more(result, error):
                 if error:
                     raise error
 
                 results.append(result)
-                if len(results) == 3:
+                if len(results) >= 10:
                     # cursor should be closed by now
                     expected_cursors = self.open_cursors
                 else:
@@ -296,8 +295,8 @@ class TornadoTestBasic(TornadoTest):
                 self.assertEqual(
                     expected_cursors,
                     actual_open_cursors,
-                    "Expected %d open cursors when there are %d batches"
-                    " of results, found %d" % (
+                    "Expected %d open cursors when there are %d "
+                    "results, found %d" % (
                         expected_cursors, len(results), actual_open_cursors
                     )
                 )
@@ -311,21 +310,19 @@ class TornadoTestBasic(TornadoTest):
                         lambda: cursor.get_more(got_more)
                     )
 
-            cursor = connection.test.test_collection.find(
-                {},
+            # test_collection has 200 docs with _id from 0 to 199, from setUp().
+            # Get those with _id from 0 to 14 in batches 0-4, 5-9, 10-14.
+            connection.test.test_collection.find(
+                {'_id': {'$lt':15}},
                 {'s': False}, # exclude 's' field
-                callback=found,
                 sort=[('_id', 1)],
-                batch_size=75 # results in 3 batches since there are 200 docs
-            )
+                batch_size=5
+            ).each(each)
 
         async.TornadoConnection(host, port).open(callback=connected)
 
         self.assertEventuallyEqual(
-            [
-                [{'_id': i} for i in range(j, min(j + 75, 200))]
-                for j in range(0, 200, 75)
-            ],
+            range(15),
             lambda: results
         )
 
@@ -336,73 +333,6 @@ class TornadoTestBasic(TornadoTest):
         self.check_callback_handling(
             cx.test.test_collection.find, required=True
         )
-
-    def test_find_default_batch(self):
-        results = []
-        cursor = None
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-            if cursor.alive:
-                cursor.get_more(callback=callback)
-
-        cursor = self.async_connection().test.test_collection.find(
-            {},
-            {'s': 0}, # Don't return the 's' field
-            sort=[('_id', pymongo.ASCENDING)],
-            callback=callback
-        )
-
-        # You know what's weird? MongoDB's default first batch is weird. It's
-        # 101 records or 1MB, whichever comes first.
-        self.assertEventuallyEqual(
-            [{'_id': i} for i in range(101)],
-            lambda: results and results[0]
-        )
-
-        # Next batch has remainder of 1000 docs
-        self.assertEventuallyEqual(
-            [{'_id': i} for i in range(101, 200)],
-            lambda: len(results) >= 2 and results[1]
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
-
-    def test_batch_size(self):
-        batch_size = 3
-        limit = 15
-        results = []
-        cursor = None
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-            if cursor.alive:
-                cursor.get_more(callback=callback)
-
-        cursor = self.async_connection().test.test_collection.find(
-            {},
-            {'s': 0}, # Don't return the 's' field
-            sort=[('_id', pymongo.ASCENDING)],
-            callback=callback,
-            batch_size=batch_size,
-            limit=limit,
-        )
-
-        expected_results = [
-            [{'_id': i} for i in range(start_batch, start_batch + batch_size)]
-            for start_batch in range(0, limit, batch_size)
-        ]
-
-        self.assertEventuallyEqual(
-            expected_results,
-            lambda: results
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
 
     def test_find_is_async(self):
         """
@@ -420,10 +350,11 @@ class TornadoTestBasic(TornadoTest):
 
         results = []
 
-        def callback(result, error):
+        def callback(doc, error):
             if error:
                 raise error
-            results.append(result)
+            if doc:
+                results.append(doc)
 
         # Launch 3 find operations for _id's 1, 2, and 3, which will finish in
         # order 2, 3, then 1.
@@ -437,8 +368,7 @@ class TornadoTestBasic(TornadoTest):
             lambda: cx.test.test_collection.find(
                 {'_id': 1, '$where': delay(1)},
                 fields={'s': True, '_id': False},
-                callback=callback
-            )
+            ).each(callback)
         )
 
         # Very fast lookup
@@ -447,8 +377,7 @@ class TornadoTestBasic(TornadoTest):
             lambda: cx.test.test_collection.find(
                 {'_id': 2},
                 fields={'s': True, '_id': False},
-                callback=callback
-            )
+            ).each(callback)
         )
 
         # Find {'i': 3} in big_coll -- even though there's only one such record,
@@ -460,18 +389,67 @@ class TornadoTestBasic(TornadoTest):
             lambda: cx.test.big_coll.find(
                 {'s': hex(3)},
                 fields={'s': True, '_id': False},
-                callback=callback
-            )
+            ).each(callback)
         )
 
         # Results were appended in order 2, 3, 1
         self.assertEventuallyEqual(
-            [[{'s': hex(s)}] for s in (2, 3, 1)],
+            [{'s': hex(s)} for s in (2, 3, 1)],
             lambda: results,
             timeout_sec=1.3
         )
 
         tornado.ioloop.IOLoop.instance().start()
+
+    def test_find_and_cancel(self):
+        cx = self.async_connection()
+        results = []
+
+        def callback(doc, error):
+            if error:
+                raise error
+
+            results.append(doc)
+
+            if len(results) == 2:
+                # cancel iteration
+                return False
+
+        cx.test.test_collection.find(sort=[('s', 1)]).each(callback)
+        self.assertEventuallyEqual(
+            [
+                {'_id': 0, 's': hex(0)},
+                {'_id': 1, 's': hex(1)},
+            ],
+            lambda: results,
+        )
+
+        tornado.ioloop.IOLoop.instance().start()
+
+        # There are 200 docs, but we canceled after 2
+        self.assertEqual(2, len(results))
+
+    def test_find_to_list(self):
+        cx = self.async_connection()
+        results = []
+
+        def callback(docs, error):
+            if error:
+                raise error
+
+            results.append([doc['_id'] for doc in docs])
+
+            if len(results) == 2:
+                # cancel iteration
+                return False
+
+        cx.test.test_collection.find(
+            sort=[('_id', 1)], fields=['_id']
+        ).to_list(callback)
+
+#        self.assertEventuallyEqual([range(200)], lambda: results)
+        tornado.ioloop.IOLoop.instance().start()
+        self.assertEqual(1, len(results))
 
     def test_find_one(self):
         results = []
