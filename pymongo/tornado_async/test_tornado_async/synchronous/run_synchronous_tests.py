@@ -31,13 +31,17 @@ if __name__ == '__main__':
 
     # Exclude a test that hangs and prevents the run from completing - we should
     # fix the test for async, eventually
-    # TODO: fix test_multiprocessing
-    print 'WARNING: excluding test_multiprocessing, which would hang'
+    # TODO: fix these?
+    excluded_tests = [
+        'test_multiprocessing',
+        'test_ensure_unique_index_threaded',
+        'test_interrupt_signal',
+    ]
+
+    print 'WARNING: excluding some tests -- go in and fix them for async!'
+
     config = Config(
-        exclude=[
-            re.compile(r'test_multiprocessing'),
-            re.compile(r'test_ensure_unique_index_threaded'),
-        ]
+        exclude=[re.compile(et) for et in excluded_tests]
     )
 
     nose.run(defaultTest=this_dir, config=config)

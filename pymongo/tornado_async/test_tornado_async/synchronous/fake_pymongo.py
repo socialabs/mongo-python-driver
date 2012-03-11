@@ -183,6 +183,7 @@ class Connection(Fake):
         drop = super(Connection, self).__getattr__('drop_database')
         return drop(name_or_database)
 
+
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
     # except it wraps a TornadoReplicaSetConnection instead of a
@@ -255,47 +256,21 @@ class Cursor(object):
         self.args = args
         self.kwargs = kwargs
         self.tornado_cursor = None
-        self.data = deque()
+        self.data = None
 
     def __iter__(self):
         return self
 
-    def _next_batch(self):
-        outcome = {}
-
+    def next(self):
         if not self.tornado_cursor:
             # Start the query
-            self.tornado_cursor = loop_timeout(
-                kallable=lambda callback: self.tornado_coll.find(
-                    *self.args, callback=callback, **self.kwargs
-                ),
-                outcome=outcome,
-            )
-        else:
-            if not self.tornado_cursor.alive:
-                raise StopIteration
-
-            # Continue the query
-            loop_timeout(
-                kallable=self.tornado_cursor.get_more,
-                outcome=outcome,
+            self.tornado_cursor = self.tornado_coll.find(
+                *self.args, **self.kwargs
             )
 
-        IOLoop.instance().start()
-
-        if outcome.get('error'):
-            raise outcome['error']
-
-        self.data += outcome['result']
-
-    def next(self):
-        if self.data:
-            return self.data.popleft()
-
-        self._next_batch()
-
-        if len(self.data):
-            return self.data.popleft()
+        rv = loop_timeout(self.tornado_cursor.each)
+        if rv is not None:
+            return rv
         else:
             raise StopIteration
 
@@ -317,9 +292,6 @@ class Cursor(object):
         if outcome.get('error'):
             raise outcome['error']
 
-        # TODO: remove?:
-#        if outcome['result'].get("errmsg", "") == "ns missing":
-#            return 0
         return int(outcome['result']['n'])
 
     def distinct(self, key):
