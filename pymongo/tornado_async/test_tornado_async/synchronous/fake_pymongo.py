@@ -8,6 +8,7 @@ from tornado.ioloop import IOLoop
 # TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
 # everything should be called 'motor'?
 
+import bson
 import pymongo as sync_pymongo
 from pymongo.tornado_async import async
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
@@ -154,25 +155,41 @@ class Fake(object):
 
     __getitem__ = __getattr__
 
+    def __setattr__(self, key, value):
+        if key in ('document_class',):
+            async_attr = getattr(self, self.async_attr)
+            setattr(async_attr, key, value)
+        else:
+            object.__setattr__(self, key, value)
+
+    def __cmp__(self, other):
+        return cmp(
+            getattr(self, self.async_attr, None),
+            getattr(other, self.async_attr, None),
+        )
+
 
 class Connection(Fake):
     async_attr = '_tconn'
     async_connection_class = async.TornadoConnection
     async_ops = async.TornadoConnection.async_ops
+    HOST = 'localhost'
+    PORT = 27017
 
     def __init__(self, host=None, port=None, *args, **kwargs):
-        self.host = host
-        self.port = port
-        self._tconn = self.async_connection_class(host, port, *args, **kwargs)
+        # So that TestConnection.test_constants and test_types work
+        self.host = host if host is not None else self.HOST
+        self.port = port if port is not None else self.PORT
+        self._tconn = self.async_connection_class(
+            self.host, self.port, *args, **kwargs
+        )
 
         # Try to connect the TornadoConnection before continuing
         exc = ConnectionFailure(
             "fake_pymongo.Connection: Can't connect to %s:%s" % (host, port)
         )
-        loop_timeout(kallable=self._tconn.open, exc=exc)
 
-        # For unittests that examine this attribute
-        self.__pool = self._tconn.sync_connection._Connection__pool
+        loop_timeout(kallable=self._tconn.open, exc=exc)
 
     def drop_database(self, name_or_database):
         # Special case, since pymongo.Connection.drop_database does
@@ -183,6 +200,21 @@ class Connection(Fake):
         drop = super(Connection, self).__getattr__('drop_database')
         return drop(name_or_database)
 
+    # HACK!: For unittests that examine this attribute
+    @property
+    def _Connection__pool(self):
+        return self._tconn.sync_connection._Connection__pool
+
+    @property
+    def is_locked(self):
+        ops = self.admin.current_op()
+        return bool(ops.get('fsyncLock', 0))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._tconn.disconnect()
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
@@ -236,9 +268,6 @@ class Collection(Fake):
         else:
             return rv
 
-    def __cmp__(self, other):
-        return cmp(self._tcoll, other._tcoll)
-
     # Delegate to TornadoCollection's uuid_subtype property -- TornadoCollection
     # in turn delegates to pymongo.collection.Collection. This is all to get
     # test_uuid_subtype to pass.
@@ -251,12 +280,18 @@ class Collection(Fake):
     uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
 class Cursor(object):
-    def __init__(self, tornado_coll, *args, **kwargs):
+    def __init__(self, tornado_coll, spec=None, *args, **kwargs):
         self.tornado_coll = tornado_coll
         self.args = args
         self.kwargs = kwargs
         self.tornado_cursor = None
         self.data = None
+        if spec and "$query" in spec:
+            self.__spec = spec
+        elif spec:
+            self.__spec = {"$query": spec}
+        else:
+            self.__spec = {}
 
     def __iter__(self):
         return self
@@ -264,8 +299,12 @@ class Cursor(object):
     def next(self):
         if not self.tornado_cursor:
             # Start the query
+            spec = self.__spec
+            if "$query" not in spec:
+                spec = {"$query":spec}
+
             self.tornado_cursor = self.tornado_coll.find(
-                *self.args, **self.kwargs
+                spec, *self.args, **self.kwargs
             )
 
         rv = loop_timeout(self.tornado_cursor.each)
@@ -274,51 +313,49 @@ class Cursor(object):
         else:
             raise StopIteration
 
-    def count(self):
-        command = {"query": self.spec, "fields": self.fields}
-        outcome = {}
-        loop_timeout(
-            kallable=lambda callback: self.tornado_coll._tdb.command(
-                "count", self.tornado_coll.name,
-                allowable_errors=["ns missing"],
-                callback=callback,
-                **command
-            ),
-            outcome=outcome
-        )
+    def where(self, code):
+        if not isinstance(code, bson.code.Code):
+            code = bson.code.Code(code)
 
-        IOLoop.instance().start()
-
-        if outcome.get('error'):
-            raise outcome['error']
-
-        return int(outcome['result']['n'])
-
-    def distinct(self, key):
-        command = {"query": self.spec, "fields": self.fields, "key": key}
-        outcome = {}
-        loop_timeout(
-            kallable=lambda callback: self.tornado_coll._tdb.command(
-                "distinct", self.tornado_coll.name,
-                callback=callback,
-                **command
-            ),
-            outcome=outcome
-        )
-
-        IOLoop.instance().start()
-
-        if outcome.get('error'):
-            raise outcome['error']
-
-        return outcome['result']['values']
-
-    def explain(self):
-        if '$query' not in self.spec:
-            spec = {'$query': self.spec}
-        else:
-            spec = self.spec
-
-        spec['$explain'] = True
-
-        return synchronize(self.tornado_coll.find)(spec)[0]
+        self.__spec["$where"] = code
+        return self
+#
+#    def count(self):
+#        command = {"query": self.spec, "fields": self.fields}
+#        return loop_timeout(
+#            kallable=lambda callback: self.tornado_coll._tdb.command(
+#                "count", self.tornado_coll.name,
+#                allowable_errors=["ns missing"],
+#                callback=callback,
+#                **command
+#            )
+#        )
+#
+#    def distinct(self, key):
+#        command = {"query": self.spec, "fields": self.fields, "key": key}
+#        outcome = {}
+#        loop_timeout(
+#            kallable=lambda callback: self.tornado_coll._tdb.command(
+#                "distinct", self.tornado_coll.name,
+#                callback=callback,
+#                **command
+#            ),
+#            outcome=outcome
+#        )
+#
+#        IOLoop.instance().start()
+#
+#        if outcome.get('error'):
+#            raise outcome['error']
+#
+#        return outcome['result']['values']
+#
+#    def explain(self):
+#        if '$query' not in self.spec:
+#            spec = {'$query': self.spec}
+#        else:
+#            spec = self.spec
+#
+#        spec['$explain'] = True
+#
+#        return synchronize(self.tornado_coll.find)(spec)[0]

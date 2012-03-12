@@ -87,8 +87,8 @@ class TornadoTest(
         output = self.sync_cx.admin.command('serverStatus')
         return output.get('cursors', {}).get('totalOpen')
 
-    def async_connection(self):
-        cx = async.TornadoConnection(host, port)
+    def async_connection(self, *args, **kwargs):
+        cx = async.TornadoConnection(host, port, *args, **kwargs)
         loop = tornado.ioloop.IOLoop.instance()
 
         def connected(connection, error):
@@ -1218,6 +1218,43 @@ class TornadoTestBasic(TornadoTest):
         self.assertEqual([None], results[0])
         self.assertEqual([None], results[1])
 
+    def test_timeout(self):
+        # Launch two slow find_ones. The one with a timeout should get an error
+        loop = tornado.ioloop.IOLoop.instance()
+        no_timeout = self.async_connection()
+        timeout = self.async_connection(socketTimeoutMS=100)
+
+        results = []
+        query = {
+            '$where': delay(0.5),
+            '_id': 1,
+        }
+
+        def callback(result, error):
+            results.append({'result': result, 'error': error})
+
+        no_timeout.test.test_collection.find_one(query, callback=callback)
+        timeout.test.test_collection.find_one(query, callback=callback)
+
+        self.assertEventuallyEqual(
+            True,
+            lambda: isinstance(
+                results[0]['error'],
+                pymongo.errors.AutoReconnect
+            )
+        )
+
+        self.assertEventuallyEqual(
+            {'_id':1, 's':hex(1)},
+            lambda: results[1]['result']
+        )
+
+        loop.start()
+
+        # Make sure the delay completes before we call tearDown() and try to
+        # drop the collection
+        time.sleep(0.5)
+
 class TornadoSSLTest(TornadoTest):
     def test_no_ssl(self):
         if have_ssl:
@@ -1263,6 +1300,7 @@ class TornadoSSLTest(TornadoTest):
 
         cx.open(connected)
         loop.start()
+
 
 # TODO: test that save and insert are async somehow? MongoDB's database-wide
 #     write lock makes this hard. Maybe with two mongod instances.

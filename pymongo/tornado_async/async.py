@@ -19,16 +19,16 @@ Various methods on pymongo Cursor, like explain(), count(), distinct(), hint(),
 or where() on a cursor -- use arguments to find() or database commands directly
 instead.
 """
+
 import functools
 import inspect
 import socket
+import time
 
 import tornado.ioloop, tornado.iostream
 from tornado import stack_context
 import greenlet
 
-from bson.binary import OLD_UUID_SUBTYPE
-from bson.son import SON
 
 import pymongo
 from pymongo.errors import InvalidOperation
@@ -49,12 +49,56 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: convenience method for count()? How does Node do it?
 # TODO: maybe Tornado classes should inherit from pymongo classes after all
 # TODO: change all asserts into pymongo.error exceptions
+# TODO: set default timeout to None, document that, ensure we're doing
+#   timeouts as efficiently as possible
+# TODO: examine & document what connection and network timeouts mean here
 
 def check_callable(kallable, required=False):
     if required and not kallable:
         raise TypeError("callable is required")
     if kallable is not None and not callable(kallable):
         raise TypeError("callback must be callable")
+
+
+def tornado_sock_method(method):
+    @functools.wraps(method)
+    def _tornado_sock_method(self, *args, **kwargs):
+        child_gr = greenlet.getcurrent()
+        assert child_gr.parent, "Should be on child greenlet"
+
+        # We need to alter this value in inner functions, hence the list
+        self_timeout = self.timeout
+        timeout = [None]
+        loop = tornado.ioloop.IOLoop.instance()
+        if self_timeout:
+            def timeout_err():
+                timeout[0] = None
+                self.stream.close()
+                child_gr.throw(socket.timeout("timed out"))
+
+            timeout[0] = loop.add_timeout(
+                time.time() + self_timeout, timeout_err
+            )
+
+        # This is run by IOLoop on the main greenlet when socket has connected;
+        # switch back to child to continue processing
+        def callback(result=None, error=None):
+            if timeout[0] or not self_timeout:
+                # We didn't time out
+                if timeout[0]:
+                    loop.remove_timeout(timeout[0])
+
+                if error:
+                    child_gr.throw(error)
+                else:
+                    child_gr.switch(result)
+
+        method(self, *args, callback=callback, **kwargs)
+
+        # Resume main greenlet
+        return child_gr.parent.switch()
+
+    return _tornado_sock_method
 
 class TornadoSocket(object):
     """
@@ -66,6 +110,7 @@ class TornadoSocket(object):
     """
     def __init__(self, sock, use_ssl=False):
         self.use_ssl = use_ssl
+        self.timeout = None
         if self.use_ssl:
            self.stream = tornado.iostream.SSLIOStream(sock)
         else:
@@ -75,72 +120,32 @@ class TornadoSocket(object):
         self.stream.socket.setsockopt(*args, **kwargs)
 
     def settimeout(self, timeout):
-        """
-        Do nothing -- IOStream calls socket.setblocking(False), which does
-        settimeout(0.0). We must not allow pymongo to set timeout to some other
-        value (a positive number or None) or the socket will start blocking
-        again.
-        """
-        pass
+        # IOStream calls socket.setblocking(False), which does settimeout(0.0).
+        # We must not allow pymongo to set timeout to some other value (a
+        # positive number or None) or the socket will start blocking again.
+        # Instead, we simulate timeouts by interrupting ourselves with
+        # callbacks.
+        self.timeout = timeout
 
-    def connect(self, pair):
+    @tornado_sock_method
+    def connect(self, pair, callback):
         """
         @param pair: A tuple, (host, port)
         """
-        child_gr = greenlet.getcurrent()
-        assert child_gr.parent, "Should be on child greenlet"
+        self.stream.connect(pair, callback)
 
-        # This is run by IOLoop on the main greenlet when socket has connected;
-        # switch back to child to continue processing
-        def connect_callback():
-            child_gr.switch()
+    @tornado_sock_method
+    def sendall(self, data, callback):
+        self.stream.write(data, callback)
 
-        self.stream.connect(pair, callback=connect_callback)
-
-        # Resume main greenlet
-        child_gr.parent.switch()
-
-    def sendall(self, data):
-        child_gr = greenlet.getcurrent()
-        assert child_gr.parent, "Should be on child greenlet"
-
-        # This is run by IOLoop on the main greenlet when data has been sent;
-        # switch back to child to continue processing
-        def sendall_callback():
-            child_gr.switch()
-
-        self.stream.write(data, callback=sendall_callback)
-
-        # Resume main greenlet
-        child_gr.parent.switch()
-
-    def recv(self, num_bytes):
-        """
-        @param num_bytes:   Number of bytes to read from socket
-        @return:            Data received
-        """
-        child_gr = greenlet.getcurrent()
-        assert child_gr.parent, "Should be on child greenlet"
-
-        # This is run by IOLoop on the main greenlet when socket has connected;
-        # switch back to child to continue processing
-        def recv_callback(data):
-            child_gr.switch(data)
-
-        self.stream.read_bytes(num_bytes, callback=recv_callback)
-
-        # Resume main greenlet, returning the data received
-        return child_gr.parent.switch()
+    @tornado_sock_method
+    def recv(self, num_bytes, callback):
+        self.stream.read_bytes(num_bytes, callback)
 
     def close(self):
         self.stream.close()
 
     def fileno(self):
-        """
-        See connection._closed(sock), which checks if it can do select([sock])
-        without error to determine if the socket is closed. select() requires
-        a fileno() method on each object.
-        """
         return self.stream.socket.fileno()
 
     def __del__(self):
@@ -172,10 +177,12 @@ class TornadoPool(pymongo.pool.Pool):
             raise
 
         tornado_sock = TornadoSocket(s, use_ssl=self.use_ssl)
+        tornado_sock.settimeout(self.conn_timeout)
 
         # TornadoSocket will pause the current greenlet and resume it when
         # connection has completed
         tornado_sock.connect(pair or self.pair)
+        tornado_sock.settimeout(self.net_timeout)
         return tornado_sock
 
     def _request_key(self):
@@ -193,6 +200,7 @@ def asynchronize(sync_method, callback_required, sync_attr):
     # TODO doc
     # TODO: staticmethod of base class for Tornado objects, add some custom
     #   stuff, like Connection can't do anything before open()
+    @functools.wraps(sync_method)
     def method(self, *args, **kwargs):
         """
         @param self:    A TornadoConnection, TornadoDatabase, or
@@ -240,7 +248,7 @@ def asynchronize(sync_method, callback_required, sync_attr):
         # callback -- probably not a significant improvement....
         greenlet.greenlet(call_method).switch()
 
-    return functools.wraps(sync_method)(method)
+    return method
 
 
 current_request = None
@@ -255,6 +263,8 @@ class TornadoConnection(object):
         'server_info', 'database_names', 'drop_database', 'copy_database',
         'fsync', 'unlock',
     ])
+
+    wrapped_attrs = set(['document_class'])
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -274,23 +284,37 @@ class TornadoConnection(object):
         check_callable(callback)
 
         if self.connected:
-            callback(self, None)
+            if callback:
+                tornado.ioloop.IOLoop.instance().add_callback(
+                    lambda: callback(self, None)
+                )
             return
         
         def connect():
             # Run on child greenlet
             # TODO: can this use asynchronize()?
             error = None
+            # TODO: reconsider, doc
+            connectTimeoutMS = self._init_kwargs.get('connectTimeoutMS')
+            socketTimeoutMS = self._init_kwargs.get('socketTimeoutMS')
+            actual_timeout = max(connectTimeoutMS, socketTimeoutMS)
+
             try:
+                self._init_kwargs['socketTimeoutMS'] = actual_timeout
+
                 self.sync_connection = pymongo.Connection(
                     *self._init_args,
                     _pool_class=TornadoPool,
                     **self._init_kwargs
                 )
-                
+
                 self.connected = True
             except Exception, e:
                 error = e
+
+            if self.sync_connection:
+                # TODO: gross, and consider if what to do if it's an RSC
+                self.sync_connection._Connection__net_timeout = socketTimeoutMS
 
             if callback:
                 # Schedule callback to be executed on main greenlet, with
@@ -327,6 +351,12 @@ class TornadoConnection(object):
 
     __getitem__ = __getattr__
 
+    def __setattr__(self, key, value):
+        if key in self.wrapped_attrs:
+            setattr(self.sync_connection, key, value)
+        else:
+            object.__setattr__(self, key, value)
+
     def __repr__(self):
         return 'TornadoConnection(%s)' % (
             ','.join([
@@ -335,7 +365,13 @@ class TornadoConnection(object):
                 ','.join(['%s=%s' % (k, v) for k, v in self._init_kwargs.items()]),
                 ] if i
             ])
-            )
+        )
+
+    # TODO: refactor
+    def __cmp__(self, other):
+        if isinstance(other, TornadoConnection):
+            return cmp(self.sync_connection, other.sync_connection)
+        return NotImplemented
 
     # Special case -- this is a property on the synchronous collection
     def is_locked(self, callback):
@@ -497,8 +533,11 @@ class TornadoDatabase(object):
     def __repr__(self):
         return 'Tornado' + self.sync_database.__repr__()
 
+    # TODO: refactor
     def __cmp__(self, other):
-        return cmp(self.sync_database, other.sync_database)
+        if isinstance(other, TornadoDatabase):
+            return cmp(self.sync_database, other.sync_database)
+        return NotImplemented
 
 
 # Replace synchronous methods like 'command' with async versions
@@ -618,8 +657,11 @@ class TornadoCollection(object):
     def __repr__(self):
         return 'Tornado' + repr(self.sync_collection)
 
+    # TODO: refactor
     def __cmp__(self, other):
-        return cmp(self.sync_collection, other.sync_collection)
+        if isinstance(other, TornadoDatabase):
+            return cmp(self.sync_collection, other.sync_collection)
+        return NotImplemented
 
 
 # Replace synchronous methods like 'insert' or 'drop' with async versions
