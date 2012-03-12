@@ -1,4 +1,5 @@
 from collections import deque
+import collections
 import inspect
 import os
 import time
@@ -15,40 +16,29 @@ from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
 # So that synchronous unittests can import these names from fake_pymongo,
 # thinking it's really pymongo
-from pymongo import ASCENDING, DESCENDING, GEO2D, GEOHAYSTACK, ReadPreference
-
+from pymongo import (
+    ASCENDING, DESCENDING, GEO2D, GEOHAYSTACK, ReadPreference,
+    ALL, helpers, OFF, SLOW_ONLY
+)
 
 __all__ = [
     'ASCENDING', 'DESCENDING', 'GEO2D', 'GEOHAYSTACK', 'ReadPreference',
     'Connection', 'ReplicaSetConnection', 'Database', 'Collection',
-    'Cursor',
+    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY',
 ]
 
 
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
-#
-#class StopAndFail(object):
-#    # TODO: doc
-#    # TODO: unnecessary with IOLoop.remove_timeout()?
-#    def __init__(self, exc):
-#        self.exc = exc
-#        self.abort = False
-#
-#    def __call__(self, *args, **kwargs):
-#        if not self.abort:
-#            IOLoop.instance().stop()
-#            raise self.exc
-#
 
 # TODO: better name or iface, document
-def loop_timeout(kallable, exc=None, seconds=timeout_sec):
+def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     loop = IOLoop.instance()
     outcome = {}
 
     def raise_timeout_err():
         loop.stop()
-        outcome['error'] = exc or TimeoutError("timeout")
+        outcome['error'] = (exc or TimeoutError("timeout"))
 
     timeout = loop.add_timeout(time.time() + seconds, raise_timeout_err)
 
@@ -59,7 +49,8 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec):
         outcome['error'] = error
 
     kallable(callback)
-    IOLoop.instance().start()
+    assert not loop.running(), "Loop already running in method %s" % name
+    loop.start()
     if outcome.get('error'):
         raise outcome['error']
 
@@ -67,21 +58,21 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec):
 
 
 # Methods that don't take a 'safe' argument
-methods_without_safe_arg = {}
+methods_without_safe_arg = collections.defaultdict(set)
 
 for klass in (
     sync_pymongo.connection.Connection,
     sync_pymongo.database.Database,
     sync_pymongo.collection.Collection,
+    sync_pymongo.cursor.Cursor,
 ):
     for method_name, method in inspect.getmembers(
         klass,
         inspect.ismethod
     ):
         if 'safe' not in inspect.getargspec(method).args:
-            methods_without_safe_arg.setdefault(
-                'Tornado' + klass.__name__, set()
-            ).add(method.func_name)
+            methods = methods_without_safe_arg['Tornado' + klass.__name__]
+            methods.add(method.func_name)
 
 
 def synchronize(async_method):
@@ -106,6 +97,7 @@ def synchronize(async_method):
         try:
             rv = loop_timeout(
                 lambda cb: async_method(*args, callback=cb, **kwargs),
+                name=async_method.func_name
             )
         except OperationFailure:
             # Ignore OperationFailure for unsafe writes; synchronous pymongo
@@ -279,12 +271,15 @@ class Collection(Fake):
 
     uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
-class Cursor(object):
+class Cursor(Fake):
+    async_attr = 'tornado_cursor'
+    async_ops = async.TornadoCursor.async_ops
+
     def __init__(self, tornado_coll, spec=None, *args, **kwargs):
-        self.tornado_coll = tornado_coll
+        self._tcoll = tornado_coll
+        self._tcursor = None
         self.args = args
         self.kwargs = kwargs
-        self.tornado_cursor = None
         self.data = None
         if spec and "$query" in spec:
             self.__spec = spec
@@ -293,20 +288,25 @@ class Cursor(object):
         else:
             self.__spec = {}
 
-    def __iter__(self):
-        return self
-
-    def next(self):
-        if not self.tornado_cursor:
+    @property
+    def tornado_cursor(self):
+        if not self._tcursor:
             # Start the query
             spec = self.__spec
             if "$query" not in spec:
                 spec = {"$query":spec}
 
-            self.tornado_cursor = self.tornado_coll.find(
+            self._tcursor = self._tcoll.find(
                 spec, *self.args, **self.kwargs
             )
 
+        return self._tcursor
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        # The first access of tornado_cursor here will create the cursor
         rv = loop_timeout(self.tornado_cursor.each)
         if rv is not None:
             return rv

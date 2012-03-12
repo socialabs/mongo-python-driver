@@ -39,6 +39,7 @@ sys.path.insert(
 import pymongo
 from pymongo.objectid import ObjectId
 from pymongo.tornado_async import async
+from pymongo.son_manipulator import AutoReference, NamespaceInjector
 from pymongo.errors import InvalidOperation, ConfigurationError, \
     DuplicateKeyError
 
@@ -1255,6 +1256,81 @@ class TornadoTestBasic(TornadoTest):
         # drop the collection
         time.sleep(0.5)
 
+    def test_auto_ref_and_deref(self):
+        # Test same functionality as in PyMongo's test_database.py; the impl
+        # for async is a little complex so we should test that it works here,
+        # and not just rely on run_synchronous_tests to cover it.
+        cx = self.async_connection()
+        db = cx.test
+        db.add_son_manipulator(AutoReference(db))
+        db.add_son_manipulator(NamespaceInjector())
+
+        a = {"hello": u"world"}
+        b = {"test": a}
+        c = {"another test": b}
+
+        def step0():
+            db.a.remove({}, callback=step1)
+
+        def step1(result, error):
+            if error:
+                raise error
+            db.b.remove({}, callback=step2)
+
+        def step2(result, error):
+            if error:
+                raise error
+            db.c.remove({}, callback=step3)
+
+        def step3(result, error):
+            if error:
+                raise error
+            db.a.save(a, callback=step4)
+
+        def step4(result, error):
+            if error:
+                raise error
+            db.b.save(b, callback=step5)
+
+        def step5(result, error):
+            if error:
+                raise error
+            db.c.save(c, callback=step6)
+
+        def step6(result, error):
+            if error:
+                raise error
+            a["hello"] = "mike"
+            db.a.save(a, callback=step7)
+
+        results = {}
+
+        def step7(result, error):
+            if error:
+                raise error
+            db.a.find_one(callback=step8)
+
+        def step8(result, error):
+            if error:
+                raise error
+            results['a'] = result
+            db.b.find_one(callback=step9)
+
+        def step9(result, error):
+            if error:
+                raise error
+            results['b'] = result
+
+        self.assertEventuallyEqual(a, lambda: results['a'])
+        self.assertEventuallyEqual(a, lambda: results['b']["test"])
+        self.assertEventuallyEqual(a, lambda: self.sync_db.c.find_one()["another test"]["test"])
+        self.assertEventuallyEqual(b, lambda: self.sync_db.b.find_one())
+        self.assertEventuallyEqual(b, lambda: self.sync_db.c.find_one()["another test"])
+        self.assertEventuallyEqual(c, lambda: self.sync_db.c.find_one())
+
+        step0()
+        tornado.ioloop.IOLoop.instance().start()
+
 class TornadoSSLTest(TornadoTest):
     def test_no_ssl(self):
         if have_ssl:
@@ -1301,8 +1377,7 @@ class TornadoSSLTest(TornadoTest):
         cx.open(connected)
         loop.start()
 
-
-# TODO: test that save and insert are async somehow? MongoDB's database-wide
+# TODO: test that save and insert are async somehow? MongoDB's global
 #     write lock makes this hard. Maybe with two mongod instances.
 # TODO: test master/slave, shard, replica set
 # TODO: replicate asyncmongo's whole test suite?

@@ -255,7 +255,7 @@ current_request = None
 current_request_seq = 0
 
 
-# TODO: better name, with 'Mongo' in it!
+# TODO: better name, with 'Mongo' or 'Motor' in it!
 class TornadoConnection(object):
     # list of overridden async operations on a TornadoConnection instance
     async_ops = set([
@@ -285,9 +285,7 @@ class TornadoConnection(object):
 
         if self.connected:
             if callback:
-                tornado.ioloop.IOLoop.instance().add_callback(
-                    lambda: callback(self, None)
-                )
+                callback(self, None)
             return
         
         def connect():
@@ -674,6 +672,11 @@ for op in TornadoCollection.async_ops:
 
 
 class TornadoCursor(object):
+    # list of overridden async operations on a TornadoCursor instance
+    async_ops = set([
+        'count', 'distinct'
+    ])
+
     def __init__(self, cursor):
         """
         @param cursor:  Synchronous pymongo Cursor
@@ -690,7 +693,6 @@ class TornadoCursor(object):
         or getting more data from an existing cursor.
         @param callback:    function taking parameters (batch_size, error)
         """
-        check_callable(callback)
         if self.started and not self.alive:
             raise InvalidOperation(
                 "Can't call get_more() on an TornadoCursor that has been"
@@ -754,6 +756,9 @@ class TornadoCursor(object):
                     callback(None, None)
 
             self._get_more(got_more)
+        else:
+            # Complete
+            callback(None, None)
 
     def to_list(self, callback):
         """Get a list of documents. The caller is responsible for making sure
@@ -795,3 +800,9 @@ class TornadoCursor(object):
     def __del__(self):
         if self.alive:
             self.close()
+
+
+# Replace synchronous methods like 'count' or 'distinct' with async versions
+for op in TornadoCursor.async_ops:
+    sync_method = getattr(pymongo.cursor.Cursor, op)
+    setattr(TornadoCursor, op, asynchronize(sync_method, True, 'sync_cursor'))
