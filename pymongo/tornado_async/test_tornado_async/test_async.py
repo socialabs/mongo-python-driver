@@ -46,6 +46,7 @@ from pymongo.errors import InvalidOperation, ConfigurationError, \
 from test.utils import delay
 
 import tornado.ioloop
+from tornado import gen
 
 # Tornado testing tools
 from pymongo.tornado_async.test_tornado_async import eventually, puritanical
@@ -62,6 +63,8 @@ class TornadoTest(
     puritanical.PuritanicalTest,
     eventually.AssertEventuallyTest
 ):
+    longMessage = True
+
     def setUp(self):
         super(TornadoTest, self).setUp()
 
@@ -1262,73 +1265,46 @@ class TornadoTestBasic(TornadoTest):
         # and not just rely on run_synchronous_tests to cover it.
         cx = self.async_connection()
         db = cx.test
-        db.add_son_manipulator(AutoReference(db))
+        # TODO: this reveals a source of bugs for users: how to prevent them
+        # from instantiating an AutoReference with a TornadoDatabase instead of
+        # a Database?
+#        db.add_son_manipulator(AutoReference(db))
+        db.add_son_manipulator(AutoReference(db.sync_database))
         db.add_son_manipulator(NamespaceInjector())
 
-        a = {"hello": u"world"}
-        b = {"test": a}
-        c = {"another test": b}
-
-        def step0():
-            db.a.remove({}, callback=step1)
-
-        def step1(result, error):
+        def check(args):
+            result, error = args.args
             if error:
                 raise error
-            db.b.remove({}, callback=step2)
 
-        def step2(result, error):
-            if error:
-                raise error
-            db.c.remove({}, callback=step3)
+            return result
 
-        def step3(result, error):
-            if error:
-                raise error
-            db.a.save(a, callback=step4)
+        @gen.engine
+        def steps():
+            a = {"hello": u"world"}
+            b = {"test": a}
+            c = {"another test": b}
 
-        def step4(result, error):
-            if error:
-                raise error
-            db.b.save(b, callback=step5)
-
-        def step5(result, error):
-            if error:
-                raise error
-            db.c.save(c, callback=step6)
-
-        def step6(result, error):
-            if error:
-                raise error
+            check(args=(yield gen.Task(db.a.remove, {})))
+            check(args=(yield gen.Task(db.b.remove, {})))
+            check(args=(yield gen.Task(db.c.remove, {})))
+            check(args=(yield gen.Task(db.a.save, a)))
+            check(args=(yield gen.Task(db.b.save, b)))
+            check(args=(yield gen.Task(db.c.save, c)))
             a["hello"] = "mike"
-            db.a.save(a, callback=step7)
+            check(args=(yield gen.Task(db.a.save, a)))
+            result_a = check(args=(yield gen.Task(db.a.find_one)))
+            result_b = check(args=(yield gen.Task(db.b.find_one)))
+            result_c = check(args=(yield gen.Task(db.c.find_one)))
 
-        results = {}
+            self.assertEventuallyEqual(a, lambda: result_a)
+            self.assertEventuallyEqual(a, lambda: result_b["test"])
+            self.assertEventuallyEqual(a, lambda: result_c["another test"]["test"])
+            self.assertEventuallyEqual(b, lambda: result_b)
+            self.assertEventuallyEqual(b, lambda: result_c["another test"])
+            self.assertEventuallyEqual(c, lambda: result_c)
 
-        def step7(result, error):
-            if error:
-                raise error
-            db.a.find_one(callback=step8)
-
-        def step8(result, error):
-            if error:
-                raise error
-            results['a'] = result
-            db.b.find_one(callback=step9)
-
-        def step9(result, error):
-            if error:
-                raise error
-            results['b'] = result
-
-        self.assertEventuallyEqual(a, lambda: results['a'])
-        self.assertEventuallyEqual(a, lambda: results['b']["test"])
-        self.assertEventuallyEqual(a, lambda: self.sync_db.c.find_one()["another test"]["test"])
-        self.assertEventuallyEqual(b, lambda: self.sync_db.b.find_one())
-        self.assertEventuallyEqual(b, lambda: self.sync_db.c.find_one()["another test"])
-        self.assertEventuallyEqual(c, lambda: self.sync_db.c.find_one())
-
-        step0()
+        steps()
         tornado.ioloop.IOLoop.instance().start()
 
 class TornadoSSLTest(TornadoTest):

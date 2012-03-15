@@ -1,3 +1,4 @@
+import inspect
 import os
 import time
 import unittest
@@ -11,13 +12,14 @@ class AssertEventuallyTest(unittest.TestCase):
         # Callbacks registered with assertEventuallyEqual()
         self.assert_callbacks = set()
 
-#        # Clear callbacks from a previous run
-#        if ioloop.IOLoop.initialized():
-#            ioloop.IOLoop.instance()._callbacks = []
-
     def assertEventuallyEqual(
             self, expected, fn, msg=None, timeout_sec=None
     ):
+        frame_info = inspect.stack()[1]
+        comment = '%s:%s in %s' % (frame_info[1], frame_info[2], frame_info[3])
+        if msg is not None:
+            comment += ': ' + msg
+
         if timeout_sec is None:
             timeout_sec = 5
         timeout_sec = max(timeout_sec, float(os.environ.get('TIMEOUT_SEC', 0)))
@@ -28,7 +30,7 @@ class AssertEventuallyTest(unittest.TestCase):
             if args or kwargs:
                 pass
             try:
-                self.assertEqual(expected, fn(), msg)
+                self.assertEqual(expected, fn(), comment)
                 # Passed
                 self.assert_callbacks.remove(callback)
                 if not self.assert_callbacks:
