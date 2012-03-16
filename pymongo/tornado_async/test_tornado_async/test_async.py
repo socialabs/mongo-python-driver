@@ -53,6 +53,9 @@ from pymongo.tornado_async.test_tornado_async import eventually, puritanical
 
 # TODO: sphinx-compat?
 # TODO: test map_reduce and inline_map_reduce
+# TODO: test that a database called sync_connection, a collection called
+#   sync_database, a collection called foo.sync_collection can be accessed via
+#   [ ]
 
 
 host = os.environ.get("DB_IP", "localhost")
@@ -953,6 +956,12 @@ class TornadoTestBasic(TornadoTest):
         def callback(result, error):
             if error:
                 raise error
+
+            if not result:
+                # Done iterating
+                # TODO: turns out that passing None, None to the cb is a shitty
+                # and surprising interface, but what's better?
+                return
 
             results[0] += 1
             if results[0] < 1000:

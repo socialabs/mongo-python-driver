@@ -1,4 +1,3 @@
-from collections import deque
 import collections
 import inspect
 import os
@@ -11,6 +10,7 @@ from tornado.ioloop import IOLoop
 
 import bson
 import pymongo as sync_pymongo
+from pymongo import son_manipulator
 from pymongo.tornado_async import async
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
@@ -34,6 +34,7 @@ timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 # TODO: better name or iface, document
 def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     loop = IOLoop.instance()
+    assert not loop._callbacks
     outcome = {}
 
     def raise_timeout_err():
@@ -184,13 +185,12 @@ class Connection(Fake):
         loop_timeout(kallable=self._tconn.open, exc=exc)
 
     def drop_database(self, name_or_database):
-        # Special case, since pymongo.Connection.drop_database does
+        # Special case, since pymongo Connection.drop_database does
         # isinstance(name_or_database, database.Database)
         if isinstance(name_or_database, Database):
-            name_or_database = name_or_database._tdb.name
+            name_or_database = name_or_database._tcoll
 
-        drop = super(Connection, self).__getattr__('drop_database')
-        return drop(name_or_database)
+        synchronize(self._tconn.drop_database)(name_or_database)
 
     # HACK!: For unittests that examine this attribute
     @property
@@ -228,6 +228,25 @@ class Database(Fake):
         # Get a TornadoDatabase
         self._tdb = getattr(connection._tconn, name)
         assert isinstance(self._tdb, async.TornadoDatabase)
+
+    def add_son_manipulator(self, manipulator):
+        # TODO HACK prevent an AutoReference from using a fake Database,
+        # replace with pymongo Database
+        if isinstance(manipulator, son_manipulator.AutoReference):
+            db = manipulator._AutoReference__database
+            if isinstance(db, Database):
+                manipulator._AutoReference__database = db._tdb.sync_database
+
+        self._tdb.add_son_manipulator(manipulator)
+
+    def drop_collection(self, name_or_collection):
+        # Special case, since pymongo Database.drop_collection does
+        # isinstance(name_or_collection, collection.Collection)
+        if isinstance(name_or_collection, Collection):
+            name_or_collection = name_or_collection._tcoll
+
+        return synchronize(self._tdb.drop_collection)(name_or_collection)
+
 
 class Collection(Fake):
     # If async_ops changes, we'll need to update this

@@ -242,6 +242,10 @@ def asynchronize(sync_method, callback_required, sync_attr):
                 tornado.ioloop.IOLoop.instance().add_callback(
                     lambda: callback(result, error)
                 )
+            elif error:
+                # TODO: correct?
+                raise error
+
 
         # Start running the operation on a greenlet
         # TODO: a possible optimization that doesn't start a greenlet if no
@@ -259,9 +263,14 @@ current_request_seq = 0
 class TornadoConnection(object):
     # list of overridden async operations on a TornadoConnection instance
     async_ops = set([
-        'drop_database', 'database_names', 'close_cursor', 'kill_cursors',
-        'server_info', 'database_names', 'drop_database', 'copy_database',
-        'fsync', 'unlock',
+        'database_names', 'close_cursor', 'kill_cursors',
+        'server_info', 'copy_database', 'fsync', 'unlock',
+    ])
+
+    # operations for which a callback is required
+    # TODO: test all these w/ callbacks?
+    callback_ops = set([
+        'database_names', 'server_info', 'fsync', 'unlock'
     ])
 
     wrapped_attrs = set(['document_class'])
@@ -332,7 +341,7 @@ class TornadoConnection(object):
         Override pymongo Connection's attributes to replace blocking operations
         with async alternatives, and to get references to TornadoDatabase
         instances instead of Database.
-        @param name:            Like 'drop_database', 'database_names', ...
+        @param name:            Like 'database_names', 'server_info', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously, and requires a 'callback' kwarg
         """
@@ -416,6 +425,16 @@ class TornadoConnection(object):
         sync_connection.start_request()
         return RequestContext(sync_connection, request_id)
 
+    # TODO: doc why we need to override this
+    def drop_database(self, name_or_database, callback):
+        name = name_or_database
+        if isinstance(name, TornadoDatabase):
+            name = name.sync_database.name
+
+        sync_method = getattr(pymongo.connection.Connection, 'drop_database')
+        async_method = asynchronize(sync_method, True, 'sync_connection')
+        async_method(self, name, callback=callback)
+
 
 class RequestContext(stack_context.StackContext):
     def __init__(self, sync_connection, request_id):
@@ -451,7 +470,7 @@ class RequestContext(stack_context.StackContext):
         super(RequestContext, self).__init__(RequestContextFactoryFactory())
 
 
-# Replace synchronous methods like 'drop_database' with async versions
+# Replace synchronous methods like 'database_names' with async versions
 for op in TornadoConnection.async_ops:
     sync_method = getattr(pymongo.connection.Connection, op)
     setattr(TornadoConnection, op, asynchronize(
@@ -468,7 +487,7 @@ class TornadoReplicaSetConnection(object):
 class TornadoDatabase(object):
     # list of overridden async operations on a TornadoDatabase instance
     async_ops = set([
-        'create_collection', 'drop_collection', 'collection_names',
+        'create_collection', 'collection_names',
         'validate_collection', 'current_op', 'profiling_level',
         'set_profiling_level', 'profiling_info', 'error', 'last_status',
         'previous_error', 'reset_error_history', 'add_user', 'remove_user',
@@ -506,7 +525,7 @@ class TornadoDatabase(object):
         Override pymongo Database's attributes to replace blocking operations
         with async alternatives, and to get references to TornadoCollection
         instances instead of Database.
-        @param name:            Like 'drop_collection', 'collection_names', ...
+        @param name:            Like 'create_collection', 'collection_names', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
@@ -537,6 +556,15 @@ class TornadoDatabase(object):
             return cmp(self.sync_database, other.sync_database)
         return NotImplemented
 
+    # TODO: doc why we need to override this
+    def drop_collection(self, name_or_collection, callback):
+        name = name_or_collection
+        if isinstance(name, TornadoCollection):
+            name = name.sync_collection.name
+
+        sync_method = getattr(pymongo.database.Database, 'drop_collection')
+        async_method = asynchronize(sync_method, True, 'sync_database')
+        async_method(self, name, callback=callback)
 
 # Replace synchronous methods like 'command' with async versions
 for op in TornadoDatabase.async_ops:
