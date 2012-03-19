@@ -49,6 +49,10 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
         outcome['result'] = result
         outcome['error'] = error
 
+        # Special case: return False to stop iteration if this callback is
+        # being used in Motor's find().each()
+        return False
+
     kallable(callback)
     assert not loop.running(), "Loop already running in method %s" % name
     loop.start()
@@ -239,6 +243,7 @@ class Database(Fake):
 
         self._tdb.add_son_manipulator(manipulator)
 
+    # TODO: refactor
     def drop_collection(self, name_or_collection):
         # Special case, since pymongo Database.drop_collection does
         # isinstance(name_or_collection, collection.Collection)
@@ -246,6 +251,17 @@ class Database(Fake):
             name_or_collection = name_or_collection._tcoll
 
         return synchronize(self._tdb.drop_collection)(name_or_collection)
+
+    # TODO: refactor
+    def validate_collection(self, name_or_collection, *args, **kwargs):
+        # Special case, since pymongo Database.validate_collection does
+        # isinstance(name_or_collection, collection.Collection)
+        if isinstance(name_or_collection, Collection):
+            name_or_collection = name_or_collection._tcoll
+
+        return synchronize(self._tdb.validate_collection)(
+            name_or_collection, *args, **kwargs
+        )
 
 
 class Collection(Fake):

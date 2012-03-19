@@ -19,6 +19,7 @@ import os
 import time
 import unittest
 import datetime
+import types
 
 from nose.plugins.skip import SkipTest
 
@@ -51,11 +52,72 @@ from tornado import gen
 # Tornado testing tools
 from pymongo.tornado_async.test_tornado_async import eventually, puritanical
 
+
+# TODO: move to test tools, cleanup, make as many tests in here use @async_test_engine
+# as possible.
+def async_test_engine(timeout_sec=5):
+    if not isinstance(timeout_sec, int) and not isinstance(timeout_sec, float):
+        raise TypeError(
+            "Expected int or float, got %s\n"
+            "Use async_test_engine like:\n\t@async_test_engine()\n"
+            "or:\n\t@async_test_engine(5)" % (
+                repr(timeout_sec)
+            )
+        )
+
+    timeout_sec = max(timeout_sec, float(os.environ.get('TIMEOUT_SEC', 0)))
+    def decorator(func):
+        class AsyncTestRunner(gen.Runner):
+            def __init__(self, gen, timeout):
+                super(AsyncTestRunner, self).__init__(gen)
+                self.timeout = timeout
+
+            def run(self):
+                loop = tornado.ioloop.IOLoop.instance()
+                try:
+                    super(AsyncTestRunner, self).run()
+                except Exception:
+                    loop.remove_timeout(self.timeout)
+                    loop.stop()
+                    raise
+
+                if self.finished:
+                    loop.remove_timeout(self.timeout)
+                    loop.stop()
+
+        @functools.wraps(func)
+        def _async_test(self):
+            loop = tornado.ioloop.IOLoop.instance()
+
+            def on_timeout():
+                loop.stop()
+                raise AssertionError("%s timed out" % func)
+
+            timeout = loop.add_timeout(time.time() + timeout_sec, on_timeout)
+
+            gen = func(self)
+            assert isinstance(gen, types.GeneratorType)
+            AsyncTestRunner(gen, timeout).run()
+
+            loop.start()
+        return _async_test
+    return decorator
+
+
 # TODO: sphinx-compat?
 # TODO: test map_reduce and inline_map_reduce
 # TODO: test that a database called sync_connection, a collection called
 #   sync_database, a collection called foo.sync_collection can be accessed via
 #   [ ]
+
+
+# TODO: rename this and make it useful to app devs who use Motor
+def check(args):
+    result, error = args.args
+    if error:
+        raise error
+
+    return result
 
 
 host = os.environ.get("DB_IP", "localhost")
@@ -559,6 +621,19 @@ class TornadoTestBasic(TornadoTest):
 
         tornado.ioloop.IOLoop.instance().start()
 
+    @async_test_engine()
+    def test_count(self):
+        coll = self.async_connection().test.test_collection
+        self.assertEqual(
+            200,
+            check(args=(yield gen.Task(coll.find().count)))
+        )
+
+        self.assertEqual(
+            100,
+            check(args=(yield gen.Task(coll.find({'_id': {'$gt': 99}}).count)))
+        )
+
     def test_cursor_close(self):
         """
         The flow here is complex; we're testing that a cursor can be explicitly
@@ -577,6 +652,8 @@ class TornadoTestBasic(TornadoTest):
                 raise error
 
             cursor.close()
+            # TODO: this could use async_test_engine if I write a gen.Task that
+            # pauses for a time
             loop.add_timeout(time.time() + .1, loop.stop)
 
             # Cancel iteration, so the cursor isn't exhausted
@@ -588,28 +665,20 @@ class TornadoTestBasic(TornadoTest):
         # Start the find(), the callback will close the cursor
         loop.start()
 
+    @async_test_engine()
     def test_update(self):
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.update(
+        cx = self.async_connection()
+        result = check(args=(yield gen.Task(cx.test.test_collection.update,
             {'_id': 5},
             {'$set': {'foo': 'bar'}},
-            callback=callback,
-        )
+        )))
 
-        self.assertEventuallyEqual(1, lambda: results[0]['ok'])
-        self.assertEventuallyEqual(True, lambda: results[0]['updatedExisting'])
-        self.assertEventuallyEqual(1, lambda: results[0]['n'])
-        self.assertEventuallyEqual(None, lambda: results[0]['err'])
+        self.assertEqual(1, result['ok'])
+        self.assertEqual(True, result['updatedExisting'])
+        self.assertEqual(1, result['n'])
+        self.assertEqual(None, result['err'])
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_update_bad(self):
         """
         Violate a unique index, make sure we handle error well
@@ -621,15 +690,19 @@ class TornadoTestBasic(TornadoTest):
             self.assertEqual(None, result)
             results.append(result)
 
-        self.async_connection().test.test_collection.update(
-            {'_id': 5},
-            {'$set': {'s': hex(4)}}, # There's already a document with s: hex(4)
-            callback=callback,
-        )
+        cx = self.async_connection()
 
-        self.assertEventuallyEqual(None, lambda: results[0])
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
+        try:
+            # There's already a document with s: hex(4)
+            check(args=(yield gen.Task(
+                cx.test.test_collection.update,
+                {'_id': 5},
+                {'$set': {'s': hex(4)}},
+            )))
+        except DuplicateKeyError:
+            pass
+        else:
+            self.fail("DuplicateKeyError not raised")
 
     def test_update_callback(self):
         cx = self.async_connection()
@@ -1280,13 +1353,6 @@ class TornadoTestBasic(TornadoTest):
 #        db.add_son_manipulator(AutoReference(db))
         db.add_son_manipulator(AutoReference(db.sync_database))
         db.add_son_manipulator(NamespaceInjector())
-
-        def check(args):
-            result, error = args.args
-            if error:
-                raise error
-
-            return result
 
         @gen.engine
         def steps():

@@ -488,7 +488,7 @@ class TornadoDatabase(object):
     # list of overridden async operations on a TornadoDatabase instance
     async_ops = set([
         'create_collection', 'collection_names',
-        'validate_collection', 'current_op', 'profiling_level',
+        'current_op', 'profiling_level',
         'set_profiling_level', 'profiling_info', 'error', 'last_status',
         'previous_error', 'reset_error_history', 'add_user', 'remove_user',
         'authenticate', 'logout', 'dereference', 'eval', 'command',
@@ -496,7 +496,7 @@ class TornadoDatabase(object):
 
     # operations for which a callback is required
     callback_ops = set([
-        'collection_names', 'validate_collection', 'current_op',
+        'collection_names', 'current_op',
         'profiling_level', 'profiling_info', 'error', 'last_status',
         'previous_error', 'dereference', 'eval',
     ])
@@ -556,7 +556,8 @@ class TornadoDatabase(object):
             return cmp(self.sync_database, other.sync_database)
         return NotImplemented
 
-    # TODO: doc why we need to override this
+    # TODO: doc why we need to override this, refactor
+    # TODO: test callback-checking in drop_collection
     def drop_collection(self, name_or_collection, callback):
         name = name_or_collection
         if isinstance(name, TornadoCollection):
@@ -565,6 +566,21 @@ class TornadoDatabase(object):
         sync_method = getattr(pymongo.database.Database, 'drop_collection')
         async_method = asynchronize(sync_method, True, 'sync_database')
         async_method(self, name, callback=callback)
+
+    # TODO: doc why we need to override this, refactor
+    # TODO: test callback-checking in validate_collection
+    def validate_collection(self, name_or_collection, *args, **kwargs):
+        callback = kwargs.get('callback')
+        check_callable(callback, required=True)
+
+        name = name_or_collection
+        if isinstance(name, TornadoCollection):
+            name = name.sync_collection.name
+
+        sync_method = getattr(pymongo.database.Database, 'validate_collection')
+        async_method = asynchronize(sync_method, True, 'sync_database')
+        async_method(self, name, callback=callback)
+
 
 # Replace synchronous methods like 'command' with async versions
 for op in TornadoDatabase.async_ops:
