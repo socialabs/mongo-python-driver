@@ -781,12 +781,16 @@ class TornadoCursor(object):
                     self.each(callback)
                 else:
                     # Complete
-                    callback(None, None)
+                    tornado.ioloop.IOLoop.instance().add_callback(
+                        lambda: callback(None, None)
+                    )
 
             self._get_more(got_more)
         else:
             # Complete
-            callback(None, None)
+            tornado.ioloop.IOLoop.instance().add_callback(
+                lambda: callback(None, None)
+            )
 
     def to_list(self, callback):
         """Get a list of documents. The caller is responsible for making sure

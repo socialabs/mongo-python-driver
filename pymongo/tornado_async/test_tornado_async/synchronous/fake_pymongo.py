@@ -34,7 +34,7 @@ timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 # TODO: better name or iface, document
 def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     loop = IOLoop.instance()
-    assert not loop._callbacks
+    loop._callbacks[:] = []
     outcome = {}
 
     def raise_timeout_err():
