@@ -33,6 +33,7 @@ if __name__ == '__main__':
     # fix the test for async, eventually
     # TODO: fix these, or implement a Motor-specific test that exercises the
     # same features as each of these
+    # TODO: document these variations and omissions b/w PyMongo and the Motor API
     excluded_tests = [
         'test_multiprocessing',
         'test_ensure_unique_index_threaded',
@@ -40,6 +41,10 @@ if __name__ == '__main__':
         'test_repr',
         'test_with_start_request',
         'test_fork',
+
+        # No point supporting these in Motor
+        'test_system_js',
+        'test_system_js_list',
     ]
 
     print 'WARNING: excluding some tests -- go in and fix them for async!'

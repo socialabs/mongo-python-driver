@@ -192,7 +192,7 @@ class Connection(Fake):
         # Special case, since pymongo Connection.drop_database does
         # isinstance(name_or_database, database.Database)
         if isinstance(name_or_database, Database):
-            name_or_database = name_or_database._tcoll
+            name_or_database = name_or_database._tdb
 
         synchronize(self._tconn.drop_database)(name_or_database)
 
@@ -211,6 +211,7 @@ class Connection(Fake):
 
     def __exit__(self, *args):
         self._tconn.disconnect()
+
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
@@ -243,7 +244,7 @@ class Database(Fake):
 
         self._tdb.add_son_manipulator(manipulator)
 
-    # TODO: refactor
+    # TODO: refactor, maybe something like fix_incoming or fix_outgoing?
     def drop_collection(self, name_or_collection):
         # Special case, since pymongo Database.drop_collection does
         # isinstance(name_or_collection, collection.Collection)
@@ -262,6 +263,16 @@ class Database(Fake):
         return synchronize(self._tdb.validate_collection)(
             name_or_collection, *args, **kwargs
         )
+
+    # TODO: refactor
+    def create_collection(self, name, *args, **kwargs):
+        # Special case, since TornadoDatabase.create_collection returns a
+        # TornadoCollection
+        collection = synchronize(self._tdb.create_collection)(name, *args, **kwargs)
+        if isinstance(collection, async.TornadoCollection):
+            collection = Collection(self, name)
+
+        return collection
 
 
 class Collection(Fake):
@@ -306,55 +317,40 @@ class Collection(Fake):
 
     uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
+
 class Cursor(Fake):
     async_attr = 'tornado_cursor'
     async_ops = async.TornadoCursor.async_ops
 
-    def __init__(self, tornado_coll, spec=None, *args, **kwargs):
-        self._tcoll = tornado_coll
-        self._tcursor = None
-        self.args = args
-        self.kwargs = kwargs
-        self.data = None
-        if spec and "$query" in spec:
-            self.__spec = spec
-        elif spec:
-            self.__spec = {"$query": spec}
-        else:
-            self.__spec = {}
-
-    @property
-    def tornado_cursor(self):
-        if not self._tcursor:
-            # Start the query
-            spec = self.__spec
-            if "$query" not in spec:
-                spec = {"$query":spec}
-
-            self._tcursor = self._tcoll.find(
-                spec, *self.args, **self.kwargs
-            )
-
-        return self._tcursor
+    def __init__(self, tornado_coll, *args, **kwargs):
+        self.tornado_cursor = tornado_coll.find(*args, **kwargs)
 
     def __iter__(self):
         return self
 
     def next(self):
-        # The first access of tornado_cursor here will create the cursor
         rv = loop_timeout(self.tornado_cursor.each)
         if rv is not None:
             return rv
         else:
             raise StopIteration
 
+    # TODO: refactor these
     def where(self, code):
-        if not isinstance(code, bson.code.Code):
-            code = bson.code.Code(code)
-
-        self.__spec["$where"] = code
+        self.tornado_cursor.where(code)
         return self
-#
+
+    def sort(self, *args, **kwargs):
+        self.tornado_cursor.sort(*args, **kwargs)
+        return self
+
+    def explain(self):
+        return loop_timeout(self.tornado_cursor.explain)
+
+    def __getitem__(self, item):
+        rv = loop_timeout(self.tornado_cursor.to_list)
+        return rv[item]
+
 #    def count(self):
 #        command = {"query": self.spec, "fields": self.fields}
 #        return loop_timeout(
@@ -384,13 +380,3 @@ class Cursor(Fake):
 #            raise outcome['error']
 #
 #        return outcome['result']['values']
-#
-#    def explain(self):
-#        if '$query' not in self.spec:
-#            spec = {'$query': self.spec}
-#        else:
-#            spec = self.spec
-#
-#        spec['$explain'] = True
-#
-#        return synchronize(self.tornado_coll.find)(spec)[0]

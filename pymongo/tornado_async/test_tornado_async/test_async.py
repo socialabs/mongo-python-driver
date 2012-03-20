@@ -111,9 +111,10 @@ def async_test_engine(timeout_sec=5):
 #   [ ]
 
 
-# TODO: rename this and make it useful to app devs who use Motor
-def check(args):
-    result, error = args.args
+# TODO: rename this and make it useful to app devs who use Motor, probably
+#   make a new Task like motor.Op that does this automatically
+def check(task):
+    result, error = task.args
     if error:
         raise error
 
@@ -420,6 +421,28 @@ class TornadoTestBasic(TornadoTest):
 
         tornado.ioloop.IOLoop.instance().start()
 
+    @async_test_engine()
+    def test_find_where(self):
+        # Check that $where clauses work
+        coll = self.async_connection().test.test_collection
+        self.assertEqual(
+            200,
+            len(check(task=(yield gen.Task(coll.find().to_list))))
+        )
+
+        # Get the one doc with _id of 8
+        where = 'this._id == 2 * 4'
+        res0 = check(task=(yield gen.Task(
+            coll.find({'$where': where}).to_list
+        )))
+        self.assertEqual(1, len(res0))
+        self.assertEqual(8, res0[0]['_id'])
+
+        res1 = check(task=(yield gen.Task(
+            coll.find().where(where).to_list
+        )))
+        self.assertEqual(res0, res1)
+
     def test_find_callback(self):
         cx = self.async_connection()
         cursor = cx.test.test_collection.find()
@@ -626,12 +649,37 @@ class TornadoTestBasic(TornadoTest):
         coll = self.async_connection().test.test_collection
         self.assertEqual(
             200,
-            check(args=(yield gen.Task(coll.find().count)))
+            check(task=(yield gen.Task(coll.find().count)))
         )
 
         self.assertEqual(
             100,
-            check(args=(yield gen.Task(coll.find({'_id': {'$gt': 99}}).count)))
+            check(task=(yield gen.Task(coll.find({'_id': {'$gt': 99}}).count)))
+        )
+
+        where = 'this._id % 2 == 0 && this._id >= 50'
+        self.assertEqual(
+            75,
+            check(task=(yield gen.Task(coll.find({'$where': where}).count)))
+        )
+
+        self.assertEqual(
+            75,
+            check(task=(yield gen.Task(coll.find().where(where).count)))
+        )
+
+        self.assertEqual(
+            25,
+            check(task=(yield gen.Task(coll.find(
+                {'_id': {'$lt': 100}}
+            ).where(where).count)))
+        )
+
+        self.assertEqual(
+            25,
+            check(task=(yield gen.Task(coll.find(
+                {'_id': {'$lt': 100}, '$where': where}
+            ).count)))
         )
 
     def test_cursor_close(self):
@@ -668,7 +716,7 @@ class TornadoTestBasic(TornadoTest):
     @async_test_engine()
     def test_update(self):
         cx = self.async_connection()
-        result = check(args=(yield gen.Task(cx.test.test_collection.update,
+        result = check(task=(yield gen.Task(cx.test.test_collection.update,
             {'_id': 5},
             {'$set': {'foo': 'bar'}},
         )))
@@ -694,7 +742,7 @@ class TornadoTestBasic(TornadoTest):
 
         try:
             # There's already a document with s: hex(4)
-            check(args=(yield gen.Task(
+            check(task=(yield gen.Task(
                 cx.test.test_collection.update,
                 {'_id': 5},
                 {'$set': {'s': hex(4)}},
@@ -1360,17 +1408,17 @@ class TornadoTestBasic(TornadoTest):
             b = {"test": a}
             c = {"another test": b}
 
-            check(args=(yield gen.Task(db.a.remove, {})))
-            check(args=(yield gen.Task(db.b.remove, {})))
-            check(args=(yield gen.Task(db.c.remove, {})))
-            check(args=(yield gen.Task(db.a.save, a)))
-            check(args=(yield gen.Task(db.b.save, b)))
-            check(args=(yield gen.Task(db.c.save, c)))
+            check(task=(yield gen.Task(db.a.remove, {})))
+            check(task=(yield gen.Task(db.b.remove, {})))
+            check(task=(yield gen.Task(db.c.remove, {})))
+            check(task=(yield gen.Task(db.a.save, a)))
+            check(task=(yield gen.Task(db.b.save, b)))
+            check(task=(yield gen.Task(db.c.save, c)))
             a["hello"] = "mike"
-            check(args=(yield gen.Task(db.a.save, a)))
-            result_a = check(args=(yield gen.Task(db.a.find_one)))
-            result_b = check(args=(yield gen.Task(db.b.find_one)))
-            result_c = check(args=(yield gen.Task(db.c.find_one)))
+            check(task=(yield gen.Task(db.a.save, a)))
+            result_a = check(task=(yield gen.Task(db.a.find_one)))
+            result_b = check(task=(yield gen.Task(db.b.find_one)))
+            result_c = check(task=(yield gen.Task(db.c.find_one)))
 
             self.assertEventuallyEqual(a, lambda: result_a)
             self.assertEventuallyEqual(a, lambda: result_b["test"])

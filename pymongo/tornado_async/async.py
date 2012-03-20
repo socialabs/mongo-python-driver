@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tornado asynchronous Python driver for MongoDB.
-
-Not implemented:
-Various methods on pymongo Cursor, like explain(), count(), distinct(), hint(),
-or where() on a cursor -- use arguments to find() or database commands directly
-instead.
-"""
+"""Tornado asynchronous Python driver for MongoDB."""
 
 import functools
 import inspect
@@ -155,6 +149,7 @@ class TornadoSocket(object):
 class TornadoPool(pymongo.pool.Pool):
     """A simple connection pool of TornadoSockets.
     """
+    # TODO: move to get_connection() after merging Bernie's pool fix?
     def connect(self, pair):
         """Connect to Mongo and return a new connected TornadoSocket.
         """
@@ -190,6 +185,8 @@ class TornadoPool(pymongo.pool.Pool):
         return current_request
 
 
+# TODO: a better api would be asynchronize(self, sync_method, callback_required),
+#   and just an an 'async_attr' class attribute like 'sync_database'
 def asynchronize(sync_method, callback_required, sync_attr):
     """
     @param sync_method: unbound method of a pymongo Collection, Database,
@@ -259,9 +256,24 @@ current_request = None
 current_request_seq = 0
 
 
+class TornadoBase(object):
+    sync_attr = None
+
+    def __cmp__(self, other):
+        if isinstance(other, self.__class__):
+            return cmp(
+                getattr(self, self.sync_attr, None),
+                getattr(other, self.sync_attr, None)
+            )
+        return NotImplemented
+
+
 # TODO: better name, with 'Mongo' or 'Motor' in it!
-class TornadoConnection(object):
+class TornadoConnection(TornadoBase):
+    sync_attr = 'sync_connection'
     # list of overridden async operations on a TornadoConnection instance
+    # TODO: for all async_ops and callback_ops, auto-gen Sphinx documentation
+    # that pulls from PyMongo
     async_ops = set([
         'database_names', 'close_cursor', 'kill_cursors',
         'server_info', 'copy_database', 'fsync', 'unlock',
@@ -301,14 +313,8 @@ class TornadoConnection(object):
             # Run on child greenlet
             # TODO: can this use asynchronize()?
             error = None
-            # TODO: reconsider, doc
-            connectTimeoutMS = self._init_kwargs.get('connectTimeoutMS')
-            socketTimeoutMS = self._init_kwargs.get('socketTimeoutMS')
-            actual_timeout = max(connectTimeoutMS, socketTimeoutMS)
 
             try:
-                self._init_kwargs['socketTimeoutMS'] = actual_timeout
-
                 self.sync_connection = pymongo.Connection(
                     *self._init_args,
                     _pool_class=TornadoPool,
@@ -318,10 +324,6 @@ class TornadoConnection(object):
                 self.connected = True
             except Exception, e:
                 error = e
-
-            if self.sync_connection:
-                # TODO: gross, and consider if what to do if it's an RSC
-                self.sync_connection._Connection__net_timeout = socketTimeoutMS
 
             if callback:
                 # Schedule callback to be executed on main greenlet, with
@@ -374,12 +376,6 @@ class TornadoConnection(object):
             ])
         )
 
-    # TODO: refactor
-    def __cmp__(self, other):
-        if isinstance(other, TornadoConnection):
-            return cmp(self.sync_connection, other.sync_connection)
-        return NotImplemented
-
     # Special case -- this is a property on the synchronous collection
     def is_locked(self, callback):
         def inner_cb(result, error):
@@ -431,7 +427,7 @@ class TornadoConnection(object):
         if isinstance(name, TornadoDatabase):
             name = name.sync_database.name
 
-        sync_method = getattr(pymongo.connection.Connection, 'drop_database')
+        sync_method = pymongo.connection.Connection.drop_database
         async_method = asynchronize(sync_method, True, 'sync_connection')
         async_method(self, name, callback=callback)
 
@@ -478,17 +474,18 @@ for op in TornadoConnection.async_ops:
     )
 
 
-class TornadoReplicaSetConnection(object):
+class TornadoReplicaSetConnection(TornadoBase):
     def __init__(self, *args, **kwargs):
         # TODO
         pass
 
 
-class TornadoDatabase(object):
+class TornadoDatabase(TornadoBase):
+    sync_attr = 'sync_database'
+
     # list of overridden async operations on a TornadoDatabase instance
     async_ops = set([
-        'create_collection', 'collection_names',
-        'current_op', 'profiling_level',
+        'collection_names', 'current_op', 'profiling_level',
         'set_profiling_level', 'profiling_info', 'error', 'last_status',
         'previous_error', 'reset_error_history', 'add_user', 'remove_user',
         'authenticate', 'logout', 'dereference', 'eval', 'command',
@@ -525,7 +522,7 @@ class TornadoDatabase(object):
         Override pymongo Database's attributes to replace blocking operations
         with async alternatives, and to get references to TornadoCollection
         instances instead of Database.
-        @param name:            Like 'create_collection', 'collection_names', ...
+        @param name:            Like 'command', 'collection_names', ...
         @return:                A proxy method that will implement the operation
                                 asynchronously if provided a callback
         """
@@ -550,12 +547,6 @@ class TornadoDatabase(object):
     def __repr__(self):
         return 'Tornado' + self.sync_database.__repr__()
 
-    # TODO: refactor
-    def __cmp__(self, other):
-        if isinstance(other, TornadoDatabase):
-            return cmp(self.sync_database, other.sync_database)
-        return NotImplemented
-
     # TODO: doc why we need to override this, refactor
     # TODO: test callback-checking in drop_collection
     def drop_collection(self, name_or_collection, callback):
@@ -563,7 +554,7 @@ class TornadoDatabase(object):
         if isinstance(name, TornadoCollection):
             name = name.sync_collection.name
 
-        sync_method = getattr(pymongo.database.Database, 'drop_collection')
+        sync_method = pymongo.database.Database.drop_collection
         async_method = asynchronize(sync_method, True, 'sync_database')
         async_method(self, name, callback=callback)
 
@@ -577,9 +568,31 @@ class TornadoDatabase(object):
         if isinstance(name, TornadoCollection):
             name = name.sync_collection.name
 
-        sync_method = getattr(pymongo.database.Database, 'validate_collection')
+        sync_method = pymongo.database.Database.validate_collection
         async_method = asynchronize(sync_method, True, 'sync_database')
         async_method(self, name, callback=callback)
+
+    # TODO: test that this raises an error if collection exists in Motor, and
+    # test creating capped coll
+    def create_collection(self, name, *args, **kwargs):
+        # We need to override create_collection specially, rather than simply
+        # include it in async_ops, because we have to wrap the Collection it
+        # returns in a TornadoCollection.
+        callback = kwargs.get('callback')
+        check_callable(callback, required=False)
+        if 'callback' in kwargs:
+            del kwargs['callback']
+
+        sync_method = pymongo.database.Database.create_collection
+        async_method = asynchronize(sync_method, False, 'sync_database')
+
+        def cb(collection, error):
+            if isinstance(collection, pymongo.collection.Collection):
+                collection = TornadoCollection(self, name)
+
+            callback(collection, error)
+
+        async_method(self, name, *args, callback=cb, **kwargs)
 
 
 # Replace synchronous methods like 'command' with async versions
@@ -590,7 +603,9 @@ for op in TornadoDatabase.async_ops:
         'sync_database'))
 
 
-class TornadoCollection(object):
+class TornadoCollection(TornadoBase):
+    sync_attr = 'sync_collection'
+
     # list of overridden async operations on a TornadoCollection instance
     async_ops = set([
         'update', 'insert', 'remove', 'create_index', 'index_information',
@@ -699,12 +714,6 @@ class TornadoCollection(object):
     def __repr__(self):
         return 'Tornado' + repr(self.sync_collection)
 
-    # TODO: refactor
-    def __cmp__(self, other):
-        if isinstance(other, TornadoDatabase):
-            return cmp(self.sync_collection, other.sync_collection)
-        return NotImplemented
-
 
 # Replace synchronous methods like 'insert' or 'drop' with async versions
 for op in TornadoCollection.async_ops:
@@ -715,7 +724,8 @@ for op in TornadoCollection.async_ops:
     ))
 
 
-class TornadoCursor(object):
+# TODO: hint(), etc.
+class TornadoCursor(TornadoBase):
     # list of overridden async operations on a TornadoCursor instance
     async_ops = set([
         'count', 'distinct'
@@ -833,6 +843,19 @@ class TornadoCursor(object):
                 callback(the_list, None)
 
         self.each(for_each)
+
+    # TODO: refactor these
+    def where(self, code):
+        self.sync_cursor.where(code)
+        return self
+
+    def sort(self, *args, **kwargs):
+        self.sync_cursor.sort(*args, **kwargs)
+        return self
+
+    def explain(self, callback):
+        async = asynchronize(pymongo.cursor.Cursor.explain, True, 'sync_cursor')
+        async(self, callback=callback)
 
     @property
     def alive(self):
