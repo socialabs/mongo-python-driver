@@ -46,6 +46,7 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: set default timeout to None, document that, ensure we're doing
 #   timeouts as efficiently as possible
 # TODO: examine & document what connection and network timeouts mean here
+# TODO: verify cursors are closed ASAP
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -826,6 +827,7 @@ class TornadoCursor(TornadoBase):
 
         @param callback: function taking (documents, error)
         """
+        # TODO: error if tailable
         check_callable(callback, required=True)
         the_list = []
 
