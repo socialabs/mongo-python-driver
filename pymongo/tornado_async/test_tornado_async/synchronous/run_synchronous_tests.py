@@ -5,6 +5,9 @@ from os import path
 import re
 import fake_pymongo
 
+# TODO: running this file without a test-module name does nothing; it should run
+#   all PyMongo tests
+
 if __name__ == '__main__':
     # Monkey-patch all pymongo's unittests so they think our fake pymongo is the
     # real one

@@ -1,3 +1,23 @@
+# Copyright 2012 10gen, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Fake PyMongo implementation built on top of Motor, for the sole purpose of
+checking that Motor passes the same unittests as PyMongo.
+
+DO NOT USE THIS MODULE.
+"""
+
 import collections
 import inspect
 import os
@@ -8,11 +28,12 @@ from tornado.ioloop import IOLoop
 # TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
 # everything should be called 'motor'?
 
-import bson
 import pymongo as sync_pymongo
 from pymongo import son_manipulator
 from pymongo.tornado_async import async
+from pymongo.tornado_async.delegate import *
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
+
 
 # So that synchronous unittests can import these names from fake_pymongo,
 # thinking it's really pymongo
@@ -32,6 +53,7 @@ timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
 
 # TODO: better name or iface, document
+# TODO: maybe just get rid of this and put it all in synchronize()?
 def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     loop = IOLoop.instance()
     loop._callbacks[:] = []
@@ -80,39 +102,90 @@ for klass in (
             methods.add(method.func_name)
 
 
-def synchronize(async_method):
-    """
-    @param async_method:  An asynchronous method defined on a TornadoConnection,
-                          TornadoDatabase, etc.
-    @return:              A synchronous wrapper around the method
-    """
-    def synchronized_method(*args, **kwargs):
-        assert 'callback' not in kwargs
-        class_name = async_method.im_self.__class__.__name__
-        has_safe_arg = (
-            async_method.func_name not in methods_without_safe_arg[class_name]
-        )
+class Synchronized(DelegateProperty):
+    def __init__(self, safe):
+        """
+        @param safe: Whether the method takes a 'safe' argument
+        """
+        super(Synchronized, self).__init__(readonly=True)
+        self.safe = safe
 
-        if 'safe' not in kwargs and has_safe_arg:
+    def make_attr(self, cls, name):
+        return synchronize(name, self.safe)
+
+
+def synchronize(method_name, safe):
+    """
+    @param method_name:         The name of an asynchronous method defined on class
+                                TornadoConnection, TornadoDatabase, etc.
+    @param safe:     Whether the method takes a 'safe' argument
+    @return:                    A synchronous wrapper around the method
+    """
+    def synchronized_method(self, *args, **kwargs):
+        assert 'callback' not in kwargs
+
+        safe_arg_passed = (
+            'safe' in kwargs or 'w' in kwargs or 'j' in kwargs
+            or 'wtimeout' in kwargs or self.delegate.safe
+        )
+        
+        if not safe_arg_passed and safe:
             # By default, Motor passes safe=True if there's a callback, but
             # we don't want that, so we explicitly override.
             kwargs['safe'] = False
 
+        async_method = getattr(self.delegate, method_name)
         rv = None
         try:
+            # TODO: document that all Motor methods accept a callback, but only
+            # some require them. Get that into Sphinx somehow.
             rv = loop_timeout(
                 lambda cb: async_method(*args, callback=cb, **kwargs),
-                name=async_method.func_name
+                name=method_name
             )
         except OperationFailure:
             # Ignore OperationFailure for unsafe writes; synchronous pymongo
             # wouldn't have known the operation failed.
-            if kwargs.get('safe') or not has_safe_arg:
+            if safe_arg_passed or not safe:
                 raise
 
         return rv
 
+    synchronized_method.func_name = method_name
     return synchronized_method
+
+# TODO: change name to "Synchronized"? then the current Synchronized will need
+# to be renamed. But "Fake" sounds too general for what this does, which is
+# specifically to synchronize Motor. I like "Synchro" to extend the "Motor"
+# naming scheme.
+class FakeMeta(type):
+    def __new__(cls, name, bases, attrs):
+        # Create the class.
+        new_class = type.__new__(cls, name, bases, attrs)
+
+        delegate_class = new_class.__delegate_class__
+
+        if delegate_class:
+            delegated_attrs = {}
+
+            # delegated_attrs is created by DelegateMeta
+            # TODO: move this loop into Delegator as a method
+            for klass in reversed(inspect.getmro(delegate_class)):
+                if hasattr(klass, 'delegated_attrs'):
+                    delegated_attrs.update(klass.delegated_attrs)
+
+            for name, delegate_attr in delegated_attrs.items():
+                if isinstance(delegate_attr, async.Asynchronized):
+                    safe = delegate_attr.safe
+                    synchronized = Synchronized(safe=safe)
+                    sync_attr = synchronized.make_attr(new_class, name)
+                    setattr(new_class, name, sync_attr)
+                elif isinstance(delegate_attr, DelegateProperty):
+                    prop = DelegateProperty(readonly=delegate_attr.readonly)
+                    sync_attr = prop.make_attr(new_class, name)
+                    setattr(new_class, name, sync_attr)
+
+        return new_class
 
 
 class Fake(object):
@@ -120,87 +193,57 @@ class Fake(object):
     Wraps a TornadoConnection, TornadoDatabase, or TornadoCollection and
     makes it act like the synchronous pymongo equivalent
     """
-    def __getattr__(self, name):
-        async_obj = getattr(self, self.async_attr, None)
+    __metaclass__ = FakeMeta
+    __delegate_class__ = None
 
-        # This if-else seems to replicate the logic of getattr(), except,
-        # weirdly, for non-ASCII names like in
-        # TestCollection.test_messages_with_unicode_collection_names().
-        if name in dir(async_obj):
-            async_attr = getattr(async_obj, name)
-        else:
-            async_attr = async_obj.__getattr__(name)
-
-        if name in self.async_ops:
-            # async_attr is an async method on a TornadoConnection or something
-            return synchronize(async_attr)
-        else:
-            # If this is like connection.db, or db.test, then wrap the
-            # outgoing object in a Fake
-            if isinstance(async_attr, async.TornadoDatabase):
-                return Database(self, name)
-            elif isinstance(async_attr, async.TornadoCollection):
-                if isinstance(self, Collection):
-                    # Dotted access, like db.test.mike
-                    return Collection(self.database, self.name + '.' + name)
-                else:
-                    return Collection(self, name)
-            else:
-                # Non-socket operation on a pymongo Database, like
-                # database.system_js or _fix_outgoing()
-                return async_attr
-
-    __getitem__ = __getattr__
-
-    def __setattr__(self, key, value):
-        if key in ('document_class',):
-            async_attr = getattr(self, self.async_attr)
-            setattr(async_attr, key, value)
-        else:
-            object.__setattr__(self, key, value)
+    def __init__(self, delegate):
+        self.delegate = delegate
 
     def __cmp__(self, other):
-        return cmp(
-            getattr(self, self.async_attr, None),
-            getattr(other, self.async_attr, None),
-        )
+        return cmp(self.delegate, other.delegate)
+
+#    document_class = DelegateProperty()
+#    slave_okay = DelegateProperty()
+#    safe = DelegateProperty()
+#    get_lasterror_options = DelegateProperty()
+#    set_lasterror_options = DelegateProperty()
+#    unset_lasterror_options = DelegateProperty()
+#    _BaseObject__set_slave_okay = DelegateProperty()
+#    _BaseObject__set_safe = DelegateProperty()
 
 
 class Connection(Fake):
-    async_attr = '_tconn'
-    async_connection_class = async.TornadoConnection
-    async_ops = async.TornadoConnection.async_ops
     HOST = 'localhost'
     PORT = 27017
+
+    __delegate_class__ = async.TornadoConnection
 
     def __init__(self, host=None, port=None, *args, **kwargs):
         # So that TestConnection.test_constants and test_types work
         self.host = host if host is not None else self.HOST
         self.port = port if port is not None else self.PORT
-        self._tconn = self.async_connection_class(
+        tornado_connection = self.__delegate_class__(
             self.host, self.port, *args, **kwargs
         )
+
+        super(Connection, self).__init__(delegate=tornado_connection)
 
         # Try to connect the TornadoConnection before continuing
         exc = ConnectionFailure(
             "fake_pymongo.Connection: Can't connect to %s:%s" % (host, port)
         )
 
-        loop_timeout(kallable=self._tconn.open, exc=exc)
+        loop_timeout(kallable=self.delegate.open, exc=exc)
 
     def drop_database(self, name_or_database):
         # Special case, since pymongo Connection.drop_database does
         # isinstance(name_or_database, database.Database)
         if isinstance(name_or_database, Database):
-            name_or_database = name_or_database._tdb
+            name_or_database = name_or_database.delegate
 
-        synchronize(self._tconn.drop_database)(name_or_database)
+        synchronize('drop_database', safe=False)(self, name_or_database)
 
-    # HACK!: For unittests that examine this attribute
-    @property
-    def _Connection__pool(self):
-        return self._tconn.sync_connection._Connection__pool
-
+    # TODO: document how this is implemented by Motor
     @property
     def is_locked(self):
         ops = self.admin.current_op()
@@ -210,19 +253,28 @@ class Connection(Fake):
         return self
 
     def __exit__(self, *args):
-        self._tconn.disconnect()
+        self.delegate.disconnect()
+
+    def __getattr__(self, name):
+        # If this is like connection.db, then wrap the outgoing object in a Fake
+        return Database(self, name)
+
+    __getitem__ = __getattr__
+#
+#    # HACK!: For unittests that examine this attribute
+#    _Connection__pool = DelegateProperty()
+#    unlock = Synchronized(safe=False)
 
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
     # except it wraps a TornadoReplicaSetConnection instead of a
     # TornadoConnection.
-    async_connection_class = async.TornadoReplicaSetConnection
+    __delegate_class__ = async.TornadoReplicaSetConnection
 
 
 class Database(Fake):
-    async_attr = '_tdb'
-    async_ops = async.TornadoDatabase.async_ops
+    __delegate_class__ = async.TornadoDatabase
 
     def __init__(self, connection, name):
         assert isinstance(connection, Connection), (
@@ -230,9 +282,9 @@ class Database(Fake):
         )
         self.connection = connection
 
-        # Get a TornadoDatabase
-        self._tdb = getattr(connection._tconn, name)
-        assert isinstance(self._tdb, async.TornadoDatabase)
+        tornado_db = getattr(connection.delegate, name)
+        assert isinstance(tornado_db, async.TornadoDatabase)
+        super(Database, self).__init__(delegate=tornado_db)
 
     def add_son_manipulator(self, manipulator):
         # TODO HACK prevent an AutoReference from using a fake Database,
@@ -240,65 +292,73 @@ class Database(Fake):
         if isinstance(manipulator, son_manipulator.AutoReference):
             db = manipulator._AutoReference__database
             if isinstance(db, Database):
-                manipulator._AutoReference__database = db._tdb.sync_database
+                manipulator._AutoReference__database = db.delegate.sync_database
 
-        self._tdb.add_son_manipulator(manipulator)
+        self.delegate.add_son_manipulator(manipulator)
 
     # TODO: refactor, maybe something like fix_incoming or fix_outgoing?
     def drop_collection(self, name_or_collection):
         # Special case, since pymongo Database.drop_collection does
         # isinstance(name_or_collection, collection.Collection)
         if isinstance(name_or_collection, Collection):
-            name_or_collection = name_or_collection._tcoll
+            name_or_collection = name_or_collection.delegate
 
-        return synchronize(self._tdb.drop_collection)(name_or_collection)
+        return synchronize('drop_collection', safe=False)(self, name_or_collection)
 
     # TODO: refactor
     def validate_collection(self, name_or_collection, *args, **kwargs):
         # Special case, since pymongo Database.validate_collection does
         # isinstance(name_or_collection, collection.Collection)
         if isinstance(name_or_collection, Collection):
-            name_or_collection = name_or_collection._tcoll
+            name_or_collection = name_or_collection.delegate
 
-        return synchronize(self._tdb.validate_collection)(
-            name_or_collection, *args, **kwargs
+        return synchronize('validate_collection', safe=False)(
+            self, name_or_collection, *args, **kwargs
         )
 
     # TODO: refactor
     def create_collection(self, name, *args, **kwargs):
         # Special case, since TornadoDatabase.create_collection returns a
         # TornadoCollection
-        collection = synchronize(self._tdb.create_collection)(name, *args, **kwargs)
+        collection = synchronize('create_collection', safe=False)(
+            self, name, *args, **kwargs
+        )
+
         if isinstance(collection, async.TornadoCollection):
             collection = Collection(self, name)
 
         return collection
 
+    current_op = Synchronized(safe=False)
+    fsync = Synchronized(safe=False)
+    command = Synchronized(safe=True)
+
+    def __getattr__(self, name):
+        return Collection(self, name)
+
+    __getitem__ = __getattr__
+
 
 class Collection(Fake):
-    # If async_ops changes, we'll need to update this
-    assert 'find' not in async.TornadoCollection.async_ops
-
-    async_attr = '_tcoll'
-    async_ops = async.TornadoCollection.async_ops.union(set([
-        'find', 'map_reduce'
-    ]))
+    __delegate_class__ = async.TornadoCollection
+    (find, map_reduce, remove) = [Synchronized(safe=False)] * 3
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
-        # Get a TornadoCollection
-        self._tcoll = database._tdb.__getattr__(name)
-        assert isinstance(self._tcoll, async.TornadoCollection)
-
         self.database = database
+
+        tornado_collection = database.delegate.__getattr__(name)
+        assert isinstance(tornado_collection, async.TornadoCollection)
+        super(Collection, self).__init__(delegate=tornado_collection)
 
     def find(self, *args, **kwargs):
         # Return a fake Cursor that wraps the call to TornadoCollection.find()
-        return Cursor(self._tcoll, *args, **kwargs)
+        return Cursor(self.delegate, *args, **kwargs)
 
     def map_reduce(self, *args, **kwargs):
         # We need to override map_reduce specially, because we have to wrap the
         # TornadoCollection it returns in a fake Collection.
+        # TODO: this getattr won't work any more
         fake_map_reduce = super(Collection, self).__getattr__('map_reduce')
         rv = fake_map_reduce(*args, **kwargs)
         if isinstance(rv, async.TornadoCollection):
@@ -306,30 +366,30 @@ class Collection(Fake):
         else:
             return rv
 
-    # Delegate to TornadoCollection's uuid_subtype property -- TornadoCollection
-    # in turn delegates to pymongo.collection.Collection. This is all to get
-    # test_uuid_subtype to pass.
-    def __get_uuid_subtype(self):
-        return self._tcoll.uuid_subtype
+    uuid_subtype = DelegateProperty()
+    find_one = Synchronized(safe=True)
+    insert = Synchronized(safe=True)
 
-    def __set_uuid_subtype(self, subtype):
-        self._tcoll.uuid_subtype = subtype
+    def __getattr__(self, name):
+        # Access to collections with dotted names, like db.test.mike
+        this_collection_name = self.delegate.delegate.name
+        return Collection(self.database, this_collection_name + '.' + name)
 
-    uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
+    __getitem__ = __getattr__
 
-
+    
 class Cursor(Fake):
-    async_attr = 'tornado_cursor'
-    async_ops = async.TornadoCursor.async_ops
+    __delegate_class__ = async.TornadoCursor
 
     def __init__(self, tornado_coll, *args, **kwargs):
-        self.tornado_cursor = tornado_coll.find(*args, **kwargs)
+        tornado_cursor = tornado_coll.find(*args, **kwargs)
+        super(Cursor, self).__init__(delegate=tornado_cursor)
 
     def __iter__(self):
         return self
 
     def next(self):
-        rv = loop_timeout(self.tornado_cursor.each)
+        rv = loop_timeout(self.delegate.each)
         if rv is not None:
             return rv
         else:
@@ -337,46 +397,16 @@ class Cursor(Fake):
 
     # TODO: refactor these
     def where(self, code):
-        self.tornado_cursor.where(code)
+        self.delegate.where(code)
         return self
 
     def sort(self, *args, **kwargs):
-        self.tornado_cursor.sort(*args, **kwargs)
+        self.delegate.sort(*args, **kwargs)
         return self
 
     def explain(self):
-        return loop_timeout(self.tornado_cursor.explain)
+        return loop_timeout(self.delegate.explain)
 
     def __getitem__(self, item):
-        rv = loop_timeout(self.tornado_cursor.to_list)
+        rv = loop_timeout(self.delegate.to_list)
         return rv[item]
-
-#    def count(self):
-#        command = {"query": self.spec, "fields": self.fields}
-#        return loop_timeout(
-#            kallable=lambda callback: self.tornado_coll._tdb.command(
-#                "count", self.tornado_coll.name,
-#                allowable_errors=["ns missing"],
-#                callback=callback,
-#                **command
-#            )
-#        )
-#
-#    def distinct(self, key):
-#        command = {"query": self.spec, "fields": self.fields, "key": key}
-#        outcome = {}
-#        loop_timeout(
-#            kallable=lambda callback: self.tornado_coll._tdb.command(
-#                "distinct", self.tornado_coll.name,
-#                callback=callback,
-#                **command
-#            ),
-#            outcome=outcome
-#        )
-#
-#        IOLoop.instance().start()
-#
-#        if outcome.get('error'):
-#            raise outcome['error']
-#
-#        return outcome['result']['values']
