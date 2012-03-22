@@ -287,12 +287,10 @@ class Database(Fake):
         super(Database, self).__init__(delegate=tornado_db)
 
     def add_son_manipulator(self, manipulator):
-        # TODO HACK prevent an AutoReference from using a fake Database,
-        # replace with pymongo Database
         if isinstance(manipulator, son_manipulator.AutoReference):
-            db = manipulator._AutoReference__database
+            db = manipulator.database
             if isinstance(db, Database):
-                manipulator._AutoReference__database = db.delegate.sync_database
+                manipulator.database = db.delegate.sync_database
 
         self.delegate.add_son_manipulator(manipulator)
 

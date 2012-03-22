@@ -1395,11 +1395,10 @@ class TornadoTestBasic(TornadoTest):
         # and not just rely on run_synchronous_tests to cover it.
         cx = self.async_connection()
         db = cx.test
-        # TODO: this reveals a source of bugs for users: how to prevent them
-        # from instantiating an AutoReference with a TornadoDatabase instead of
-        # a Database?
-#        db.add_son_manipulator(AutoReference(db))
-        db.add_son_manipulator(AutoReference(db.sync_database))
+
+        # We test a special hack where add_son_manipulator corrects our mistake
+        # if we pass a TornadoDatabase, instead of Database, to AutoReference.
+        db.add_son_manipulator(AutoReference(db))
         db.add_son_manipulator(NamespaceInjector())
 
         @gen.engine
