@@ -225,10 +225,10 @@ class Collection(common.BaseObject):
             raise TypeError("cannot save object of type %s" % type(to_save))
 
         if "_id" not in to_save:
-            return self.insert(to_save, manipulate, safe=safe, **kwargs)
+            return self.insert(to_save, manipulate, safe, **kwargs)
         else:
             self.update({"_id": to_save["_id"]}, to_save, True,
-                        manipulate, _check_keys=True, safe=safe, **kwargs)
+                        manipulate, safe, _check_keys=True, **kwargs)
             return to_save.get("_id", None)
 
     def insert(self, doc_or_docs, manipulate=True,
@@ -545,8 +545,6 @@ class Collection(common.BaseObject):
             the start of the result set) when returning the results
           - `limit` (optional): the maximum number of results to
             return
-          - `batch_size` (optional): the number of results to return in each
-            batch
           - `timeout` (optional): if True, any returned cursor will be
             subject to the normal timeout behavior of the mongod
             process. Otherwise, the returned cursor will never timeout
@@ -597,9 +595,6 @@ class Collection(common.BaseObject):
 
         .. versionadded:: 1.11+
            The `await_data`, `partial`, and `manipulate` parameters.
-
-        .. versionadded:: 2.2
-           The `batch_size` parameter.
 
         .. versionadded:: 1.8
            The `network_timeout` parameter.

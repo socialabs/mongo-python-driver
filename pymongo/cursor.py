@@ -43,7 +43,7 @@ class Cursor(object):
                  timeout=True, snapshot=False, tailable=False, sort=None,
                  max_scan=None, as_class=None, slave_okay=False,
                  await_data=False, partial=False, manipulate=True,
-                 read_preference=ReadPreference.PRIMARY, batch_size=0,
+                 read_preference=ReadPreference.PRIMARY,
                  _must_use_master=False, _is_command=False,
                  _uuid_subtype=None, **kwargs):
         """Create a new cursor.
@@ -76,8 +76,6 @@ class Cursor(object):
             raise TypeError("await_data must be an instance of bool")
         if not isinstance(partial, bool):
             raise TypeError("partial must be an instance of bool")
-        if not isinstance(batch_size, int):
-            raise TypeError("batch_size must be an instance of int")
 
         if fields is not None:
             if not fields:
@@ -93,7 +91,7 @@ class Cursor(object):
         self.__fields = fields
         self.__skip = skip
         self.__limit = limit
-        self.__batch_size = batch_size
+        self.__batch_size = 0
 
         # This is ugly. People want to be able to do cursor[5:5] and
         # get an empty result set (old behavior was an

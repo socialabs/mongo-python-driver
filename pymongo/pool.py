@@ -14,9 +14,12 @@
 
 import os
 import socket
+import sys
+import time
 import threading
+import weakref
 
-from pymongo.errors import ConnectionFailure, OperationFailure, InvalidOperation
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 
 have_ssl = True
@@ -26,9 +29,93 @@ except ImportError:
     have_ssl = False
 
 
-class Pool(object):
-    """A simple connection pool.
+# PyMongo does not use greenlet-aware connection pools by default, but it will
+# attempt to do so if you pass use_greenlets=True to Connection or
+# ReplicaSetConnection
+have_greenlet = True
+try:
+    import greenlet
+except ImportError:
+    have_greenlet = False
+
+
+NO_REQUEST    = None
+NO_SOCKET_YET = -1
+
+
+is_jython = sys.platform.startswith('java')
+if is_jython:
+    from select import cpython_compatible_select as select
+else:
+    from select import select
+
+
+def _closed(sock):
+    """Return True if we know socket has been closed, False otherwise.
     """
+    try:
+        rd, _, _ = select([sock], [], [], 0)
+    # Any exception here is equally bad (select.error, ValueError, etc.).
+    except:
+        return True
+    return len(rd) > 0
+
+
+class SocketInfo(object):
+    """Store a socket with some metadata
+    """
+    def __init__(self, sock, pool):
+        self.sock = sock
+
+        # We can't strongly reference the Pool, because the Pool
+        # references this SocketInfo as long as it's in pool
+        self.poolref = weakref.ref(pool)
+
+        self.authset = set()
+        self.closed = False
+        self.last_checkout = 0 # earliest time_t
+
+    def close(self):
+        self.sock.close()
+        self.closed = True
+
+    def __del__(self):
+        if not self.closed:
+            # This socket was given out, but not explicitly returned. Perhaps
+            # the socket was assigned to a thread local for a request, but the
+            # request wasn't ended before the thread died. Reclaim the socket
+            # for the pool.
+            pool = self.poolref()
+            if pool:
+                # Return a copy of self rather than self -- the Python docs
+                # discourage postponing deletion by adding a reference to self.
+                copy = SocketInfo(self.sock, pool)
+                copy.authset = self.authset
+                pool.return_socket(copy)
+
+    def __eq__(self, other):
+        return hasattr(other, 'sock') and self.sock == other.sock
+
+    def __hash__(self):
+        return hash(self.sock)
+
+    def __repr__(self):
+        return "SocketInfo(%s, %s)%s at %s" % (
+            repr(self.sock), repr(self.poolref()),
+            self.closed and " CLOSED" or "",
+            id(self)
+        )
+
+
+class NullLock(object):
+    def acquire(self):
+        pass
+
+    def release(self):
+        pass
+
+
+class BasePool(object):
     def __init__(self, pair, max_size, net_timeout, conn_timeout, use_ssl):
         """
         :Parameters:
@@ -38,186 +125,299 @@ class Pool(object):
           - `conn_timeout`: timeout in seconds for establishing connection
           - `use_ssl`: bool, if True use an encrypted connection
         """
-        self._reset()
-
+        self.sockets = set()
+        self.pid = os.getpid()
         self.pair = pair
         self.max_size = max_size
         self.net_timeout = net_timeout
         self.conn_timeout = conn_timeout
         self.use_ssl = use_ssl
 
-    def _reset(self):
+        # Jython's set() isn't atomic, see http://bugs.jython.org/issue1854
+        if is_jython:
+            self.lock = threading.Lock()
+        else:
+            self.lock = NullLock()
+
+    def reset(self):
+        request_state = self._get_request_state()
         self.pid = os.getpid()
-        self.sockets = set()
 
-        # Map socket -> set of (host, port, database) triples for which this
-        # socket has been authorized
-        self.authsets = {}
+        # Close sockets before deleting them, otherwise they'll come
+        # running back.
+        if request_state not in (NO_REQUEST, NO_SOCKET_YET):
+            # request_state is a SocketInfo for this request
+            request_state.close()
 
-        # Map thread -> socket, or (thread, greenlet) -> socket
-        self.requests = {}
+        sockets = None
+        try:
+            self.lock.acquire()
+            sockets, self.sockets = self.sockets, set()
+        finally:
+            self.lock.release()
 
-        # Set of request keys for which we've lent sockets that haven't been
-        # returned
-        self.request_sockets_outstanding = set()
+        for sock_info in sockets: sock_info.close()
 
-    def _request_key(self):
-        """Overridable"""
-        return id(threading.currentThread())
+        # Reset subclass's data structures
+        self._reset()
 
-    def _check_pair_arg(self, pair):
-        if not (self.pair or pair):
-            raise OperationFailure("Must configure host and port on Pool")
+        # If we were in a request before the reset, then delete the request
+        # socket, but resume the request with a new socket the next time
+        # get_socket() is called.
+        if request_state != NO_REQUEST:
+            self._set_request_state(NO_SOCKET_YET)
 
-        if self.pair and pair:
-            raise OperationFailure(
-                "Attempt to specify pair %s on Pool already configured with "
-                "pair %s" % (pair, self.pair)
-            )
+    def create_connection(self, pair):
+        """Connect to *pair* and return the socket object.
+
+        This is a modified version of create_connection from
+        CPython >=2.6.
+        """
+        # Don't try IPv6 if we don't support it.
+        family = socket.AF_INET
+        if socket.has_ipv6:
+            family = socket.AF_UNSPEC
+
+        host, port = pair or self.pair
+        err = None
+        for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
+            af, socktype, proto, dummy, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.settimeout(self.conn_timeout or 20.0)
+                sock.connect(sa)
+                return sock
+            except socket.error, e:
+                err = e
+                if sock is not None:
+                    sock.close()
+
+        if err is not None:
+            raise err
+        else:
+            # This likely means we tried to connect to an IPv6 only
+            # host with an OS/kernel or Python interpeter that doesn't
+            # support IPv6. The test case is Jython2.5.1 which doesn't
+            # support IPv6 at all.
+            raise socket.error('getaddrinfo failed')
 
     def connect(self, pair):
         """Connect to Mongo and return a new (connected) socket. Note that the
            pool does not keep a reference to the socket -- you must call
            return_socket() when you're done with it.
         """
-        self._check_pair_arg(pair)
-
-        # Prefer IPv4. If there is demand for an option
-        # to specify one or the other we can add it later.
-        socket_types = (socket.AF_INET, socket.AF_INET6)
-        for socket_type in socket_types:
-            try:
-                s = socket.socket(socket_type)
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(self.conn_timeout or 20.0)
-                s.connect(pair or self.pair)
-                break
-            except socket.gaierror:
-                # If that fails try IPv6
-                continue
-        else:
-            # None of the socket types worked
-            raise
+        sock = self.create_connection(pair)
 
         if self.use_ssl:
             try:
-                s = ssl.wrap_socket(s)
+                sock = ssl.wrap_socket(sock)
             except ssl.SSLError:
-                s.close()
+                sock.close()
                 raise ConnectionFailure("SSL handshake failed. MongoDB may "
                                         "not be configured with SSL support.")
 
-        s.settimeout(self.net_timeout)
-        return s
+        sock.settimeout(self.net_timeout)
+        return SocketInfo(sock, self)
 
     def get_socket(self, pair=None):
-        """Get a socket from the pool. Returns a new socket if the pool is
-        empty.
+        """Get a socket from the pool.
 
-        Returns (sock, from_pool), a connected :class:`socket.socket` and a bool
-        saying whether the socket was from the pool or freshly created.
+        Returns a :class:`SocketInfo` object wrapping a connected
+        :class:`socket.socket`, and a bool saying whether the socket was from
+        the pool or freshly created.
 
         :Parameters:
           - `pair`: optional (hostname, port) tuple
         """
-        self._check_pair_arg(pair)
-
         # We use the pid here to avoid issues with fork / multiprocessing.
         # See test.test_connection:TestConnection.test_fork for an example of
         # what could go wrong otherwise
         if self.pid != os.getpid():
-            self._reset()
+            self.reset()
 
         # Have we opened a socket for this request?
-        request_key = self._request_key()
-        if request_key in self.request_sockets_outstanding:
-            # TODO: choose the right exc type to throw, good error message
-            raise InvalidOperation("Socket for this request is already in use")
-        elif request_key in self.requests:
-            # TODO: doc
-            self.request_sockets_outstanding.add(request_key)
+        req_state = self._get_request_state()
+        if req_state not in (NO_SOCKET_YET, NO_REQUEST):
 
-        sock = self.requests.get(request_key)
-        if sock:
-            return sock, True
+            # There's a socket for this request; ensure it's still open
+            checked_sock = self._check_closed(req_state, pair)
+
+            if checked_sock != req_state:
+                self._set_request_state(req_state)
+
+            return checked_sock
 
         # We're not in a request, just get any free socket or create one
+        sock_info, from_pool = None, None
         try:
-            sock, from_pool = self.sockets.pop(), True
+            try:
+                self.lock.acquire()
+                sock_info, from_pool = self.sockets.pop(), True
+            finally:
+                self.lock.release()
         except KeyError:
-            sock, from_pool = self.connect(pair), False
+            sock_info, from_pool = self.connect(pair), False
 
-        if request_key in self.requests:
-            # self.requests[request_key] is None, so start_request has been
-            # called earlier. Let's use this socket for this request until
+        if from_pool:
+            sock_info = self._check_closed(sock_info, pair)
+
+        if req_state == NO_SOCKET_YET:
+            # start_request has been called but we haven't assigned a socket to
+            # the request yet. Let's use this socket for this request until
             # end_request.
-            self.requests[request_key] = sock
+            self._set_request_state(sock_info)
 
-        return sock, from_pool
+        return sock_info
 
     def start_request(self):
-        # If we're already in a request, do nothing, otherwise put None in the
-        # dict to indicate we're in a request. None will be replaced by a socket
-        # as soon as one is needed.
-        self.requests.setdefault(self._request_key(), None)
+        if self._get_request_state() == NO_REQUEST:
+            # Add a placeholder value so we know we're in a request, but we
+            # have no socket assigned to the request yet.
+            self._set_request_state(NO_SOCKET_YET)
+
+    def in_request(self):
+        return self._get_request_state() != NO_REQUEST
 
     def end_request(self):
-        request_key = self._request_key()
-        request_sock = self.requests.get(request_key)
+        sock_info = self._get_request_state()
+        self._set_request_state(NO_REQUEST)
+        self.return_socket(sock_info)
 
-        if request_key in self.requests:
-            del self.requests[request_key]
-            self.request_sockets_outstanding.discard(request_key)
-
-        self.return_socket(request_sock)
-
-    def request_socket_outstanding(self):
-        # TODO: better name for this method?
-        # TODO: doc
-        return self._request_key() in self.request_sockets_outstanding
-
-    def discard_socket(self, sock):
+    def discard_socket(self, sock_info):
         """Close and discard the active socket.
         """
-        if sock:
-            sock.close()
-            request_key = self._request_key()
-            request_sock = self.requests.get(request_key)
+        if sock_info:
+            sock_info.close()
 
-            # We're ending the request
-            if request_sock == sock:
-                self.request_sockets_outstanding.remove(request_key)
-                del self.requests[request_key]
+            if sock_info == self._get_request_state():
+                self._set_request_state(NO_SOCKET_YET)
 
-    def return_socket(self, sock):
+    def return_socket(self, sock_info):
         """Return the socket currently in use to the pool. If the
         pool is full the socket will be discarded.
         """
         if self.pid != os.getpid():
-            self._reset()
-        elif sock:
-            # Don't really return a socket if we're in a request
-            request_key = self._request_key()
-            if sock is self.requests.get(request_key):
-                # We're still in the request, but the request's socket is
-                # no longer outstanding.
-                self.request_sockets_outstanding.remove(request_key)
-            else:
+            self.reset()
+        elif sock_info not in (NO_REQUEST, NO_SOCKET_YET):
+            if sock_info.closed:
+                return
+
+            if sock_info != self._get_request_state():
                 # There's a race condition here, but we deliberately
                 # ignore it.  It means that if the pool_size is 10 we
                 # might actually keep slightly more than that.
                 if len(self.sockets) < self.max_size:
-                    if sock in self.sockets:
-                        # Unexpected, but let it pass
-                        pass
-                    self.sockets.add(sock)
-                else:
-                    sock.close()
+                    try:
+                        self.lock.acquire()
+                        self.sockets.add(sock_info)
+                    finally:
+                        self.lock.release()
 
-    def get_authset(self, sock):
-        """Set of database names for which this socket has been authenticated
+                    sock_info.last_checkout = time.time()
+                else:
+                    self.discard_socket(sock_info)
+
+    def _check_closed(self, sock_info, pair):
+        """This side-effecty function checks if a socket has been closed by
+        some external network error if it's been > 1 second since the last time
+        we used it, and if so, attempts to create a new socket. If this
+        connection attempt fails we reset the pool and reraise the error.
+
+        Checking sockets lets us avoid seeing *some*
+        :class:`~pymongo.errors.AutoReconnect` exceptions on server
+        hiccups, etc. We only do this if it's been > 1 second since
+        the last socket checkout, to keep performance reasonable - we
+        can't avoid AutoReconnects completely anyway.
         """
-        return self.authsets.setdefault(sock, set())
+        if time.time() - sock_info.last_checkout > 1:
+            if _closed(sock_info.sock):
+                try:
+                    return self.connect(pair)
+                except socket.error:
+                    self.reset()
+                    raise
+
+        return sock_info
+
+    # Overridable methods for Pools. These methods must simply set and get an
+    # arbitrary value associated with the execution context (thread, greenlet,
+    # Tornado StackContext, ...) in which we want to use a single socket.
+    def _set_request_state(self, sock_info):
+        raise NotImplementedError
+
+    def _get_request_state(self):
+        raise NotImplementedError
+
+    def _reset(self):
+        pass
+
+
+# This thread-local will hold a Pool's per-thread request state. sock_info
+# defaults to NO_REQUEST each time it's accessed from a new thread. It's
+# much simpler to make a separate thread-local class rather than having Pool
+# inherit both from BasePool and threading.local.
+class _Local(threading.local):
+    sock_info = NO_REQUEST
+
+
+class Pool(BasePool):
+    """A simple connection pool.
+
+    Calling start_request() acquires a thread-local socket, which is returned
+    to the pool when the thread calls end_request() or dies.
+    """
+    def __init__(self, *args, **kwargs):
+        self.local = _Local()
+        super(Pool, self).__init__(*args, **kwargs)
+
+    def _set_request_state(self, sock_info):
+        self.local.sock_info = sock_info
+
+    def _get_request_state(self):
+        return self.local.sock_info
+
+    def _reset(self):
+        self.local.sock_info = NO_REQUEST
+
+
+class GreenletPool(BasePool):
+    """A simple connection pool.
+
+    Calling start_request() acquires a greenlet-local socket, which is returned
+    to the pool when the greenlet calls end_request() or dies.
+    """
+    def __init__(self, *args, **kwargs):
+        self._gr_id_to_sock = {}
+        self._refs = {}
+        super(GreenletPool, self).__init__(*args, **kwargs)
+
+    # Overrides
+    def _set_request_state(self, sock_info):
+        current = greenlet.getcurrent()
+        gr_id = id(current)
+
+        # This function is used in two ways: first, to end a request for this
+        # greenlet, and second, as a weakref callback when the current greenlet
+        # dies.
+        def clear_request(dummy):
+            self._refs.pop(gr_id, None)
+            self._gr_id_to_sock.pop(gr_id, None)
+
+        if sock_info == NO_REQUEST:
+            clear_request(None)
+        else:
+            self._refs[gr_id] = weakref.ref(current, clear_request)
+            self._gr_id_to_sock[gr_id] = sock_info
+
+    def _get_request_state(self):
+        gr_id = id(greenlet.getcurrent())
+        return self._gr_id_to_sock.get(gr_id, NO_REQUEST)
+
+    def _reset(self):
+        self._gr_id_to_sock.clear()
+        self._refs.clear()
 
 
 class Request(object):

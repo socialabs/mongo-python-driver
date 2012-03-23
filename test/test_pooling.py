@@ -18,17 +18,19 @@ import os
 import random
 import sys
 import threading
-import time
 import unittest
+import thread
+import time
+
 sys.path[0:0] = [""]
 
 from nose.plugins.skip import SkipTest
 
 from pymongo.connection import Connection
-from pymongo.pool import Pool
+from pymongo.pool import Pool, NO_REQUEST, NO_SOCKET_YET, SocketInfo
 from pymongo.errors import ConfigurationError
 from test_connection import get_connection
-from testutils import delay
+from test.utils import delay, force_reclaim_sockets
 
 N = 50
 DB = "pymongo-pooling-tests"
@@ -114,9 +116,9 @@ def run_cases(ut, cases):
     threads = []
     for case in cases:
         for i in range(10):
-            thread = case(ut)
-            thread.start()
-            threads.append(thread)
+            t = case(ut)
+            t.start()
+            threads.append(t)
 
     for t in threads:
         t.join()
@@ -134,28 +136,30 @@ class OneOp(threading.Thread):
 
     def run(self):
         pool = self.c._Connection__pool
-        assert len(pool.sockets) == 1
-        sock = one(pool.sockets)
+        assert len(pool.sockets) == 1, "Expected 1 socket, found %d" % (
+            len(pool.sockets)
+        )
+
+        sock_info = one(pool.sockets)
 
         self.c.start_request()
 
         # start_request() hasn't yet moved the socket from the general pool into
         # the request
         assert len(pool.sockets) == 1
-        assert one(pool.sockets) == sock
+        assert one(pool.sockets) == sock_info
 
-        self.c.test.test.find_one()
+        self.c[DB].test.find_one()
 
         # find_one() causes the socket to be used in the request, so now it's
         # bound to this thread
         assert len(pool.sockets) == 0
-        assert len(pool.requests) == 1
-        assert pool.requests.values()[0] == sock
+        assert pool._get_request_state() == sock_info
         self.c.end_request()
 
         # The socket is back in the pool
         assert len(pool.sockets) == 1
-        assert one(pool.sockets) == sock
+        assert one(pool.sockets) == sock_info
 
         self.passed = True
 
@@ -170,36 +174,61 @@ class CreateAndReleaseSocket(threading.Thread):
         self.passed = False
 
     def run(self):
-        # Do an operation that requires a socket for .25 seconds.
+        # Do an operation that requires a socket.
         # test_max_pool_size uses this to spin up lots of threads requiring
         # lots of simultaneous connections, to ensure that Pool obeys its
         # max_size configuration and closes extra sockets as they're returned.
         # We need a delay here to ensure that more than max_size sockets are
         # needed at once.
-        where = delay(.25)
-        if self.start_request:
+        for i in range(self.start_request):
             self.c.start_request()
-        self.c.test.test.find_one({'$where': where})
-        if self.end_request:
+
+        # A reasonable number of docs here, depending on how many are inserted
+        # in TestPooling.setUp()
+        list(self.c[DB].test.find())
+        for i in range(self.end_request):
             self.c.end_request()
         self.passed = True
 
 class TestPooling(unittest.TestCase):
 
     def setUp(self):
-        self.c = get_connection()
+        self.c = get_connection(auto_start_request=False)
 
         # reset the db
-        self.c.drop_database(DB)
-        self.c[DB].unique.insert({"_id": "mike"})
-        self.c[DB].unique.find_one()
+        db = self.c[DB]
+        db.unique.drop()
+        db.test.drop()
+        db.unique.insert({"_id": "mike"})
+        db.test.insert([{} for i in range(1000)])
 
     def tearDown(self):
-        self.c = None
+        self.c.close()
+
+    def assert_no_request(self):
+        self.assertEqual(
+            NO_REQUEST, self.c._Connection__pool._get_request_state()
+        )
+
+    def assert_request_without_socket(self):
+        self.assertEqual(
+            NO_SOCKET_YET, self.c._Connection__pool._get_request_state()
+        )
+
+    def assert_request_with_socket(self):
+        self.assertTrue(isinstance(
+            self.c._Connection__pool._get_request_state(), SocketInfo
+        ))
+
+    def assert_pool_size(self, pool_size):
+        self.assertEqual(
+            pool_size, len(self.c._Connection__pool.sockets)
+        )
 
     def test_max_pool_size_validation(self):
         self.assertRaises(
-            ValueError, Connection, host=host, port=port, max_pool_size=-1
+            ConfigurationError, Connection, host=host, port=port,
+            max_pool_size=-1
         )
 
         self.assertRaises(
@@ -215,32 +244,32 @@ class TestPooling(unittest.TestCase):
 
     def test_simple_disconnect(self):
         # Connection just created, expect 1 free socket
-        self.assertEqual(1, len(self.c._Connection__pool.sockets))
-        self.assertEqual(0, len(self.c._Connection__pool.requests))
+        self.assert_pool_size(1)
+        self.assert_no_request()
 
         self.c.start_request()
-        cursor = self.c.test.stuff.find()
+        self.assert_request_without_socket()
+        cursor = self.c[DB].stuff.find()
 
         # Cursor hasn't actually caused a request yet, so there's still 1 free
         # socket.
-        self.assertEqual(1, len(self.c._Connection__pool.sockets))
-        self.assertEqual(1, len(self.c._Connection__pool.requests))
-        self.assertEqual(None, self.c._Connection__pool.requests.values()[0])
+        self.assert_pool_size(1)
+        self.assert_request_without_socket()
 
         # Actually make a request to server, triggering a socket to be
         # allocated to the request
         list(cursor)
-        self.assertEqual(0, len(self.c._Connection__pool.sockets))
-        self.assertEqual(1, len(self.c._Connection__pool.requests))
+        self.assert_pool_size(0)
+        self.assert_request_with_socket()
 
         # Pool returns to its original state
         self.c.end_request()
-        self.assertEqual(1, len(self.c._Connection__pool.sockets))
-        self.assertEqual(0, len(self.c._Connection__pool.requests))
+        self.assert_no_request()
+        self.assert_pool_size(1)
 
         self.c.disconnect()
-        self.assertEqual(0, len(self.c._Connection__pool.sockets))
-        self.assertEqual(0, len(self.c._Connection__pool.requests))
+        self.assert_pool_size(0)
+        self.assert_no_request()
 
     def test_disconnect(self):
         run_cases(self, [SaveAndFind, Disconnect, Unique])
@@ -253,26 +282,27 @@ class TestPooling(unittest.TestCase):
         self.assertEqual(set(), p.sockets)
 
     def test_dependent_pools(self):
-        c = get_connection()
-        self.assertEqual(1, len(c._Connection__pool.sockets))
-        c.start_request()
-        c.test.test.find_one()
-        self.assertEqual(0, len(c._Connection__pool.sockets))
-        c.end_request()
-        self.assertEqual(1, len(c._Connection__pool.sockets))
+        self.assert_pool_size(1)
+        self.c.start_request()
+        self.assert_request_without_socket()
+        self.c.test.test.find_one()
+        self.assert_request_with_socket()
+        self.assert_pool_size(0)
+        self.c.end_request()
+        self.assert_pool_size(1)
 
-        t = OneOp(c)
+        t = OneOp(self.c)
         t.start()
         t.join()
-        self.assert_(t.passed, "OneOp.run() threw exception")
+        self.assertTrue(t.passed, "OneOp.run() threw exception")
 
-        self.assertEqual(1, len(c._Connection__pool.sockets))
-        c.test.test.find_one()
-        self.assertEqual(1, len(c._Connection__pool.sockets))
+        self.assert_pool_size(1)
+        self.c.test.test.find_one()
+        self.assert_pool_size(1)
 
     def test_multiple_connections(self):
-        a = get_connection()
-        b = get_connection()
+        a = get_connection(auto_start_request=False)
+        b = get_connection(auto_start_request=False)
         self.assertEqual(1, len(a._Connection__pool.sockets))
         self.assertEqual(1, len(b._Connection__pool.sockets))
 
@@ -299,30 +329,34 @@ class TestPooling(unittest.TestCase):
         a.test.test.find_one()
 
         self.assertEqual(b_sock,
-                         one(b._Connection__pool.get_socket((b.host, b.port))))
+                         b._Connection__pool.get_socket((b.host, b.port)))
         self.assertEqual(a_sock,
-                         one(a._Connection__pool.get_socket((a.host, a.port))))
+                         a._Connection__pool.get_socket((a.host, a.port)))
 
     def test_pool_with_fork(self):
+        # Test that separate Connections have separate Pools, and that the
+        # driver can create a new Connection after forking
         if sys.platform == "win32":
-            raise SkipTest()
+            raise SkipTest("Can't test forking on Windows")
 
         try:
             from multiprocessing import Process, Pipe
         except ImportError:
-            raise SkipTest()
+            raise SkipTest("No multiprocessing module")
 
-        a = get_connection()
+        a = get_connection(auto_start_request=False)
+        a.test.test.remove(safe=True)
+        a.test.test.insert({'_id':1}, safe=True)
         a.test.test.find_one()
         self.assertEqual(1, len(a._Connection__pool.sockets))
         a_sock = one(a._Connection__pool.sockets)
 
         def loop(pipe):
-            c = get_connection()
-            self.assertEqual(1, len(c._Connection__pool.sockets))
+            c = get_connection(auto_start_request=False)
+            self.assertEqual(1,len(c._Connection__pool.sockets))
             c.test.test.find_one()
-            self.assertEqual(1, len(c._Connection__pool.sockets))
-            pipe.send(one(c._Connection__pool.sockets).getsockname())
+            self.assertEqual(1,len(c._Connection__pool.sockets))
+            pipe.send(one(c._Connection__pool.sockets).sock.getsockname())
 
         cp1, cc1 = Pipe()
         cp2, cc2 = Pipe()
@@ -347,11 +381,45 @@ class TestPooling(unittest.TestCase):
 
         b_sock = cp1.recv()
         c_sock = cp2.recv()
-        self.assert_(a_sock.getsockname() != b_sock)
-        self.assert_(a_sock.getsockname() != c_sock)
-        self.assert_(b_sock != c_sock)
+        self.assertTrue(a_sock.sock.getsockname() != b_sock)
+        self.assertTrue(a_sock.sock.getsockname() != c_sock)
+        self.assertTrue(b_sock != c_sock)
         self.assertEqual(a_sock,
-                         one(a._Connection__pool.get_socket((a.host, a.port))))
+                         a._Connection__pool.get_socket((a.host, a.port)))
+
+    def test_request_with_fork(self):
+        try:
+            from multiprocessing import Process, Pipe
+        except ImportError:
+            raise SkipTest("No multiprocessing module")
+
+        coll = self.c.test.test
+        coll.remove(safe=True)
+        coll.insert({'_id': 1}, safe=True)
+        coll.find_one()
+        self.assert_pool_size(1)
+        self.c.start_request()
+        self.assert_pool_size(1)
+        coll.find_one()
+        self.assert_pool_size(0)
+        self.assert_request_with_socket()
+
+        def f(pipe):
+            # We can still query server without error
+            self.assertEqual({'_id':1}, coll.find_one())
+
+            # Pool has detected that we forked, but resumed the request
+            self.assert_request_with_socket()
+            self.assert_pool_size(0)
+            pipe.send("success")
+
+        parent_conn, child_conn = Pipe()
+        p = Process(target=f, args=(child_conn,))
+        p.start()
+        p.join(1)
+        p.terminate()
+        child_conn.close()
+        self.assertEqual("success", parent_conn.recv())
 
     def test_request(self):
         # Check that Pool gives two different sockets in two calls to
@@ -364,50 +432,117 @@ class TestPooling(unittest.TestCase):
             use_ssl=False
         )
 
-        sock0, from_pool0 = cx_pool.get_socket()
-        sock1, from_pool1 = cx_pool.get_socket()
+        sock0 = cx_pool.get_socket()
+        sock1 = cx_pool.get_socket()
 
         self.assertNotEqual(sock0, sock1)
-        self.assertFalse(from_pool0)
-        self.assertFalse(from_pool1)
 
         # Now in a request, we'll get the same socket both times
         cx_pool.start_request()
 
-        sock2, from_pool2 = cx_pool.get_socket()
-        sock3, from_pool3 = cx_pool.get_socket()
+        sock2 = cx_pool.get_socket()
+        sock3 = cx_pool.get_socket()
+        self.assertEqual(sock2, sock3)
 
         # Pool didn't keep reference to sock0 or sock1; sock2 and 3 are new
         self.assertNotEqual(sock0, sock2)
         self.assertNotEqual(sock1, sock2)
 
-        # We're in a request, so get_socket() returned same sock both times
-        self.assertEqual(sock2, sock3)
-        self.assertFalse(from_pool2)
-
-        # Second call to get_socket() returned from_pool=True
-        self.assert_(from_pool3)
-
-        # Return the sock to pool
+        # Return the request sock to pool
         cx_pool.end_request()
 
-        sock4, from_pool4 = cx_pool.get_socket()
-        sock5, from_pool5 = cx_pool.get_socket()
+        sock4 = cx_pool.get_socket()
+        sock5 = cx_pool.get_socket()
 
         # Not in a request any more, we get different sockets
         self.assertNotEqual(sock4, sock5)
 
         # end_request() returned sock2 to pool
-        self.assert_(from_pool4)
         self.assertEqual(sock4, sock2)
 
-        # But since there was only one sock in the pool after end_request(),
-        # the final call to get_socket() made a new sock
-        self.assertFalse(from_pool5)
+    def test_reset_and_request(self):
+        # reset() is called after a fork, or after a socket error. Ensure that
+        # a new request is begun if a request was in progress when the reset()
+        # occurred, otherwise no request is begun.
+        p = Pool((host, port), 10, None, None, False)
+        self.assertFalse(p.in_request())
+        p.start_request()
+        self.assertTrue(p.in_request())
+        p.reset()
+        self.assertTrue(p.in_request())
+        p.end_request()
+        self.assertFalse(p.in_request())
+        p.reset()
+        self.assertFalse(p.in_request())
 
-    def _test_max_pool_size(self, start_request, end_request):
-        c = get_connection(max_pool_size=4)
+    def test_primitive_thread(self):
+        p = Pool((host, port), 10, None, None, False)
 
+        # Test that start/end_request work with a thread begun from thread
+        # module, rather than threading module
+        lock = thread.allocate_lock()
+        lock.acquire()
+
+        def run_in_request():
+            p.start_request()
+            p.get_socket()
+            p.end_request()
+            lock.release()
+
+        thread.start_new_thread(run_in_request, ())
+
+        # Join thread
+        acquired = False
+        for i in range(10):
+            time.sleep(0.1)
+            acquired = lock.acquire(0)
+            if acquired:
+                break
+
+        self.assertTrue(acquired, "Thread is hung")
+
+    def test_socket_reclamation(self):
+        # Check that if a thread starts a request and dies without ending
+        # the request, that the socket is reclaimed into the pool.
+        cx_pool = Pool(
+            pair=(host,port),
+            max_size=10,
+            net_timeout=1000,
+            conn_timeout=1000,
+            use_ssl=False,
+        )
+
+        self.assertEqual(0, len(cx_pool.sockets))
+
+        lock = thread.allocate_lock()
+        lock.acquire()
+
+        the_sock = [None]
+
+        def leak_request():
+            self.assertEqual(NO_REQUEST, cx_pool.local.sock_info)
+            cx_pool.start_request()
+            self.assertEqual(NO_SOCKET_YET, cx_pool.local.sock_info)
+            sock_info = cx_pool.get_socket()
+            self.assertEqual(sock_info, cx_pool.local.sock_info)
+            the_sock[0] = id(sock_info.sock)
+            lock.release()
+
+        # Start a thread WITHOUT a threading.Thread - important to test that
+        # Pool can deal with primitive threads.
+        thread.start_new_thread(leak_request, ())
+
+        # Join thread
+        acquired = lock.acquire(1)
+        self.assertTrue(acquired, "Thread is hung")
+
+        force_reclaim_sockets(cx_pool, 1)
+
+        # Pool reclaimed the socket
+        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertEqual(the_sock[0], id((iter(cx_pool.sockets).next()).sock))
+
+    def _test_max_pool_size(self, c, start_request, end_request):
         threads = []
         for i in range(40):
             t = CreateAndReleaseSocket(c, start_request, end_request)
@@ -418,38 +553,46 @@ class TestPooling(unittest.TestCase):
             t.join()
 
         for t in threads:
-            self.assert_(t.passed)
+            self.assertTrue(t.passed)
+
+        # Critical: release refs to threads, so SocketInfo.__del__() executes
+        del threads
+        t = None
+
+        cx_pool = c._Connection__pool
+        force_reclaim_sockets(cx_pool, 4)
 
         # There's a race condition, so be lenient
-        nsock = len(c._Connection__pool.sockets)
-        self.assert_(
+        nsock = len(cx_pool.sockets)
+        self.assertTrue(
             abs(4 - nsock) < 4,
             "Expected about 4 sockets in the pool, got %d" % nsock
         )
 
     def test_max_pool_size(self):
-        self._test_max_pool_size(False, False)
+        c = get_connection(max_pool_size=4, auto_start_request=False)
+        self._test_max_pool_size(c, 0, 0)
 
     def test_max_pool_size_with_request(self):
-        self._test_max_pool_size(True, True)
+        c = get_connection(max_pool_size=4, auto_start_request=False)
+        self._test_max_pool_size(c, 1, 1)
+
+    def test_max_pool_size_with_redundant_request(self):
+        c = get_connection(max_pool_size=4, auto_start_request=False)
+        self._test_max_pool_size(c, 2, 1)
+        self._test_max_pool_size(c, 20, 1)
 
     def test_max_pool_size_with_leaked_request(self):
-        # Call start_request() but not end_request() -- this will leak requests,
-        # leaving open sockets that aren't included in the pool at all.
-        # pool.sockets will be empty because sockets are never returned to it.
-        # The sockets will be closed when all references to them are deleted,
-        # which will happen after the test completes and deletes its reference
-        # to a Connection instance.
-        self.assertRaises(
-            AssertionError,
-            self._test_max_pool_size,
-            start_request=True,
-            end_request=False
-        )
+        # Call start_request() but not end_request() -- when threads die, they
+        # should return their request sockets to the pool.
+        c = get_connection(max_pool_size=4, auto_start_request=False)
+        self._test_max_pool_size(c, 1, 0)
 
     def test_max_pool_size_with_end_request_only(self):
         # Call end_request() but not start_request()
-        self._test_max_pool_size(False, True)
+        c = get_connection(max_pool_size=4, auto_start_request=False)
+        self._test_max_pool_size(c, 0, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

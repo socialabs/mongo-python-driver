@@ -1,13 +1,29 @@
+# Copyright 2012 10gen, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.  You
+# may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""Tests for connection-pooling with greenlets and Gevent"""
+
 import os
-import threading
 import time
+import threading
 import unittest
 
 from nose.plugins.skip import SkipTest
 
 from pymongo import pool
 from test_connection import get_connection
-from testutils import delay
+from test.utils import delay, force_reclaim_sockets
 
 host = os.environ.get("DB_IP", "localhost")
 port = int(os.environ.get("DB_PORT", 27017))
@@ -30,26 +46,15 @@ def looplet(greenlets):
 class GeventTest(unittest.TestCase):
     def _test_pool(self, use_greenlets, use_request):
         """
-        Demonstrate a problem with pymongo 2.1's connection pool: it relies on
-        threading.local to associate sockets with threads, so it doesn't support
-        greenlets. Since greenlets incorrectly *share* a socket, gevent throws
-        the assertion error, "This event is already used by another greenlet."
+        Test that the connection pool prevents both threads and greenlets from
+        using a socket at the same time.
 
-        https://bitbucket.org/denis/gevent/src/63e08a21e032/gevent/socket.py#cl-163
-
-        To reproduce this error, I schedule greenlets to do operations in this
-        order:
-
+        Sequence:
         gr0: start a slow find()
         gr1: start a fast find()
-            (here's the error: gr1 tries to wait on the same socket as gr0)
         gr1: get results
         gr0: get results
-        
-        This method is written to use either greenlets or threads -- If we have
-        fixed Pool properly, the method will behave the same in either case.
         """
-
         NOT_STARTED = 0
         SUCCESS = 1
         SKIP = 2
@@ -57,7 +62,7 @@ class GeventTest(unittest.TestCase):
         try:
             from multiprocessing import Value, Process
         except ImportError:
-            # Python < 2.5
+            # Python < 2.6
             raise SkipTest('No multiprocessing module')
         
         outcome = Value('i', NOT_STARTED)
@@ -74,12 +79,20 @@ class GeventTest(unittest.TestCase):
                 try:
                     from gevent import Greenlet
                     from gevent import monkey
+
+                    # Note we don't do patch_thread() or patch_all() - we're
+                    # testing here that patch_thread() is unnecessary for
+                    # the connection pool to work properly.
                     monkey.patch_socket()
                 except ImportError:
                     outcome.value = SKIP
                     return
     
-            cx = get_connection(use_greenlets=use_greenlets)
+            cx = get_connection(
+                use_greenlets=use_greenlets,
+                auto_start_request=False
+            )
+
             db = cx.pymongo_test
             db.test.remove(safe=True)
             db.test.insert({'_id': 1})
@@ -123,9 +136,10 @@ class GeventTest(unittest.TestCase):
                 gr0.start()
                 gr1.start_later(.1)
             else:
-                gr0, gr1 = threading.Thread(target=find_slow), threading.Thread(target=find_fast)
+                gr0 = threading.Thread(target=find_slow)
+                gr1 = threading.Thread(target=find_fast)
                 gr0.start()
-                time.sleep(.1)
+                time.sleep(0.1)
                 gr1.start()
 
             gr0.join()
@@ -141,7 +155,7 @@ class GeventTest(unittest.TestCase):
                 'find_fast start',
                 'find_fast done',
                 'find_slow done',
-                ], history)
+            ], history)
 
             outcome.value = SUCCESS
 
@@ -181,7 +195,7 @@ class GeventTest(unittest.TestCase):
         except ImportError:
             raise SkipTest('greenlet not installed')
 
-        cx_pool = pool.Pool(
+        cx_pool = pool.GreenletPool(
             pair=(host,port),
             max_size=10,
             net_timeout=1000,
@@ -193,7 +207,6 @@ class GeventTest(unittest.TestCase):
 
         def get_socket():
             cx_pool.start_request()
-
             socks.append(cx_pool.get_socket())
 
         looplet([
@@ -207,17 +220,14 @@ class GeventTest(unittest.TestCase):
     def test_greenlet_sockets_with_request(self):
         # Verify two assumptions: that start_request() with two greenlets and
         # the regular pool will fail, meaning that the two greenlets will
-        # share one socket. Also check that start_request() with greenlet_pool
+        # share one socket. Also check that start_request() with GreenletPool
         # succeeds, meaning that two greenlets will get different sockets (this
-        # is exactly the reason for creating greenlet_pool).
+        # is exactly the reason for creating GreenletPool).
 
         try:
             import greenlet
         except ImportError:
             raise SkipTest('greenlet not installed')
-
-        # If greenlet module is available, then we can import greenlet_pool
-        from pymongo import greenlet_pool
 
         pool_args = dict(
             pair=(host,port),
@@ -227,9 +237,11 @@ class GeventTest(unittest.TestCase):
             use_ssl=False,
         )
 
-        for pool_class, expect_success in [
-            (greenlet_pool.GreenletPool, True),
-            (pool.Pool, False),
+        for pool_class, use_request, expect_success in [
+            (pool.GreenletPool, True, True),
+            (pool.GreenletPool, False, False),
+            (pool.Pool, True, False),
+            (pool.Pool, False, False),
         ]:
             cx_pool = pool_class(**pool_args)
 
@@ -239,14 +251,17 @@ class GeventTest(unittest.TestCase):
 
             def get_socket_in_request():
                 # Get a socket from the pool twice, switching contexts each time
-                cx_pool.start_request()
+                if use_request:
+                    cx_pool.start_request()
+
                 main.switch()
 
                 for i in range(2):
-                    sock, from_pool = cx_pool.get_socket()
+                    sock = cx_pool.get_socket()
+                    cx_pool.return_socket(sock)
                     greenlet2socks.setdefault(
                         greenlet.getcurrent(), []
-                    ).append(sock)
+                    ).append(id(sock))
 
                     main.switch()
 
@@ -268,6 +283,13 @@ class GeventTest(unittest.TestCase):
             self.assertEqual(2, len(greenlet2socks))
             self.assertEqual(2, len(socks_for_gr0))
             self.assertEqual(2, len(socks_for_gr1))
+
+            # If we started a request, then there was a point at which we had
+            # 2 active sockets, otherwise we always used one.
+            if use_request and pool_class is pool.GreenletPool:
+                self.assertEqual(2, len(cx_pool.sockets))
+            else:
+                self.assertEqual(1, len(cx_pool.sockets))
 
             # Again, regardless of whether requests work, a greenlet will get
             # the same socket each time it calls get_socket() within a request.
@@ -301,6 +323,45 @@ class GeventTest(unittest.TestCase):
                     socks_for_gr0[0], socks_for_gr1[0],
                     "Expected two greenlets to get same socket"
                 )
+
+    def test_socket_reclamation(self):
+        try:
+            import greenlet
+        except ImportError:
+            raise SkipTest('greenlet not installed')
+
+        # Check that if a greenlet starts a request and dies without ending
+        # the request, that the socket is reclaimed
+        cx_pool = pool.GreenletPool(
+            pair=(host,port),
+            max_size=10,
+            net_timeout=1000,
+            conn_timeout=1000,
+            use_ssl=False,
+        )
+
+        self.assertEqual(0, len(cx_pool.sockets))
+
+        the_sock = [None]
+
+        def leak_request():
+            cx_pool.start_request()
+            sock_info = cx_pool.get_socket()
+            the_sock[0] = id(sock_info.sock)
+
+        # Run the greenlet to completion
+        gr = greenlet.greenlet(leak_request)
+        gr.switch()
+
+        # Cause greenlet to be garbage-collected
+        del gr
+
+        force_reclaim_sockets(cx_pool, 1)
+
+        # Pool reclaimed the socket
+        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertEqual(the_sock[0], id(iter(cx_pool.sockets).next().sock))
+
 
 if __name__ == '__main__':
     unittest.main()

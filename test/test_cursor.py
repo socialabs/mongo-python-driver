@@ -727,7 +727,9 @@ class TestCursor(unittest.TestCase):
         check_len(self.db.test.find().skip(110), 0)
 
         check_len(self.db.test.find().limit(10).skip(10), 10)
+        check_len(self.db.test.find()[10:20], 10)
         check_len(self.db.test.find().limit(10).skip(95), 5)
+        check_len(self.db.test.find()[95:105], 5)
 
     def test_len(self):
         self.assertRaises(TypeError, len, self.db.test.find())

@@ -36,10 +36,9 @@ access:
 import datetime
 import socket
 import struct
-import sys
-import time
 import warnings
 
+from bson.py3compat import b
 from bson.son import SON
 from pymongo import (common,
                      database,
@@ -56,21 +55,7 @@ from pymongo.errors import (AutoReconnect,
                             InvalidURI,
                             OperationFailure)
 
-if sys.platform.startswith('java'):
-    from select import cpython_compatible_select as select
-else:
-    from select import select
-
-def _closed(sock):
-    """Return True if we know socket has been closed, False otherwise.
-    """
-    try:
-        rd, _, _ = select([sock], [], [], 0)
-    # Any exception here is equally bad (select.error, ValueError, etc.).
-    except:
-        return True
-    return len(rd) > 0
-
+EMPTY = b("")
 
 def _partition_node(node):
     """Split a host:port string returned from mongod/s into
@@ -97,8 +82,7 @@ class Connection(common.BaseObject):
 
     def __init__(self, host=None, port=None, max_pool_size=10,
                  network_timeout=None, document_class=dict,
-                 tz_aware=False, use_greenlets=False, _connect=True,
-                 _pool_class=None, **kwargs):
+                 tz_aware=False, _connect=True, **kwargs):
         """Create a new connection to a single MongoDB instance at *host:port*.
 
         The resultant connection object has connection-pooling built
@@ -171,13 +155,19 @@ class Connection(common.BaseObject):
           - `ssl`: If True, create the connection to the server using SSL.
           - `read_preference`: The read preference for this connection.
             See :class:`~pymongo.ReadPreference` for available options.
-          - `slave_okay` or `slaveOk` (deprecated): Use `read_preference`
-            instead.
+          - `auto_start_request`: If True (the default), each thread that
+            accesses this Connection has a socket allocated to it for the
+            thread's lifetime.  This ensures consistent reads, even if you read
+            after an unsafe write.
           - `use_greenlets` (optional): if ``True``, :meth:`start_request()`
             will ensure that the current greenlet uses the same socket for all
-            requests until :meth:`end_request()`
+            operations until :meth:`end_request()`
+          - `slave_okay` or `slaveOk` (deprecated): Use `read_preference`
+            instead.
 
         .. seealso:: :meth:`end_request`
+        .. versionchanged:: 2.1.1+
+           Added `auto_start_request` option back.
         .. versionchanged:: 2.1
            Support `w` = integer or string.
            Added `ssl` option.
@@ -242,11 +232,8 @@ class Connection(common.BaseObject):
             option, value = common.validate(option, value)
             options[option] = value
 
-        if not isinstance(max_pool_size, int):
-            raise ConfigurationError("max_pool_size must be an integer")
-        if max_pool_size < 0:
-            raise ValueError("max_pool_size must be >= 0")
-        self.__max_pool_size = max_pool_size
+        self.__max_pool_size = common.validate_positive_integer(
+                                                'max_pool_size', max_pool_size)
 
         self.__cursor_manager = CursorManager(self)
 
@@ -266,14 +253,16 @@ class Connection(common.BaseObject):
                                      "are using a python version previous to "
                                      "2.6 you must install the ssl package "
                                      "from PyPI.")
-        if _pool_class:
-            self.pool_class = _pool_class
+
+        if options.get('use_greenlets', False):
+            if not pool.have_greenlet:
+                raise ConfigurationError(
+                    "The greenlet module is not available. "
+                    "Install the greenlet package from PyPI."
+                )
+            self.pool_class = pool.GreenletPool
         else:
-            if use_greenlets:
-                import greenlet_pool
-                self.pool_class = greenlet_pool.GreenletPool
-            else:
-                self.pool_class = pool.Pool
+            self.pool_class = pool.Pool
 
         self.__pool = self.pool_class(
             None,
@@ -283,10 +272,9 @@ class Connection(common.BaseObject):
             self.__use_ssl
         )
 
-        self.__last_checkout = time.time()
-
         self.__document_class = document_class
-        self.__tz_aware = tz_aware
+        self.__tz_aware = common.validate_boolean('tz_aware', tz_aware)
+        self.__auto_start_request = options.get('auto_start_request', True)
 
         # cache of existing indexes used by ensure_index ops
         self.__index_cache = {}
@@ -380,19 +368,19 @@ class Connection(common.BaseObject):
         elif db_name in self.__auth_credentials:
             del self.__auth_credentials[db_name]
 
-    def __check_auth(self, sock, pool):
+    def __check_auth(self, sock_info):
         """Authenticate using cached database credentials.
 
         If credentials for the 'admin' database are available only
         this database is authenticated, since this gives global access.
         """
+        authset = sock_info.authset
         names = set(self.__auth_credentials.iterkeys())
-        authset = pool.get_authset(sock)
 
         # Logout from any databases no longer listed in the credentials cache.
         for dbname in authset - names:
             try:
-                self.__simple_command(sock, dbname, {'logout': 1})
+                self.__simple_command(sock_info, dbname, {'logout': 1})
             # TODO: We used this socket to logout. Fix logout so we don't
             # have to catch this.
             except OperationFailure:
@@ -405,12 +393,12 @@ class Connection(common.BaseObject):
 
         if "admin" in self.__auth_credentials:
             username, password = self.__auth_credentials["admin"]
-            self.__auth(sock, 'admin', username, password)
+            self.__auth(sock_info, 'admin', username, password)
             authset.add('admin')
         else:
             for db_name in names - authset:
                 user, pwd = self.__auth_credentials[db_name]
-                self.__auth(sock, db_name, user, pwd)
+                self.__auth(sock_info, db_name, user, pwd)
                 authset.add(db_name)
 
     @property
@@ -451,6 +439,10 @@ class Connection(common.BaseObject):
         """
         return self.__nodes
 
+    @property
+    def auto_start_request(self):
+        return self.__auto_start_request
+
     def get_document_class(self):
         return self.__document_class
 
@@ -483,29 +475,29 @@ class Connection(common.BaseObject):
         """
         return self.__max_bson_size
 
-    def __simple_command(self, sock, dbname, spec):
+    def __simple_command(self, sock_info, dbname, spec):
         """Send a command to the server.
         """
         rqst_id, msg, _ = message.query(0, dbname + '.$cmd', 0, -1, spec)
-        sock.sendall(msg)
-        response = self.__receive_message_on_socket(1, rqst_id, sock)
+        sock_info.sock.sendall(msg)
+        response = self.__receive_message_on_socket(1, rqst_id, sock_info)
         response = helpers._unpack_response(response)['data'][0]
         msg = "command %r failed: %%s" % spec
         helpers._check_command_response(response, None, msg)
         return response
 
-    def __auth(self, sock, dbname, user, passwd):
-        """Authenticate socket `sock` against database `dbname`.
+    def __auth(self, sock_info, dbname, user, passwd):
+        """Authenticate socket against database `dbname`.
         """
         # Get a nonce
-        response = self.__simple_command(sock, dbname, {'getnonce': 1})
+        response = self.__simple_command(sock_info, dbname, {'getnonce': 1})
         nonce = response['nonce']
         key = helpers._auth_key(nonce, user, passwd)
 
         # Actually authenticate
         query = SON([('authenticate', 1),
             ('user', user), ('nonce', nonce), ('key', key)])
-        self.__simple_command(sock, dbname, query)
+        self.__simple_command(sock_info, dbname, query)
 
     def __try_node(self, node):
         """Try to connect to this node and see if it works
@@ -593,35 +585,25 @@ class Connection(common.BaseObject):
         raise AutoReconnect(', '.join(errors))
 
     def __socket(self):
-        """Get a socket from the pool.
-
-        If it's been > 1 second since the last time we checked out a
-        socket, we also check to see if the socket has been closed -
-        this let's us avoid seeing *some*
-        :class:`~pymongo.errors.AutoReconnect` exceptions on server
-        hiccups, etc. We only do this if it's been > 1 second since
-        the last socket checkout, to keep performance reasonable - we
-        can't avoid those completely anyway.
+        """Get a SocketInfo from the pool.
         """
         host, port = (self.__host, self.__port)
         if host is None or port is None:
             host, port = self.__find_node()
 
         try:
-            sock, from_pool = self.__pool.get_socket((host, port))
+            if self.__auto_start_request:
+                # No effect if a request already started
+                self.start_request()
+
+            sock_info = self.__pool.get_socket((host, port))
         except socket.error, why:
             self.disconnect()
             raise AutoReconnect("could not connect to "
                                 "%s:%d: %s" % (host, port, str(why)))
-        t = time.time()
-        if t - self.__last_checkout > 1:
-            if _closed(sock):
-                self.disconnect()
-                sock, from_pool = self.__pool.get_socket((host, port))
-        self.__last_checkout = t
         if self.__auth_credentials:
-            self.__check_auth(sock, self.__pool)
-        return sock
+            self.__check_auth(sock_info)
+        return sock_info
 
     def disconnect(self):
         """Disconnect from MongoDB.
@@ -636,14 +618,7 @@ class Connection(common.BaseObject):
         .. seealso:: :meth:`end_request`
         .. versionadded:: 1.3
         """
-        self.__pool = self.pool_class(
-            None,
-            self.__max_pool_size,
-            self.__net_timeout,
-            self.__conn_timeout,
-            self.__use_ssl
-        )
-
+        self.__pool.reset()
         self.__host = None
         self.__port = None
 
@@ -746,10 +721,10 @@ class Connection(common.BaseObject):
           - `with_last_error`: check getLastError status after sending the
             message
         """
-        sock = self.__socket()
+        sock_info = self.__socket()
         try:
             (request_id, data) = self.__check_bson_size(message)
-            sock.sendall(data)
+            sock_info.sock.sendall(data)
             # Safe mode. We pack the message together with a lastError
             # message and send both. We then get the response (to the
             # lastError) and raise OperationFailure if it is an error
@@ -757,55 +732,56 @@ class Connection(common.BaseObject):
             rv = None
             if with_last_error:
                 response = self.__receive_message_on_socket(1, request_id,
-                                                            sock)
+                                                            sock_info)
                 rv = self.__check_response_to_last_error(response)
 
-            self.__pool.return_socket(sock)
+            self.__pool.return_socket(sock_info)
             return rv
         except (ConnectionFailure, socket.error), e:
             self.disconnect()
             raise AutoReconnect(str(e))
 
-    def _receive_data_on_socket(self, length, sock, request_id):
+    def __receive_data_on_socket(self, length, sock_info):
         """Lowest level receive operation.
 
         Takes length to receive and repeatedly calls recv until able to
         return a buffer of that length, raising ConnectionFailure on error.
         """
-        message = ""
-        while len(message) < length:
+        chunks = []
+        while length:
             try:
-                chunk = sock.recv(length - len(message))
+                chunk = sock_info.sock.recv(length)
             except:
                 # If recv was interrupted, discard the socket
                 # and re-raise the exception.
-                self.__pool.discard_socket(sock)
+                self.__pool.discard_socket(sock_info)
                 raise
-            if chunk == "":
+            if chunk == EMPTY:
                 raise ConnectionFailure("connection closed")
-            message += chunk
-        return message
+            length -= len(chunk)
+            chunks.append(chunk)
+        return EMPTY.join(chunks)
 
-    def __receive_message_on_socket(self, operation, request_id, sock):
+    def __receive_message_on_socket(self, operation, request_id, sock_info):
         """Receive a message in response to `request_id` on `sock`.
 
         Returns the response data with the header removed.
         """
-        header = self._receive_data_on_socket(16, sock, request_id)
+        header = self.__receive_data_on_socket(16, sock_info)
         length = struct.unpack("<i", header[:4])[0]
         assert request_id == struct.unpack("<i", header[8:12])[0], \
             "ids don't match %r %r" % (request_id,
                                        struct.unpack("<i", header[8:12])[0])
         assert operation == struct.unpack("<i", header[12:])[0]
 
-        return self._receive_data_on_socket(length - 16, sock, request_id)
+        return self.__receive_data_on_socket(length - 16, sock_info)
 
-    def __send_and_receive(self, message, sock):
+    def __send_and_receive(self, message, sock_info):
         """Send a message on the given socket and return the response data.
         """
         (request_id, data) = self.__check_bson_size(message)
-        sock.sendall(data)
-        return self.__receive_message_on_socket(1, request_id, sock)
+        sock_info.sock.sendall(data)
+        return self.__receive_message_on_socket(1, request_id, sock_info)
 
     # we just ignore _must_use_master here: it's only relevant for
     # MasterSlaveConnection instances.
@@ -818,13 +794,13 @@ class Connection(common.BaseObject):
         :Parameters:
           - `message`: (request_id, data) pair making up the message to send
         """
-        sock = self.__socket()
+        sock_info = self.__socket()
 
         try:
             try:
                 if "network_timeout" in kwargs:
-                    sock.settimeout(kwargs["network_timeout"])
-                return self.__send_and_receive(message, sock)
+                    sock_info.sock.settimeout(kwargs["network_timeout"])
+                return self.__send_and_receive(message, sock_info)
             except (ConnectionFailure, socket.error), e:
                 self.disconnect()
                 raise AutoReconnect(str(e))
@@ -833,35 +809,46 @@ class Connection(common.BaseObject):
                 try:
                     # Restore the socket's original timeout and return it to
                     # the pool
-                    sock.settimeout(self.__net_timeout)
-                    self.__pool.return_socket(sock)
+                    sock_info.sock.settimeout(self.__net_timeout)
+                    self.__pool.return_socket(sock_info)
                 except socket.error:
                     # There was an exception and we've closed the socket
                     pass
             else:
-                self.__pool.return_socket(sock)
+                self.__pool.return_socket(sock_info)
 
     def start_request(self):
-        """Assigns a socket to the current thread or greenlet until it calls
-        :meth:`end_request`
+        """Ensure the current thread or greenlet always uses the same socket
+        until it calls :meth:`end_request`. This ensures consistent reads,
+        even if you read after an unsafe write.
 
-           In Python 2.6 and above, or in Python 2.5 with
-           "from __future__ import with_statement", start_request() can be used
-           as a context manager:
-        >>> connection = pymongo.Connection()
+        In Python 2.6 and above, or in Python 2.5 with
+        "from __future__ import with_statement", :meth:`start_request` can be
+        used as a context manager:
+
+        >>> connection = pymongo.Connection(auto_start_request=False)
         >>> db = connection.test
         >>> _id = db.test_collection.insert({}, safe=True)
         >>> with connection.start_request():
         ...     for i in range(100):
         ...         db.test_collection.update({'_id': _id}, {'$set': {'i':i}})
+        ...
         ...     # Definitely read the document after the final update completes
         ...     print db.test_collection.find({'_id': _id})
 
         .. versionadded:: 2.1.1+
-           The `Request` return value. `start_request` previously returned None
+           The :class:`~pymongo.pool.Request` return value.
+           :meth:`start_request` previously returned None
         """
         self.__pool.start_request()
         return pool.Request(self)
+
+    def in_request(self):
+        """True if :meth:`start_request` has been called, but not
+        :meth:`end_request`, or if `auto_start_request` is True and
+        :meth:`end_request` has not been called in this thread or greenlet.
+        """
+        return self.__pool.in_request()
 
     def end_request(self):
         """Undo :meth:`start_request` and allow this thread's connection to
@@ -879,10 +866,11 @@ class Connection(common.BaseObject):
         """
         self.__pool.end_request()
 
-    def __cmp__(self, other):
+    def __eq__(self, other):
         if isinstance(other, Connection):
-            return cmp((self.__host, self.__port),
-                       (other.__host, other.__port))
+            us = (self.__host, self.__port)
+            them = (other.__host, other.__port)
+            return us == them
         return NotImplemented
 
     def __repr__(self):
@@ -959,7 +947,7 @@ class Connection(common.BaseObject):
         """Drop a database.
 
         Raises :class:`TypeError` if `name_or_database` is not an instance of
-        ``(str, unicode, Database)``
+        :class:`basestring` (:class:`str` in python 3) or Database.
 
         :Parameters:
           - `name_or_database`: the name of a database to drop, or a
@@ -972,7 +960,7 @@ class Connection(common.BaseObject):
 
         if not isinstance(name, basestring):
             raise TypeError("name_or_database must be an instance of "
-                            "(Database, str, unicode)")
+                            "%s or Database" % (basestring.__name__,))
 
         self._purge_index(name)
         self[name].command("dropDatabase")
@@ -982,9 +970,9 @@ class Connection(common.BaseObject):
         """Copy a database, potentially from another host.
 
         Raises :class:`TypeError` if `from_name` or `to_name` is not
-        an instance of :class:`basestring`. Raises
-        :class:`~pymongo.errors.InvalidName` if `to_name` is not a
-        valid database name.
+        an instance of :class:`basestring` (:class:`str` in python 3).
+        Raises :class:`~pymongo.errors.InvalidName` if `to_name` is
+        not a valid database name.
 
         If `from_host` is ``None`` the current host is used as the
         source. Otherwise the database is copied from `from_host`.
@@ -1005,9 +993,11 @@ class Connection(common.BaseObject):
         .. versionadded:: 1.5
         """
         if not isinstance(from_name, basestring):
-            raise TypeError("from_name must be an instance of basestring")
+            raise TypeError("from_name must be an instance "
+                            "of %s" % (basestring.__name__,))
         if not isinstance(to_name, basestring):
-            raise TypeError("to_name must be an instance of basestring")
+            raise TypeError("to_name must be an instance "
+                            "of %s" % (basestring.__name__,))
 
         database._check_name(to_name)
 
@@ -1016,8 +1006,11 @@ class Connection(common.BaseObject):
         if from_host is not None:
             command["fromhost"] = from_host
 
+        in_request = self.in_request()
         try:
-            self.start_request()
+            if not in_request:
+                self.start_request()
+
             if username is not None:
                 nonce = self.admin.command("copydbgetnonce",
                                            fromhost=from_host)["nonce"]
@@ -1027,7 +1020,8 @@ class Connection(common.BaseObject):
 
             return self.admin.command("copydb", **command)
         finally:
-            self.end_request()
+            if not in_request:
+                self.end_request()
 
     @property
     def is_locked(self):
