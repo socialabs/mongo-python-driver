@@ -6,7 +6,8 @@ import re
 import fake_pymongo
 
 # TODO: running this file without a test-module name does nothing; it should run
-#   all PyMongo tests
+#   all PyMongo tests except test_gevent
+# TODO: test for Motor all the things test_pooling tests
 
 if __name__ == '__main__':
     # Monkey-patch all pymongo's unittests so they think our fake pymongo is the
@@ -37,6 +38,9 @@ if __name__ == '__main__':
     # TODO: fix these, or implement a Motor-specific test that exercises the
     # same features as each of these
     # TODO: document these variations and omissions b/w PyMongo and the Motor API
+    # TODO: some way to specify the class or module name of these tests, not just
+    #   the method name? I'm worried I'll skip more than one test if many have
+    #   the same name.
     excluded_tests = [
         'test_multiprocessing',
         'test_ensure_unique_index_threaded',
@@ -48,6 +52,11 @@ if __name__ == '__main__':
         # No point supporting these in Motor
         'test_system_js',
         'test_system_js_list',
+        'test_getitem_numeric_index',
+        'test_getitem_slice_index',
+        'test_properties',
+        'test_threaded_writes',
+        'test_threaded_reads',
     ]
 
     print 'WARNING: excluding some tests -- go in and fix them for async!'

@@ -28,6 +28,7 @@ import pymongo.pool
 import pymongo.connection
 import pymongo.database
 import pymongo.collection
+import pymongo.cursor
 import pymongo.son_manipulator
 from pymongo.errors import InvalidOperation
 
@@ -54,6 +55,10 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 #   Collection, make sure we respect them
 # TODO: What's with this warning when running tests?:
 #   "WARNING:root:Connect error on fd 6: [Errno 8] nodename nor servname provided, or not known"
+# TODO: test tailable cursor, write up a standard means of tailing a cursor
+#   forever, to be packaged with Motor
+# TODO: SSL
+
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -196,25 +201,23 @@ class TornadoPool(pymongo.pool.Pool):
 
 def asynchronize(self, sync_method, has_safe_arg, cb_required):
     """
-    @param method_name: Name of a method on pymongo Collection, Database,
-                        Connection, or Cursor
-    @param has_safe_arg:        Whether the method takes a 'safe' argument
-    @param cb_required: If True, raise TypeError if no callback is passed
+    @param self:            A Tornado object, e.g. TornadoConnection
+    @param sync_method:     Bound method of pymongo Collection, Database,
+                            Connection, or Cursor
+    @param has_safe_arg:    Whether the method takes a 'safe' argument
+    @param cb_required:     If True, raise TypeError if no callback is passed
     """
     # TODO doc
     # TODO: staticmethod of base class for Tornado objects, add some custom
     #   stuff, like Connection can't do anything before open()
+    assert isinstance(self, TornadoBase)
+
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
         """
         @param self:    A TornadoConnection, TornadoDatabase, or
                         TornadoCollection
         """
-        assert isinstance(self, (
-            TornadoConnection, TornadoDatabase, TornadoCollection,
-            TornadoCursor
-        ))
-
         callback = kwargs.get('callback')
         check_callable(callback, required=cb_required)
 
@@ -300,7 +303,7 @@ class TornadoMeta(type):
         # Create the class.
         new_class = type.__new__(cls, name, bases, attrs)
 
-        delegated_attrs = {}
+#        delegated_attrs = {}
 
         # Set DelegateProperties' names
         for name, attr in attrs.items():
@@ -308,7 +311,7 @@ class TornadoMeta(type):
                 attr.name = name
 
         # Information for users of the Delegator class or instance
-        new_class.delegated_attrs = delegated_attrs
+#        new_class.delegated_attrs = delegated_attrs
 
         return new_class
 
@@ -345,6 +348,14 @@ class TornadoConnection(TornadoBase):
     server_info                 = Async(has_safe_arg=False, cb_required=False)
     fsync                       = Async(has_safe_arg=False, cb_required=False)
     unlock                      = Async(has_safe_arg=False, cb_required=False)
+
+    close                       = ReadOnlyDelegateProperty()
+    disconnect                  = ReadOnlyDelegateProperty()
+    nodes                       = ReadOnlyDelegateProperty()
+    max_bson_size               = ReadOnlyDelegateProperty()
+
+    # HACK!: For unittests that examine this attribute
+    _Connection__pool           = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -448,14 +459,8 @@ class TornadoConnection(TornadoBase):
             name_or_database = name_or_database.delegate.name
 
         async_method = asynchronize(
-            self, pymongo.connection.Connection.drop_database, False, True)
+            self, self.delegate.drop_database, False, True)
         async_method(name_or_database, callback=callback)
-
-    close = ReadOnlyDelegateProperty()
-    disconnect = ReadOnlyDelegateProperty()
-
-    # HACK!: For unittests that examine this attribute
-    _Connection__pool = ReadOnlyDelegateProperty()
 
     @property
     def connected(self):
@@ -504,23 +509,29 @@ class TornadoReplicaSetConnection(TornadoBase):
 
 class TornadoDatabase(TornadoBase):
     # list of overridden async operations on a TornadoDatabase instance
-    set_profiling_level     = Async(has_safe_arg=False, cb_required=False)
-    reset_error_history     = Async(has_safe_arg=False, cb_required=False)
-    add_user                = Async(has_safe_arg=False, cb_required=False)
-    remove_user             = Async(has_safe_arg=False, cb_required=False)
-    authenticate            = Async(has_safe_arg=False, cb_required=False)
-    logout                  = Async(has_safe_arg=False, cb_required=False)
-    command                 = Async(has_safe_arg=False, cb_required=False)
+    set_profiling_level           = Async(has_safe_arg=False, cb_required=False)
+    reset_error_history           = Async(has_safe_arg=False, cb_required=False)
+    add_user                      = Async(has_safe_arg=False, cb_required=False)
+    remove_user                   = Async(has_safe_arg=False, cb_required=False)
+    authenticate                  = Async(has_safe_arg=False, cb_required=False)
+    logout                        = Async(has_safe_arg=False, cb_required=False)
+    command                       = Async(has_safe_arg=False, cb_required=False)
     
-    collection_names        = Async(has_safe_arg=False, cb_required=True)
-    current_op              = Async(has_safe_arg=False, cb_required=True)
-    profiling_level         = Async(has_safe_arg=False, cb_required=True)
-    profiling_info          = Async(has_safe_arg=False, cb_required=True)
-    error                   = Async(has_safe_arg=False, cb_required=True)
-    last_status             = Async(has_safe_arg=False, cb_required=True)
-    previous_error          = Async(has_safe_arg=False, cb_required=True)
-    dereference             = Async(has_safe_arg=False, cb_required=True)
-    eval                    = Async(has_safe_arg=False, cb_required=True)
+    collection_names              = Async(has_safe_arg=False, cb_required=True)
+    current_op                    = Async(has_safe_arg=False, cb_required=True)
+    profiling_level               = Async(has_safe_arg=False, cb_required=True)
+    profiling_info                = Async(has_safe_arg=False, cb_required=True)
+    error                         = Async(has_safe_arg=False, cb_required=True)
+    last_status                   = Async(has_safe_arg=False, cb_required=True)
+    previous_error                = Async(has_safe_arg=False, cb_required=True)
+    dereference                   = Async(has_safe_arg=False, cb_required=True)
+    eval                          = Async(has_safe_arg=False, cb_required=True)
+
+    system_js                     = ReadOnlyDelegateProperty()
+    incoming_manipulators         = ReadOnlyDelegateProperty()
+    incoming_copying_manipulators = ReadOnlyDelegateProperty()
+    outgoing_manipulators         = ReadOnlyDelegateProperty()
+    outgoing_copying_manipulators = ReadOnlyDelegateProperty()
 
     def __init__(self, connection, name, *args, **kwargs):
         # *args and **kwargs are not currently supported by pymongo Database,
@@ -670,12 +681,43 @@ class TornadoCollection(TornadoBase):
 
     uuid_subtype = ReadWriteDelegateProperty()
 
-    
+
+class CallAndReturnSelf(DelegateProperty):
+    def __get__(self, obj, objtype):
+        # self.name is set by TornadoMeta
+        method = getattr(obj.delegate, self.name)
+
+        def return_self(*args, **kwargs):
+            method(*args, **kwargs)
+            return obj
+
+        return return_self
+
+
 # TODO: hint(), etc.
 class TornadoCursor(TornadoBase):
-    count               = Async(has_safe_arg=False, cb_required=True)
-    distinct            = Async(has_safe_arg=False, cb_required=True)
-    explain             = Async(has_safe_arg=False, cb_required=True)
+    # TODO: test all these in test_async.py
+    count                       = Async(has_safe_arg=False, cb_required=True)
+    distinct                    = Async(has_safe_arg=False, cb_required=True)
+    explain                     = Async(has_safe_arg=False, cb_required=True)
+    next                        = Async(has_safe_arg=False, cb_required=True)
+    __exit__                    = Async(has_safe_arg=False, cb_required=True)
+
+    # TODO: document that we don't support [ ] access - use skip and limit
+    # TODO: document that we don't support cursor.collection property
+    slave_okay                  = ReadOnlyDelegateProperty()
+    alive                       = ReadOnlyDelegateProperty()
+
+    batch_size                  = CallAndReturnSelf()
+    add_option                  = CallAndReturnSelf()
+    remove_option               = CallAndReturnSelf()
+    limit                       = CallAndReturnSelf()
+    skip                        = CallAndReturnSelf()
+    max_scan                    = CallAndReturnSelf()
+    sort                        = CallAndReturnSelf()
+    hint                        = CallAndReturnSelf()
+    where                       = CallAndReturnSelf()
+    __enter__                   = CallAndReturnSelf()
 
     def __init__(self, cursor):
         """
@@ -685,7 +727,7 @@ class TornadoCursor(TornadoBase):
         self.started = False
 
         # Number of documents buffered in delegate
-        self.batched_size = 0
+        self.buffer_size = 0
 
     def _get_more(self, callback):
         """
@@ -716,9 +758,9 @@ class TornadoCursor(TornadoBase):
         # TODO: simplify, review
 
         # TODO: remove so we don't have to use double-underscore hack
-        assert self.batched_size == len(self.delegate._Cursor__data)
+        assert self.buffer_size == len(self.delegate._Cursor__data)
 
-        while self.batched_size > 0:
+        while self.buffer_size > 0:
             try:
                 doc = self.delegate.next()
             except StopIteration:
@@ -729,10 +771,10 @@ class TornadoCursor(TornadoBase):
                 callback(None, e)
                 return
 
-            self.batched_size -= 1
+            self.buffer_size -= 1
 
             # TODO: remove so we don't have to use double-underscore hack
-            assert self.batched_size == len(self.delegate._Cursor__data)
+            assert self.buffer_size == len(self.delegate._Cursor__data)
 
             should_continue = callback(doc, None)
 
@@ -745,8 +787,8 @@ class TornadoCursor(TornadoBase):
                 if error:
                     callback(None, error)
                 elif batch_size:
-                    assert self.batched_size == 0
-                    self.batched_size = batch_size
+                    assert self.buffer_size == 0
+                    self.buffer_size = batch_size
                     self.each(callback)
                 else:
                     # Complete
@@ -788,25 +830,35 @@ class TornadoCursor(TornadoBase):
 
         self.each(for_each)
 
-    # TODO: refactor these methods
-    def where(self, code):
-        self.delegate.where(code)
-        return self
-
-    def sort(self, *args, **kwargs):
-        self.delegate.sort(*args, **kwargs)
-        return self
+    def clone(self):
+        return TornadoCursor(self.delegate.clone())
 
     def close(self):
         """Explicitly close this cursor.
         """
         # TODO: either use asynchronize() or explain why this works
         greenlet.greenlet(self.delegate.close).switch()
+    
+    def rewind(self):
+        self.delegate.rewind()
+        self.buffer_size = 0
+        return self
 
     def __del__(self):
         if self.alive:
             self.close()
 
-
-    alive = ReadOnlyDelegateProperty()
-
+    # HACK!: For unittests that, extremely regrettably, examine these attributes
+    _Cursor__query_options      = ReadOnlyDelegateProperty()
+    _Cursor__retrieved          = ReadOnlyDelegateProperty()
+    _Cursor__skip               = ReadOnlyDelegateProperty()
+    _Cursor__limit              = ReadOnlyDelegateProperty()
+    _Cursor__timeout            = ReadOnlyDelegateProperty()
+    _Cursor__snapshot           = ReadOnlyDelegateProperty()
+    _Cursor__tailable           = ReadOnlyDelegateProperty()
+    _Cursor__as_class           = ReadOnlyDelegateProperty()
+    _Cursor__slave_okay         = ReadOnlyDelegateProperty()
+    _Cursor__await_data         = ReadOnlyDelegateProperty()
+    _Cursor__partial            = ReadOnlyDelegateProperty()
+    _Cursor__manipulate         = ReadOnlyDelegateProperty()
+    _Cursor__query_flags        = ReadOnlyDelegateProperty()

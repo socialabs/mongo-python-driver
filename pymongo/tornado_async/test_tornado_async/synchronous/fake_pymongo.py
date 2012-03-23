@@ -18,7 +18,7 @@ checking that Motor passes the same unittests as PyMongo.
 DO NOT USE THIS MODULE.
 """
 
-import collections
+import functools
 import inspect
 import os
 import time
@@ -28,10 +28,8 @@ from tornado.ioloop import IOLoop
 # TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
 # everything should be called 'motor'?
 
-import pymongo as sync_pymongo
 from pymongo import son_manipulator
 from pymongo.tornado_async import async
-from pymongo.tornado_async.delegate import *
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
 
@@ -49,6 +47,7 @@ __all__ = [
 ]
 
 
+# TODO: doc
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
 
@@ -75,7 +74,7 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
         # being used in Motor's find().each()
         return False
 
-    kallable(callback)
+    kallable(callback=callback)
     assert not loop.running(), "Loop already running in method %s" % name
     loop.start()
     if outcome.get('error'):
@@ -84,75 +83,77 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     return outcome['result']
 
 
-# Methods that don't take a 'safe' argument
-methods_without_safe_arg = collections.defaultdict(set)
+class Sync(object):
+    def __init__(self, name, has_safe_arg):
+        self.name = name
+        self.has_safe_arg = has_safe_arg
 
-for klass in (
-    sync_pymongo.connection.Connection,
-    sync_pymongo.database.Database,
-    sync_pymongo.collection.Collection,
-    sync_pymongo.cursor.Cursor,
-):
-    for method_name, method in inspect.getmembers(
-        klass,
-        inspect.ismethod
-    ):
-        if 'safe' not in inspect.getargspec(method).args:
-            methods = methods_without_safe_arg['Tornado' + klass.__name__]
-            methods.add(method.func_name)
+    def __get__(self, obj, objtype):
+        async_method = getattr(obj.delegate, self.name)
+        return synchronize(obj, async_method, has_safe_arg=self.has_safe_arg)
 
 
-class Synchronized(DelegateProperty):
-    def __init__(self, safe):
-        """
-        @param safe: Whether the method takes a 'safe' argument
-        """
-        super(Synchronized, self).__init__(readonly=True)
-        self.safe = safe
-
-    def make_attr(self, cls, name):
-        return synchronize(name, self.safe)
-
-
-def synchronize(method_name, safe):
+def synchronize(self, async_method, has_safe_arg):
     """
-    @param method_name:         The name of an asynchronous method defined on class
-                                TornadoConnection, TornadoDatabase, etc.
-    @param safe:     Whether the method takes a 'safe' argument
+    @param self:                A Fake object, e.g. fake_pymongo Connection
+    @param async_method:        Bound method of a TornadoConnection,
+                                TornadoDatabase, etc.
+    @param has_safe_arg:        Whether the method takes a 'safe' argument
     @return:                    A synchronous wrapper around the method
     """
-    def synchronized_method(self, *args, **kwargs):
+    assert isinstance(self, Fake)
+
+    @functools.wraps(async_method)
+    def synchronized_method(*args, **kwargs):
         assert 'callback' not in kwargs
 
+        # TODO: is this right?
         safe_arg_passed = (
             'safe' in kwargs or 'w' in kwargs or 'j' in kwargs
-            or 'wtimeout' in kwargs or self.delegate.safe
+            or 'wtimeout' in kwargs or getattr(self.delegate, 'safe', False)
         )
         
-        if not safe_arg_passed and safe:
+        if not safe_arg_passed and has_safe_arg:
             # By default, Motor passes safe=True if there's a callback, but
-            # we don't want that, so we explicitly override.
+            # we're emulating PyMongo, which defaults safe to False, so we
+            # explicitly override.
             kwargs['safe'] = False
 
-        async_method = getattr(self.delegate, method_name)
         rv = None
         try:
             # TODO: document that all Motor methods accept a callback, but only
             # some require them. Get that into Sphinx somehow.
             rv = loop_timeout(
-                lambda cb: async_method(*args, callback=cb, **kwargs),
-                name=method_name
+                lambda callback: async_method(*args, callback=callback, **kwargs),
+                name=async_method.func_name
             )
         except OperationFailure:
             # Ignore OperationFailure for unsafe writes; synchronous pymongo
             # wouldn't have known the operation failed.
-            if safe_arg_passed or not safe:
+            if safe_arg_passed or not has_safe_arg:
                 raise
 
         return rv
 
-    synchronized_method.func_name = method_name
     return synchronized_method
+
+
+class FakeWrapReturnValue(async.DelegateProperty):
+    def __get__(self, obj, objtype):
+        # self.name is set by FakeMeta
+        method = getattr(obj.delegate, self.name)
+
+        def wrap_return_value(*args, **kwargs):
+            rv = method(*args, **kwargs)
+            # TODO: check for the other Motor classes and wrap them
+            # in appropriate Fakes
+            if isinstance(rv, async.TornadoCursor):
+                return Cursor(rv)
+            else:
+                return rv
+
+        return wrap_return_value
+
 
 # TODO: change name to "Synchronized"? then the current Synchronized will need
 # to be renamed. But "Fake" sounds too general for what this does, which is
@@ -168,22 +169,31 @@ class FakeMeta(type):
         if delegate_class:
             delegated_attrs = {}
 
-            # delegated_attrs is created by DelegateMeta
-            # TODO: move this loop into Delegator as a method
             for klass in reversed(inspect.getmro(delegate_class)):
-                if hasattr(klass, 'delegated_attrs'):
-                    delegated_attrs.update(klass.delegated_attrs)
+                delegated_attrs.update(klass.__dict__)
 
-            for name, delegate_attr in delegated_attrs.items():
-                if isinstance(delegate_attr, async.Asynchronized):
-                    safe = delegate_attr.safe
-                    synchronized = Synchronized(safe=safe)
-                    sync_attr = synchronized.make_attr(new_class, name)
-                    setattr(new_class, name, sync_attr)
-                elif isinstance(delegate_attr, DelegateProperty):
-                    prop = DelegateProperty(readonly=delegate_attr.readonly)
-                    sync_attr = prop.make_attr(new_class, name)
-                    setattr(new_class, name, sync_attr)
+            for attrname, delegate_attr in delegated_attrs.items():
+                # If attrname is in attrs, it means the Fake has overridden
+                # this attribute, e.g. Database.create_collection which is
+                # special-cased.
+                if attrname not in attrs:
+                    if isinstance(delegate_attr, async.Async):
+                        # Re-synchronize the method
+                        sync_method = Sync(attrname, delegate_attr.has_safe_arg)
+                        setattr(new_class, attrname, sync_method)
+                    elif isinstance(delegate_attr, async.CallAndReturnSelf):
+                        # Wrap Motor objects return from functions in Fakes
+                        wrapper = FakeWrapReturnValue()
+                        wrapper.name = attrname
+                        setattr(new_class, attrname, wrapper)
+                    elif isinstance(delegate_attr, async.DelegateProperty):
+                        # Delegate the property from Fake to Motor
+                        setattr(new_class, attrname, delegate_attr)
+
+        # Set DelegateProperties' names
+        for name, attr in attrs.items():
+            if isinstance(attr, async.DelegateProperty):
+                attr.name = name
 
         return new_class
 
@@ -196,20 +206,8 @@ class Fake(object):
     __metaclass__ = FakeMeta
     __delegate_class__ = None
 
-    def __init__(self, delegate):
-        self.delegate = delegate
-
     def __cmp__(self, other):
         return cmp(self.delegate, other.delegate)
-
-#    document_class = DelegateProperty()
-#    slave_okay = DelegateProperty()
-#    safe = DelegateProperty()
-#    get_lasterror_options = DelegateProperty()
-#    set_lasterror_options = DelegateProperty()
-#    unset_lasterror_options = DelegateProperty()
-#    _BaseObject__set_slave_okay = DelegateProperty()
-#    _BaseObject__set_safe = DelegateProperty()
 
 
 class Connection(Fake):
@@ -222,13 +220,12 @@ class Connection(Fake):
         # So that TestConnection.test_constants and test_types work
         self.host = host if host is not None else self.HOST
         self.port = port if port is not None else self.PORT
-        tornado_connection = self.__delegate_class__(
+        self.delegate = self.__delegate_class__(
             self.host, self.port, *args, **kwargs
         )
 
-        super(Connection, self).__init__(delegate=tornado_connection)
-
-        # Try to connect the TornadoConnection before continuing
+        # Try to connect the TornadoConnection before continuing; raise
+        # ConnectionFailure if it doesn't work.
         exc = ConnectionFailure(
             "fake_pymongo.Connection: Can't connect to %s:%s" % (host, port)
         )
@@ -241,9 +238,18 @@ class Connection(Fake):
         if isinstance(name_or_database, Database):
             name_or_database = name_or_database.delegate
 
-        synchronize('drop_database', safe=False)(self, name_or_database)
+        synchronize(self, self.delegate.drop_database, has_safe_arg=False)(name_or_database)
 
-    # TODO: document how this is implemented by Motor
+    def start_request(self):
+        self.request = self.delegate.start_request()
+        self.request.__enter__()
+
+    def end_request(self):
+        self.request.__exit__(None, None, None)
+
+    # TODO: document how this is implemented by Motor; use Motor's
+    # is_locked(callback) instead of current_op(). Can we just delete this
+    # property and it will Just Work?
     @property
     def is_locked(self):
         ops = self.admin.current_op()
@@ -260,10 +266,6 @@ class Connection(Fake):
         return Database(self, name)
 
     __getitem__ = __getattr__
-#
-#    # HACK!: For unittests that examine this attribute
-#    _Connection__pool = DelegateProperty()
-#    unlock = Synchronized(safe=False)
 
 
 class ReplicaSetConnection(Connection):
@@ -282,15 +284,14 @@ class Database(Fake):
         )
         self.connection = connection
 
-        tornado_db = getattr(connection.delegate, name)
-        assert isinstance(tornado_db, async.TornadoDatabase)
-        super(Database, self).__init__(delegate=tornado_db)
+        self.delegate = connection.delegate[name]
+        assert isinstance(self.delegate, async.TornadoDatabase)
 
     def add_son_manipulator(self, manipulator):
         if isinstance(manipulator, son_manipulator.AutoReference):
             db = manipulator.database
             if isinstance(db, Database):
-                manipulator.database = db.delegate.sync_database
+                manipulator.database = db.delegate.delegate
 
         self.delegate.add_son_manipulator(manipulator)
 
@@ -301,7 +302,7 @@ class Database(Fake):
         if isinstance(name_or_collection, Collection):
             name_or_collection = name_or_collection.delegate
 
-        return synchronize('drop_collection', safe=False)(self, name_or_collection)
+        return synchronize(self, self.delegate.drop_collection, has_safe_arg=False)(name_or_collection)
 
     # TODO: refactor
     def validate_collection(self, name_or_collection, *args, **kwargs):
@@ -310,26 +311,22 @@ class Database(Fake):
         if isinstance(name_or_collection, Collection):
             name_or_collection = name_or_collection.delegate
 
-        return synchronize('validate_collection', safe=False)(
-            self, name_or_collection, *args, **kwargs
+        return synchronize(self, self.delegate.validate_collection, has_safe_arg=False)(
+            name_or_collection, *args, **kwargs
         )
 
     # TODO: refactor
     def create_collection(self, name, *args, **kwargs):
         # Special case, since TornadoDatabase.create_collection returns a
         # TornadoCollection
-        collection = synchronize('create_collection', safe=False)(
-            self, name, *args, **kwargs
+        collection = synchronize(self, self.delegate.create_collection, has_safe_arg=False)(
+            name, *args, **kwargs
         )
 
         if isinstance(collection, async.TornadoCollection):
             collection = Collection(self, name)
 
         return collection
-
-    current_op = Synchronized(safe=False)
-    fsync = Synchronized(safe=False)
-    command = Synchronized(safe=True)
 
     def __getattr__(self, name):
         return Collection(self, name)
@@ -339,39 +336,34 @@ class Database(Fake):
 
 class Collection(Fake):
     __delegate_class__ = async.TornadoCollection
-    (find, map_reduce, remove) = [Synchronized(safe=False)] * 3
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
         self.database = database
 
-        tornado_collection = database.delegate.__getattr__(name)
-        assert isinstance(tornado_collection, async.TornadoCollection)
-        super(Collection, self).__init__(delegate=tornado_collection)
+        self.delegate = database.delegate[name]
+        assert isinstance(self.delegate, async.TornadoCollection)
 
     def find(self, *args, **kwargs):
-        # Return a fake Cursor that wraps the call to TornadoCollection.find()
-        return Cursor(self.delegate, *args, **kwargs)
+        # Return a fake Cursor that wraps the TornadoCursor
+        return Cursor(self.delegate.find(*args, **kwargs))
 
+    # TODO: refactor
     def map_reduce(self, *args, **kwargs):
         # We need to override map_reduce specially, because we have to wrap the
         # TornadoCollection it returns in a fake Collection.
-        # TODO: this getattr won't work any more
-        fake_map_reduce = super(Collection, self).__getattr__('map_reduce')
-        rv = fake_map_reduce(*args, **kwargs)
+        rv = loop_timeout(
+            lambda callback: self.delegate.map_reduce(*args, callback=callback, **kwargs)
+        )
+
         if isinstance(rv, async.TornadoCollection):
             return Collection(self.database, rv.name)
         else:
             return rv
 
-    uuid_subtype = DelegateProperty()
-    find_one = Synchronized(safe=True)
-    insert = Synchronized(safe=True)
-
     def __getattr__(self, name):
         # Access to collections with dotted names, like db.test.mike
-        this_collection_name = self.delegate.delegate.name
-        return Collection(self.database, this_collection_name + '.' + name)
+        return Collection(self.database, self.name + '.' + name)
 
     __getitem__ = __getattr__
 
@@ -379,9 +371,12 @@ class Collection(Fake):
 class Cursor(Fake):
     __delegate_class__ = async.TornadoCursor
 
-    def __init__(self, tornado_coll, *args, **kwargs):
-        tornado_cursor = tornado_coll.find(*args, **kwargs)
-        super(Cursor, self).__init__(delegate=tornado_cursor)
+    close                               = async.ReadOnlyDelegateProperty()
+    rewind                              = FakeWrapReturnValue()
+    clone                               = FakeWrapReturnValue()
+
+    def __init__(self, tornado_cursor):
+        self.delegate = tornado_cursor
 
     def __iter__(self):
         return self
