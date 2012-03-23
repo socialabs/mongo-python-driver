@@ -35,7 +35,11 @@ from bson.timestamp import Timestamp
 from bson.tz_util import utc
 
 
-_use_c = False
+try:
+    import _cbson
+    _use_c = True
+except ImportError:
+    _use_c = False
 
 try:
     import uuid
