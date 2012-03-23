@@ -65,4 +65,4 @@ if __name__ == '__main__':
         exclude=[re.compile(et) for et in excluded_tests]
     )
 
-    nose.run(defaultTest=this_dir, config=config)
+    nose.run(defaultTest=test_dir, config=config)

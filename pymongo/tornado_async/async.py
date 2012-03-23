@@ -338,8 +338,9 @@ class TornadoBase(object):
 
 # TODO: better name, with 'Mongo' or 'Motor' in it!
 class TornadoConnection(TornadoBase):
-    # TODO: for all async_ops and callback_ops, auto-gen Sphinx documentation
-    # that pulls from PyMongo
+    __connection_class__ = pymongo.connection.Connection
+
+    # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
     close_cursor                = Async(has_safe_arg=False, cb_required=True)
     kill_cursors                = Async(has_safe_arg=False, cb_required=True)
     copy_database               = Async(has_safe_arg=False, cb_required=True)
@@ -353,9 +354,6 @@ class TornadoConnection(TornadoBase):
     disconnect                  = ReadOnlyDelegateProperty()
     nodes                       = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
-
-    # HACK!: For unittests that examine this attribute
-    _Connection__pool           = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -381,7 +379,7 @@ class TornadoConnection(TornadoBase):
             # TODO: can this use asynchronize()?
             error = None
             try:
-                self.delegate = pymongo.connection.Connection(
+                self.delegate = self.__connection_class__(
                     *self._init_args,
                     _pool_class=TornadoPool,
                     **self._init_kwargs
@@ -466,6 +464,9 @@ class TornadoConnection(TornadoBase):
     def connected(self):
         return self.delegate is not None
 
+    # HACK!: For unittests that examine this attribute
+    _Connection__pool           = ReadOnlyDelegateProperty()
+
 
 class RequestContext(stack_context.StackContext):
     def __init__(self, sync_connection, request_id):
@@ -501,10 +502,8 @@ class RequestContext(stack_context.StackContext):
         super(RequestContext, self).__init__(RequestContextFactoryFactory())
 
 
-class TornadoReplicaSetConnection(TornadoBase):
-    def __init__(self, *args, **kwargs):
-        # TODO
-        pass
+class TornadoReplicaSetConnection(TornadoConnection):
+    __connection_class__ = pymongo.replica_set_connection.ReplicaSetConnection
 
 
 class TornadoDatabase(TornadoBase):

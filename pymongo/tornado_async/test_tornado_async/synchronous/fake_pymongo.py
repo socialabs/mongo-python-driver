@@ -40,10 +40,12 @@ from pymongo import (
     ALL, helpers, OFF, SLOW_ONLY
 )
 
+from pymongo.replica_set_connection import _partition_node
+
 __all__ = [
     'ASCENDING', 'DESCENDING', 'GEO2D', 'GEOHAYSTACK', 'ReadPreference',
     'Connection', 'ReplicaSetConnection', 'Database', 'Collection',
-    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY',
+    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY', '_partition_node'
 ]
 
 
