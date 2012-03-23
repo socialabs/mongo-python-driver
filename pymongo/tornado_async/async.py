@@ -58,7 +58,8 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: test tailable cursor, write up a standard means of tailing a cursor
 #   forever, to be packaged with Motor
 # TODO: SSL
-
+# TODO: document which versions of greenlet and tornado this has been tested
+#   against, include those in some file that pip or pypi can understand?
 
 def check_callable(kallable, required=False):
     if required and not kallable:
