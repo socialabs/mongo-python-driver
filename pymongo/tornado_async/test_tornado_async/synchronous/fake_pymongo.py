@@ -28,7 +28,7 @@ from tornado.ioloop import IOLoop
 # TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
 # everything should be called 'motor'?
 
-from pymongo import son_manipulator
+from pymongo import son_manipulator, common
 from pymongo.tornado_async import async
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
@@ -219,6 +219,9 @@ class Connection(Fake):
     __delegate_class__ = async.TornadoConnection
 
     def __init__(self, host=None, port=None, *args, **kwargs):
+        # Motor doesn't implement auto_start_request
+        kwargs.pop('auto_start_request', None)
+
         # So that TestConnection.test_constants and test_types work
         self.host = host if host is not None else self.HOST
         self.port = port if port is not None else self.PORT
@@ -247,7 +250,8 @@ class Connection(Fake):
         self.request.__enter__()
 
     def end_request(self):
-        self.request.__exit__(None, None, None)
+        if self.request:
+            self.request.__exit__(None, None, None)
 
     # TODO: document how this is implemented by Motor; use Motor's
     # is_locked(callback) instead of current_op(). Can we just delete this
@@ -268,7 +272,6 @@ class Connection(Fake):
         return Database(self, name)
 
     __getitem__ = __getattr__
-
 
 class ReplicaSetConnection(Connection):
     # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,

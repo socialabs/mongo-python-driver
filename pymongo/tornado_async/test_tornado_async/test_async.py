@@ -349,12 +349,20 @@ class TornadoTestBasic(TornadoTest):
         self.assertFalse(cursor.started, "Cursor shouldn't start immediately")
 
     def test_find(self):
+        # 1. Open a connection. Although in most tests I'm using the
+        # synchronized self.async_connection() for convenience, here I'll
+        # really test passing a callback to open() that does a find().
+        #
+        # 2. test_collection has docs inserted in setUp(). Query for documents
+        # with _id 0 through 13, in batches of 5: 0-4, 5-9, 10-13.
+        #
+        # 3. For each document, check if the cursor has been closed. I expect
+        # to remain open until we've retrieved doc with _id 10. Oddly, Mongo
+        # doesn't close the cursor and return cursor_id 0 if the final batch
+        # exactly contains the last document -- the last batch size has to go
+        # one *past* the final document in order to close the cursor.
         results = []
 
-        # Although in most tests I'm using the synchronized
-        # self.async_connection() for convenience, here I'll really test
-        # passing a callback to open() that does a find(), just to make sure
-        # that works in the Christian Kvalheim Node.js-driver style.
         def connected(connection, error):
             if error:
                 raise error
@@ -366,56 +374,27 @@ class TornadoTestBasic(TornadoTest):
                 if doc:
                     results.append(doc['_id'])
 
-                    # 'cursor' should still be open
+                if doc and doc['_id'] < 10:
                     self.assertEqual(
                         1 + self.open_cursors,
                         self.get_open_cursors()
                     )
-
-            def got_more(result, error):
-                if error:
-                    raise error
-
-                results.append(result)
-                if len(results) >= 10:
-                    # cursor should be closed by now
-                    expected_cursors = self.open_cursors
                 else:
-                    expected_cursors = self.open_cursors + 1
-
-                actual_open_cursors = self.get_open_cursors()
-
-                self.assertEqual(
-                    expected_cursors,
-                    actual_open_cursors,
-                    "Expected %d open cursors when there are %d "
-                    "results, found %d" % (
-                        expected_cursors, len(results), actual_open_cursors
-                    )
-                )
-
-                # Get next batch
-                if cursor.alive:
-                    cursor.get_more(got_more)
-                else:
-                    self.assertRaises(
-                        InvalidOperation,
-                        lambda: cursor.get_more(got_more)
+                    self.assertEqual(
+                        self.open_cursors,
+                        self.get_open_cursors()
                     )
 
-            # test_collection has 200 docs with _id from 0 to 199, from setUp().
-            # Get those with _id from 0 to 14 in batches 0-4, 5-9, 10-14.
             connection.test.test_collection.find(
-                {'_id': {'$lt':15}},
+                {'_id': {'$lt':14}},
                 {'s': False}, # exclude 's' field
                 sort=[('_id', 1)],
-                batch_size=5
-            ).each(each)
+            ).batch_size(5).each(each)
 
         async.TornadoConnection(host, port).open(callback=connected)
 
         self.assertEventuallyEqual(
-            range(15),
+            range(14),
             lambda: results
         )
 

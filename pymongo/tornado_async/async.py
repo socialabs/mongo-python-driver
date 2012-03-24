@@ -14,9 +14,11 @@
 
 """Tornado asynchronous Python driver for MongoDB."""
 
+import errno
 import functools
 import socket
 import time
+import sys
 
 import tornado.ioloop, tornado.iostream
 from tornado import stack_context
@@ -24,7 +26,7 @@ import greenlet
 
 
 import pymongo
-import pymongo.pool
+from pymongo.pool import BasePool, NO_REQUEST, NO_SOCKET_YET
 import pymongo.connection
 import pymongo.database
 import pymongo.collection
@@ -60,6 +62,8 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: SSL
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
+# TODO: document requests and describe how concurrent ops are prevented,
+#   demo how to avoid errors
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -68,45 +72,56 @@ def check_callable(kallable, required=False):
         raise TypeError("callback must be callable")
 
 
-def tornado_sock_method(method):
-    @functools.wraps(method)
-    def _tornado_sock_method(self, *args, **kwargs):
-        child_gr = greenlet.getcurrent()
-        assert child_gr.parent, "Should be on child greenlet"
+def tornado_sock_method(check_closed=False):
+    def wrap(method):
+        @functools.wraps(method)
+        def _tornado_sock_method(self, *args, **kwargs):
+            child_gr = greenlet.getcurrent()
+            assert child_gr.parent, "Should be on child greenlet"
 
-        # We need to alter this value in inner functions, hence the list
-        self_timeout = self.timeout
-        timeout = [None]
-        loop = tornado.ioloop.IOLoop.instance()
-        if self_timeout:
-            def timeout_err():
-                timeout[0] = None
-                self.stream.close()
-                child_gr.throw(socket.timeout("timed out"))
+            # We need to alter this value in inner functions, hence the list
+            timeout = [None]
+            self_timeout = self.timeout
+            loop = tornado.ioloop.IOLoop.instance()
+            if self_timeout:
+                def timeout_err():
+                    timeout[0] = None
+                    self.stream.set_close_callback(None)
+                    self.stream.close()
+                    child_gr.throw(socket.timeout("timed out"))
 
-            timeout[0] = loop.add_timeout(
-                time.time() + self_timeout, timeout_err
-            )
+                timeout[0] = loop.add_timeout(
+                    time.time() + self_timeout, timeout_err
+                )
 
-        # This is run by IOLoop on the main greenlet when socket has connected;
-        # switch back to child to continue processing
-        def callback(result=None, error=None):
-            if timeout[0] or not self_timeout:
-                # We didn't time out
-                if timeout[0]:
-                    loop.remove_timeout(timeout[0])
+            # This is run by IOLoop on the main greenlet when socket has
+            # connected; switch back to child to continue processing
+            def callback(result=None, error=None):
+                self.stream.set_close_callback(None)
+                if timeout[0] or not self_timeout:
+                    # We didn't time out
+                    if timeout[0]:
+                        loop.remove_timeout(timeout[0])
 
-                if error:
-                    child_gr.throw(error)
-                else:
-                    child_gr.switch(result)
+                    if error:
+                        child_gr.throw(error)
+                    else:
+                        child_gr.switch(result)
 
-        method(self, *args, callback=callback, **kwargs)
+            if check_closed:
+                def closed():
+                    # There's no way to know what the error was, see
+                    # https://groups.google.com/d/topic/python-tornado/3fq3mA9vmS0/discussion
+                    child_gr.throw(socket.error("error"))
+                self.stream.set_close_callback(closed)
 
-        # Resume main greenlet
-        return child_gr.parent.switch()
+            method(self, *args, callback=callback, **kwargs)
 
-    return _tornado_sock_method
+            # Resume main greenlet
+            return child_gr.parent.switch()
+
+        return _tornado_sock_method
+    return wrap
 
 
 class TornadoSocket(object):
@@ -125,6 +140,10 @@ class TornadoSocket(object):
         else:
            self.stream = tornado.iostream.IOStream(sock)
 
+        # We need to hold a ref to the socket so we can check for an error code
+        # on it when it's closed. IOStream.close() clears the stream's socket.
+        self.sock = sock
+
     def setsockopt(self, *args, **kwargs):
         self.stream.socket.setsockopt(*args, **kwargs)
 
@@ -136,18 +155,18 @@ class TornadoSocket(object):
         # callbacks.
         self.timeout = timeout
 
-    @tornado_sock_method
+    @tornado_sock_method(check_closed=True)
     def connect(self, pair, callback):
         """
         @param pair: A tuple, (host, port)
         """
         self.stream.connect(pair, callback)
 
-    @tornado_sock_method
+    @tornado_sock_method()
     def sendall(self, data, callback):
         self.stream.write(data, callback)
 
-    @tornado_sock_method
+    @tornado_sock_method()
     def recv(self, num_bytes, callback):
         self.stream.read_bytes(num_bytes, callback)
 
@@ -161,43 +180,89 @@ class TornadoSocket(object):
         self.close()
 
 
-class TornadoPool(pymongo.pool.Pool):
+class TornadoPool(pymongo.pool.BasePool):
     """A simple connection pool of TornadoSockets.
     """
-    # TODO: move to get_connection() after merging Bernie's pool fix?
-    def connect(self, pair):
-        """Connect to Mongo and return a new connected TornadoSocket.
-        """
+    def __init__(self, *args, **kwargs):
+        self._current_request_to_sock = {}
+        self._request_socks_outstanding = set()
+        super(TornadoPool, self).__init__(*args, **kwargs)
+
+    def create_connection(self, pair):
         assert greenlet.getcurrent().parent, "Should be on child greenlet"
-        self._check_pair_arg(pair)
 
-        # Prefer IPv4. If there is demand for an option
-        # to specify one or the other we can add it later.
-        socket_types = (socket.AF_INET, socket.AF_INET6)
-        for socket_type in socket_types:
-            try:
-                s = socket.socket(socket_type)
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                break
-            except socket.gaierror:
-                # If that fails try IPv6
+        # Don't try IPv6 if we don't support it.
+        family = socket.AF_INET
+        if socket.has_ipv6:
+            family = socket.AF_UNSPEC
+        
+        host, port = pair or self.pair
+        err = None
+        for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
+            af, socktype, proto, dummy, sa = res
+
+            # TODO: support IPV6; somehow we're not properly catching the error
+            # right now and trying IPV4 as we intend in this loop, see
+            # TornadoSocket.connect()
+            if af == socket.AF_INET6:
                 continue
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                tornado_sock = TornadoSocket(sock, use_ssl=self.use_ssl)
+                tornado_sock.settimeout(self.conn_timeout)
+
+                # TornadoSocket will pause the current greenlet and resume it when
+                # connection has completed
+                tornado_sock.connect(pair or self.pair)
+                tornado_sock.settimeout(self.net_timeout)
+                return tornado_sock
+
+            except socket.error, e:
+                err = e
+
+        if err is not None:
+            raise err
         else:
-            # None of the socket types worked
-            raise
+            # This likely means we tried to connect to an IPv6 only
+            # host with an OS/kernel or Python interpeter that doesn't
+            # support IPv6. The test case is Jython2.5.1 which doesn't
+            # support IPv6 at all.
+            raise socket.error('getaddrinfo failed')
 
-        tornado_sock = TornadoSocket(s, use_ssl=self.use_ssl)
-        tornado_sock.settimeout(self.conn_timeout)
+    def get_socket(self, pair=None):
+        if self.in_request():
+            if current_request in self._request_socks_outstanding:
+                # TODO: better error message
+                raise pymongo.errors.InvalidOperation(
+                    "Can't begin concurrent operations in a request"
+                )
+            # We're giving out a socket in a request, keep track of this to
+            # ensure the socket isn't given out twice without being returned
+            # in between.
+            self._request_socks_outstanding.add(current_request)
 
-        # TornadoSocket will pause the current greenlet and resume it when
-        # connection has completed
-        tornado_sock.connect(pair or self.pair)
-        tornado_sock.settimeout(self.net_timeout)
-        return tornado_sock
+        return super(TornadoPool, self).get_socket(pair)
 
-    def _request_key(self):
-        # Module-level variable set by RequestContext
-        return current_request
+    def return_socket(self, sock_info):
+        if self.in_request():
+            self._request_socks_outstanding.discard(current_request)
+        super(TornadoPool, self).return_socket(sock_info)
+
+    # TODO: socket reclamation for leaked requests probably doesn't work, test
+    # it directly as well as via fake_pymongo
+    def _set_request_state(self, sock_info):
+        if sock_info == NO_REQUEST:
+            self._current_request_to_sock.pop(current_request, None)
+        else:
+            self._current_request_to_sock[current_request] = sock_info
+
+    def _get_request_state(self):
+        return self._current_request_to_sock.get(current_request, NO_REQUEST)
+
+    def _reset(self):
+        self._current_request_to_sock.clear()
 
 
 def asynchronize(self, sync_method, has_safe_arg, cb_required):
@@ -355,9 +420,15 @@ class TornadoConnection(TornadoBase):
     disconnect                  = ReadOnlyDelegateProperty()
     nodes                       = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
+    in_request                  = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
+        # TODO: document that Motor doesn't do auto_start_request
+        if 'auto_start_request' in kwargs:
+            raise pymongo.errors.ConfigurationError(
+                "Motor doesn't support auto_start_request, use "
+                "TornadoConnection.start_request explicitly")
         self._init_args = args
         self._init_kwargs = kwargs
         self.delegate = None
@@ -383,6 +454,7 @@ class TornadoConnection(TornadoBase):
                 self.delegate = self.__connection_class__(
                     *self._init_args,
                     _pool_class=TornadoPool,
+                    auto_start_request=False,
                     **self._init_kwargs
                 )
 
@@ -444,13 +516,11 @@ class TornadoConnection(TornadoBase):
         # TODO: this is so spaghetti & implicit & magic
         global current_request, current_request_seq
 
-        # TODO: overflow? What about py3k?
+        # TODO: overflow?
         current_request_seq += 1
-        request_id = current_request_seq
-        current_request = request_id
-        delegate = self.delegate
-        delegate.start_request()
-        return RequestContext(delegate, request_id)
+        current_request = current_request_seq
+        self.delegate.start_request()
+        return RequestContext(self, current_request)
 
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
@@ -470,7 +540,7 @@ class TornadoConnection(TornadoBase):
 
 
 class RequestContext(stack_context.StackContext):
-    def __init__(self, sync_connection, request_id):
+    def __init__(self, connection, request_id):
         class RequestContextFactoryFactory(object):
             def __del__(self):
                 global current_request
@@ -478,16 +548,18 @@ class RequestContext(stack_context.StackContext):
 
                 # TODO: see how much this sucks & needs to be rewritten?
                 current_request = request_id
-                sync_connection.end_request()
+                connection.end_request()
                 current_request = None
 
             def __call__(self):
                 class RequestContextFactory(object):
                     def __enter__(self):
+                        print >> sys.stderr, "enter request", request_id, "connection", id(connection)
                         global current_request
                         current_request = request_id
 
                     def __exit__(self, type, value, traceback):
+                        print >> sys.stderr, "exit request", request_id, "connection", id(connection)
                         global current_request
                         assert current_request == request_id, (
                             "request_id %s does not match expected %s" % (
