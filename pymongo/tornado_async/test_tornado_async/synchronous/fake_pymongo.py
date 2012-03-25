@@ -37,15 +37,19 @@ from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 # thinking it's really pymongo
 from pymongo import (
     ASCENDING, DESCENDING, GEO2D, GEOHAYSTACK, ReadPreference,
-    ALL, helpers, OFF, SLOW_ONLY
+    ALL, helpers, OFF, SLOW_ONLY, pool
 )
 
+from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool
+from pymongo.master_slave_connection import MasterSlaveConnection
 from pymongo.replica_set_connection import _partition_node
 
 __all__ = [
     'ASCENDING', 'DESCENDING', 'GEO2D', 'GEOHAYSTACK', 'ReadPreference',
     'Connection', 'ReplicaSetConnection', 'Database', 'Collection',
-    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY', '_partition_node'
+    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY', '_partition_node',
+    'NO_REQUEST', 'NO_SOCKET_YET', 'SocketInfo', 'pool', 'Pool',
+    'MasterSlaveConnection',
 ]
 
 

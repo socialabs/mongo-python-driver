@@ -169,7 +169,8 @@ class TornadoSocket(object):
         self.stream.read_bytes(num_bytes, callback)
 
     def close(self):
-        self.stream.close()
+        if self.stream:
+            self.stream.close()
 
     def fileno(self):
         return self.stream.socket.fileno()
