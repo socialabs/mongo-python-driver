@@ -212,7 +212,7 @@ class ReplicaSetConnection(common.BaseObject):
             self.__opts[option] = value
 
         if self.__opts.get('_pool_class'):
-            self.pool_class = options['_pool_class']
+            self.pool_class = self.__opts['_pool_class']
         else:
             if self.__opts.get('use_greenlets', False):
                 if not pool.have_greenlet:
