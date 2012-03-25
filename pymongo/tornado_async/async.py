@@ -14,11 +14,9 @@
 
 """Tornado asynchronous Python driver for MongoDB."""
 
-import errno
 import functools
 import socket
 import time
-import sys
 
 import tornado.ioloop, tornado.iostream
 from tornado import stack_context
@@ -522,6 +520,9 @@ class TornadoConnection(TornadoBase):
         self.delegate.start_request()
         return RequestContext(self, current_request)
 
+    # Just calls end_request on the Pool
+    end_request = ReadOnlyDelegateProperty()
+
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
         if isinstance(name_or_database, TornadoDatabase):
@@ -554,12 +555,10 @@ class RequestContext(stack_context.StackContext):
             def __call__(self):
                 class RequestContextFactory(object):
                     def __enter__(self):
-                        print >> sys.stderr, "enter request", request_id, "connection", id(connection)
                         global current_request
                         current_request = request_id
 
                     def __exit__(self, type, value, traceback):
-                        print >> sys.stderr, "exit request", request_id, "connection", id(connection)
                         global current_request
                         assert current_request == request_id, (
                             "request_id %s does not match expected %s" % (
@@ -754,16 +753,15 @@ class TornadoCollection(TornadoBase):
     uuid_subtype = ReadWriteDelegateProperty()
 
 
-class CallAndReturnSelf(DelegateProperty):
+class CallAndReturnClone(DelegateProperty):
     def __get__(self, obj, objtype):
         # self.name is set by TornadoMeta
         method = getattr(obj.delegate, self.name)
 
-        def return_self(*args, **kwargs):
-            method(*args, **kwargs)
-            return obj
+        def return_clone(*args, **kwargs):
+            return objtype(method(*args, **kwargs))
 
-        return return_self
+        return return_clone
 
 
 # TODO: hint(), etc.
@@ -775,21 +773,20 @@ class TornadoCursor(TornadoBase):
     next                        = Async(has_safe_arg=False, cb_required=True)
     __exit__                    = Async(has_safe_arg=False, cb_required=True)
 
-    # TODO: document that we don't support [ ] access - use skip and limit
     # TODO: document that we don't support cursor.collection property
     slave_okay                  = ReadOnlyDelegateProperty()
     alive                       = ReadOnlyDelegateProperty()
 
-    batch_size                  = CallAndReturnSelf()
-    add_option                  = CallAndReturnSelf()
-    remove_option               = CallAndReturnSelf()
-    limit                       = CallAndReturnSelf()
-    skip                        = CallAndReturnSelf()
-    max_scan                    = CallAndReturnSelf()
-    sort                        = CallAndReturnSelf()
-    hint                        = CallAndReturnSelf()
-    where                       = CallAndReturnSelf()
-    __enter__                   = CallAndReturnSelf()
+    batch_size                  = CallAndReturnClone()
+    add_option                  = CallAndReturnClone()
+    remove_option               = CallAndReturnClone()
+    limit                       = CallAndReturnClone()
+    skip                        = CallAndReturnClone()
+    max_scan                    = CallAndReturnClone()
+    sort                        = CallAndReturnClone()
+    hint                        = CallAndReturnClone()
+    where                       = CallAndReturnClone()
+    __enter__                   = CallAndReturnClone()
 
     def __init__(self, cursor):
         """
@@ -916,8 +913,23 @@ class TornadoCursor(TornadoBase):
         self.buffer_size = 0
         return self
 
+    def __getitem__(self, index):
+        # TODO test that this raises TypeError if index is not slice, int, long
+        # TODO doc that this does not raise IndexError if index > len results
+        # TODO test that this raises IndexError if index < 0
+        # TODO: doctest
+        if isinstance(index, slice):
+             return TornadoCursor(self.delegate[index])
+        else:
+            if not isinstance(index, (int, long)):
+                raise TypeError("index %r cannot be applied to Cursor "
+                                "instances" % index)
+            # Get one document, force hard limit of 1 so server closes cursor
+            # immediately
+            return self[self.delegate._Cursor__skip+index:].limit(-1)
+
     def __del__(self):
-        if self.alive:
+        if self.alive and self.delegate.cursor_id:
             self.close()
 
     # HACK!: For unittests that, extremely regrettably, examine these attributes

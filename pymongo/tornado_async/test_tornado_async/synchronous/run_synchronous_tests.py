@@ -58,16 +58,16 @@ if __name__ == '__main__':
         'test_authenticate_and_request',
 
         # No point supporting these in Motor
-        # TODO: document these differences b/w Motor and PyMongo
+        # TODO: document these differences b/w Motor and PyMongo (most of them
+        # already have TODOs in async.py, just double-check them from this list)
         'test_system_js',
         'test_system_js_list',
-        'test_getitem_numeric_index',
-        'test_getitem_slice_index',
         'test_properties',
         'test_threaded_writes',
         'test_threaded_reads',
         'test_auto_start_request',
         'test_contextlib_auto_start_request',
+        'test_getitem_index_out_of_range',
     ]
 
     print 'WARNING: excluding some tests -- go in and fix them for async!'

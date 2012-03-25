@@ -183,8 +183,8 @@ class FakeMeta(type):
                         # Re-synchronize the method
                         sync_method = Sync(attrname, delegate_attr.has_safe_arg)
                         setattr(new_class, attrname, sync_method)
-                    elif isinstance(delegate_attr, async.CallAndReturnSelf):
-                        # Wrap Motor objects return from functions in Fakes
+                    elif isinstance(delegate_attr, async.CallAndReturnClone):
+                        # Wrap Motor objects returned from functions in Fakes
                         wrapper = FakeWrapReturnValue()
                         wrapper.name = attrname
                         setattr(new_class, attrname, wrapper)
@@ -405,6 +405,8 @@ class Cursor(Fake):
     def explain(self):
         return loop_timeout(self.delegate.explain)
 
-    def __getitem__(self, item):
-        rv = loop_timeout(self.delegate.to_list)
-        return rv[item]
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return Cursor(self.delegate[index])
+        else:
+            return loop_timeout(self.delegate[index].each)
