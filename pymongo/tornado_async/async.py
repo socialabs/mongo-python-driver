@@ -26,6 +26,8 @@ import greenlet
 import pymongo
 from pymongo.pool import BasePool, NO_REQUEST, NO_SOCKET_YET
 import pymongo.connection
+import pymongo.replica_set_connection
+import pymongo.master_slave_connection
 import pymongo.database
 import pymongo.collection
 import pymongo.cursor
@@ -396,30 +398,24 @@ class TornadoBase(object):
     unset_lasterror_options     = ReadWriteDelegateProperty()
     name                        = ReadOnlyDelegateProperty()
 
-    # Some unittests reference these
+    # HACK!: For unittests that examine this attribute
+    # TODO: move all this kind of thing for all classes into fake_pymongo
+    # instead of polluting Motor
     _BaseObject__set_slave_okay = ReadWriteDelegateProperty()
     _BaseObject__set_safe       = ReadWriteDelegateProperty()
 
 
-# TODO: better name, with 'Mongo' or 'Motor' in it!
-class TornadoConnection(TornadoBase):
-    __connection_class__ = pymongo.connection.Connection
-
-    # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
-    close_cursor                = Async(has_safe_arg=False, cb_required=True)
-    kill_cursors                = Async(has_safe_arg=False, cb_required=True)
-    copy_database               = Async(has_safe_arg=False, cb_required=True)
-    is_locked                   = Async(has_safe_arg=False, cb_required=True)
-    database_names              = Async(has_safe_arg=False, cb_required=False)
+class TornadoConnectionBase(TornadoBase):
     server_info                 = Async(has_safe_arg=False, cb_required=False)
-    fsync                       = Async(has_safe_arg=False, cb_required=False)
-    unlock                      = Async(has_safe_arg=False, cb_required=False)
-
+    database_names              = Async(has_safe_arg=False, cb_required=False)
+    copy_database               = Async(has_safe_arg=False, cb_required=True)
     close                       = ReadOnlyDelegateProperty()
     disconnect                  = ReadOnlyDelegateProperty()
-    nodes                       = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
+    max_pool_size               = ReadOnlyDelegateProperty()
     in_request                  = ReadOnlyDelegateProperty()
+    end_request                 = ReadOnlyDelegateProperty()
+    tz_aware                    = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -427,7 +423,8 @@ class TornadoConnection(TornadoBase):
         if 'auto_start_request' in kwargs:
             raise pymongo.errors.ConfigurationError(
                 "Motor doesn't support auto_start_request, use "
-                "TornadoConnection.start_request explicitly")
+                "%s.start_request explicitly" % self.__class__.__name__)
+
         self._init_args = args
         self._init_kwargs = kwargs
         self.delegate = None
@@ -444,18 +441,14 @@ class TornadoConnection(TornadoBase):
             if callback:
                 callback(self, None)
             return
-        
+
         def connect():
             # Run on child greenlet
             # TODO: can this use asynchronize()?
             error = None
             try:
-                self.delegate = self.__connection_class__(
-                    *self._init_args,
-                    _pool_class=TornadoPool,
-                    auto_start_request=False,
-                    **self._init_kwargs
-                )
+                self.delegate = self.new_delegate(
+                    *self._init_args, **self._init_kwargs)
 
                 del self._init_args
                 del self._init_kwargs
@@ -477,16 +470,14 @@ class TornadoConnection(TornadoBase):
 
     def __getattr__(self, name):
         if not self.connected:
-            msg = "Can't access database on TornadoConnection before"\
-                " calling open()"
+            msg = "Can't access database on %s before calling open()" % (
+                self.__class__.__name__
+            )
             raise InvalidOperation(msg)
 
         return TornadoDatabase(self, name)
 
     __getitem__ = __getattr__
-
-    def __repr__(self):
-        return 'TornadoConnection(%s)' % repr(self.delegate)
 
     def start_request(self):
         """Assigns a socket to the current thread or greenlet until it calls
@@ -521,9 +512,6 @@ class TornadoConnection(TornadoBase):
         self.delegate.start_request()
         return RequestContext(self, current_request)
 
-    # Just calls end_request on the Pool
-    end_request = ReadOnlyDelegateProperty()
-
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
         if isinstance(name_or_database, TornadoDatabase):
@@ -537,8 +525,77 @@ class TornadoConnection(TornadoBase):
     def connected(self):
         return self.delegate is not None
 
+    def __repr__(self):
+        return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
+
+
+# TODO: better name, with 'Mongo' or 'Motor' in it!
+class TornadoConnection(TornadoConnectionBase):
+    # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
+    close_cursor                = Async(has_safe_arg=False, cb_required=True)
+    kill_cursors                = Async(has_safe_arg=False, cb_required=True)
+    is_locked                   = Async(has_safe_arg=False, cb_required=True)
+    fsync                       = Async(has_safe_arg=False, cb_required=False)
+    unlock                      = Async(has_safe_arg=False, cb_required=False)
+    nodes                       = ReadOnlyDelegateProperty()
+    host                        = ReadOnlyDelegateProperty()
+    port                        = ReadOnlyDelegateProperty()
+
     # HACK!: For unittests that examine this attribute
     _Connection__pool           = ReadOnlyDelegateProperty()
+
+    def new_delegate(self, *args, **kwargs):
+        kwargs['auto_start_request'] = False
+        kwargs['_pool_class'] = TornadoPool
+        return pymongo.connection.Connection(*args, **kwargs)
+
+
+class TornadoReplicaSetConnection(TornadoConnectionBase):
+    primary                       = ReadOnlyDelegateProperty()
+    secondaries                   = ReadOnlyDelegateProperty()
+    arbiters                      = ReadOnlyDelegateProperty()
+    hosts                         = ReadOnlyDelegateProperty()
+    read_preference               = ReadOnlyDelegateProperty()
+    seeds                         = ReadOnlyDelegateProperty()
+
+    def new_delegate(self, *args, **kwargs):
+        kwargs['auto_start_request'] = False
+        kwargs['_pool_class'] = TornadoPool
+        return pymongo.replica_set_connection.ReplicaSetConnection(
+            *args, **kwargs)
+
+
+class TornadoMasterSlaveConnection(TornadoConnectionBase):
+    close_cursor                  = ReadOnlyDelegateProperty()
+
+    def new_delegate(self, master, slaves, *args, **kwargs):
+        if isinstance(master, TornadoConnection):
+            master = master.delegate
+
+        slaves = [s.delegate if isinstance(s, TornadoConnection) else s
+            for s in slaves]
+
+        return pymongo.master_slave_connection.MasterSlaveConnection(
+            master, slaves, *args, **kwargs)
+
+    @property
+    def master(self):
+        tornado_master = TornadoConnection()
+        tornado_master.delegate = self.delegate.master
+        return tornado_master
+
+    @property
+    def slaves(self):
+        tornado_slaves = []
+        for s in self.delegate.slaves:
+            tornado_connection = TornadoConnection()
+            tornado_connection.delegate = s
+            tornado_slaves.append(tornado_connection)
+
+        return tornado_slaves
+
+    # HACK!: For unittests that examine this attribute
+    _send_message_with_response   = Async(has_safe_arg=False, cb_required=True)
 
 
 class RequestContext(stack_context.StackContext):
@@ -575,10 +632,6 @@ class RequestContext(stack_context.StackContext):
         super(RequestContext, self).__init__(RequestContextFactoryFactory())
 
 
-class TornadoReplicaSetConnection(TornadoConnection):
-    __connection_class__ = pymongo.replica_set_connection.ReplicaSetConnection
-
-
 class TornadoDatabase(TornadoBase):
     # list of overridden async operations on a TornadoDatabase instance
     set_profiling_level           = Async(has_safe_arg=False, cb_required=False)
@@ -609,7 +662,7 @@ class TornadoDatabase(TornadoBase):
         # *args and **kwargs are not currently supported by pymongo Database,
         # but it doesn't cost us anything to include them and future-proof
         # this method.
-        assert isinstance(connection, TornadoConnection)
+        assert isinstance(connection, TornadoConnectionBase)
         self.connection = connection
         self.delegate = pymongo.database.Database(
             connection.delegate, name, *args, **kwargs
@@ -947,3 +1000,5 @@ class TornadoCursor(TornadoBase):
     _Cursor__partial            = ReadOnlyDelegateProperty()
     _Cursor__manipulate         = ReadOnlyDelegateProperty()
     _Cursor__query_flags        = ReadOnlyDelegateProperty()
+    _Cursor__connection_id      = ReadOnlyDelegateProperty()
+    _Cursor__read_preference    = ReadOnlyDelegateProperty()

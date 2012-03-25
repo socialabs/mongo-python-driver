@@ -41,7 +41,6 @@ from pymongo import (
 )
 
 from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool
-from pymongo.master_slave_connection import MasterSlaveConnection
 from pymongo.replica_set_connection import _partition_node
 
 __all__ = [
@@ -232,11 +231,13 @@ class Connection(Fake):
         self.delegate = self.__delegate_class__(
             self.host, self.port, *args, **kwargs
         )
+        self.fake_connect()
 
+    def fake_connect(self):
         # Try to connect the TornadoConnection before continuing; raise
         # ConnectionFailure if it doesn't work.
         exc = ConnectionFailure(
-            "fake_pymongo.Connection: Can't connect to %s:%s" % (host, port)
+            "fake_pymongo.Connection: Can't connect"
         )
 
         loop_timeout(kallable=self.delegate.open, exc=exc)
@@ -277,11 +278,54 @@ class Connection(Fake):
 
     __getitem__ = __getattr__
 
+
 class ReplicaSetConnection(Connection):
-    # fake_pymongo.ReplicaSetConnection is just like fake_pymongo.Connection,
-    # except it wraps a TornadoReplicaSetConnection instead of a
-    # TornadoConnection.
     __delegate_class__ = async.TornadoReplicaSetConnection
+
+    def __init__(self, *args, **kwargs):
+        # Motor doesn't implement auto_start_request
+        kwargs.pop('auto_start_request', None)
+
+        self.delegate = self.__delegate_class__(
+            *args, **kwargs
+        )
+
+        self.fake_connect()
+
+
+class MasterSlaveConnection(Connection):
+    __delegate_class__ = async.TornadoMasterSlaveConnection
+
+    def __init__(self, master, slaves, *args, **kwargs):
+        # TornadoMasterSlaveConnection expects TornadoConnections or regular
+        # pymongo Connections as arguments, but not Fakes.
+        if isinstance(master, Connection):
+            master = master.delegate
+
+        slaves = [s.delegate if isinstance(s, Connection) else s
+                  for s in slaves]
+
+        self.delegate = self.__delegate_class__(
+            master, slaves, *args, **kwargs
+        )
+
+        self.fake_connect()
+        
+    @property
+    def master(self):
+        fake_master = Connection()
+        fake_master.delegate = self.delegate.master
+        return fake_master
+
+    @property
+    def slaves(self):
+        fake_slaves = []
+        for s in self.delegate.slaves:
+            fake_connection = Connection()
+            fake_connection.delegate = s
+            fake_slaves.append(fake_connection)
+
+        return fake_slaves
 
 
 class Database(Fake):

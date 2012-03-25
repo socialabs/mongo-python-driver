@@ -21,8 +21,6 @@ excluded_modules = [
     'test.test_paired',
 
     # TODO:
-    'test.test_replica_set_connection',
-    'test.test_master_slave_connection',
     'test.test_ssl',
 ]
 
@@ -38,6 +36,11 @@ excluded_tests = [
     'TestConnection.test_with_start_request',
     'TestConnection.test_fork',
     'TestConnection.test_copy_db',
+    # This is in test_replica_set_connection, not test_connection
+    'TestConnection.test_auto_reconnect_exception_when_read_preference_is_secondary',
+    'TestMasterSlaveConnection.test_continue_until_slave_works',
+    'TestMasterSlaveConnection.test_disconnect',
+    'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
     'TestDatabase.test_authenticate_and_request',
 
     # TODO: document these differences b/w Motor and PyMongo (most of them
