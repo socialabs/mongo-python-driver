@@ -17,6 +17,7 @@
 import functools
 import socket
 import time
+import uuid
 
 import tornado.ioloop, tornado.iostream, tornado.gen
 from tornado import stack_context
@@ -42,6 +43,9 @@ except ImportError:
     have_ssl = False
 
 
+# For testing
+socket_uuid = False
+
 __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 
 # TODO: sphinx-formatted docstrings
@@ -63,7 +67,7 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
 # TODO: document requests and describe how concurrent ops are prevented,
-#   demo how to avoid errors
+#   demo how to avoid errors. Describe using NullContext to clear request.
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -140,9 +144,8 @@ class TornadoSocket(object):
         else:
            self.stream = tornado.iostream.IOStream(sock)
 
-        # We need to hold a ref to the socket so we can check for an error code
-        # on it when it's closed. IOStream.close() clears the stream's socket.
-        self.sock = sock
+        if socket_uuid:
+            self.uuid = uuid.uuid4()
 
     def setsockopt(self, *args, **kwargs):
         self.stream.socket.setsockopt(*args, **kwargs)
@@ -196,7 +199,11 @@ class TornadoPool(pymongo.pool.BasePool):
         family = socket.AF_INET
         if socket.has_ipv6:
             family = socket.AF_UNSPEC
-        
+
+        if not (pair or self.pair):
+            raise pymongo.errors.OperationFailure(
+                "(host, port) pair not configured")
+
         host, port = pair or self.pair
         err = None
         for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
@@ -251,11 +258,10 @@ class TornadoPool(pymongo.pool.BasePool):
             self._request_socks_outstanding.discard(current_request)
         super(TornadoPool, self).return_socket(sock_info)
 
-    # TODO: socket reclamation for leaked requests probably doesn't work, test
-    # it directly as well as via fake_pymongo
     def _set_request_state(self, sock_info):
         if sock_info == NO_REQUEST:
             self._current_request_to_sock.pop(current_request, None)
+            self._request_socks_outstanding.discard(current_request)
         else:
             self._current_request_to_sock[current_request] = sock_info
 
@@ -266,9 +272,8 @@ class TornadoPool(pymongo.pool.BasePool):
         self._current_request_to_sock.clear()
 
 
-def asynchronize(self, sync_method, has_safe_arg, cb_required):
+def asynchronize(sync_method, has_safe_arg, cb_required):
     """
-    @param self:            A Tornado object, e.g. TornadoConnection
     @param sync_method:     Bound method of pymongo Collection, Database,
                             Connection, or Cursor
     @param has_safe_arg:    Whether the method takes a 'safe' argument
@@ -277,14 +282,8 @@ def asynchronize(self, sync_method, has_safe_arg, cb_required):
     # TODO doc
     # TODO: staticmethod of base class for Tornado objects, add some custom
     #   stuff, like Connection can't do anything before open()
-    assert isinstance(self, TornadoBase)
-
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
-        """
-        @param self:    A TornadoConnection, TornadoDatabase, or
-                        TornadoCollection
-        """
         callback = kwargs.get('callback')
         check_callable(callback, required=cb_required)
 
@@ -296,6 +295,8 @@ def asynchronize(self, sync_method, has_safe_arg, cb_required):
         # TODO: document that with a callback passed in, Motor's default is
         # to do SAFE writes, unlike PyMongo.
         # ALSO TODO: should Motor's default be safe writes, or no?
+        # TODO: what about PyMongo BaseObject's underlying safeness, as well
+        # as w, wtimeout, and j? how do they affect control? test that.
         if 'safe' not in kwargs and has_safe_arg:
             kwargs['safe'] = bool(callback)
 
@@ -346,7 +347,6 @@ class Async(DelegateProperty):
         # self.name is set by TornadoMeta
         sync_method = getattr(obj.delegate, self.name)
         return asynchronize(
-            obj,
             sync_method,
             has_safe_arg=self.has_safe_arg,
             cb_required=self.cb_required
@@ -414,7 +414,6 @@ class TornadoConnectionBase(TornadoBase):
     max_bson_size               = ReadOnlyDelegateProperty()
     max_pool_size               = ReadOnlyDelegateProperty()
     in_request                  = ReadOnlyDelegateProperty()
-    end_request                 = ReadOnlyDelegateProperty()
     tz_aware                    = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
@@ -447,7 +446,7 @@ class TornadoConnectionBase(TornadoBase):
             # TODO: can this use asynchronize()?
             error = None
             try:
-                self.delegate = self.new_delegate(
+                self.delegate = self._new_delegate(
                     *self._init_args, **self._init_kwargs)
 
                 del self._init_args
@@ -480,8 +479,9 @@ class TornadoConnectionBase(TornadoBase):
     __getitem__ = __getattr__
 
     def start_request(self):
-        """Assigns a socket to the current thread or greenlet until it calls
-        :meth:`end_request`
+        """Assigns a socket to the current Tornado StackContext. There is no
+           `end_request`: a request ends when there are no more pending
+           callbacks wrapped in this request's StackContext.
 
            Unlike a regular pymongo Connection, start_request() on a
            TornadoConnection *must* be used as a context manager:
@@ -510,15 +510,20 @@ class TornadoConnectionBase(TornadoBase):
         current_request_seq += 1
         current_request = current_request_seq
         self.delegate.start_request()
-        return RequestContext(self, current_request)
+        return RequestContext(self._get_pools(), current_request)
+
+    def end_request(self):
+        raise NotImplementedError(
+            "Motor does not support end_request(). See documentation for"
+            " TornadoConnectionBase.start_request()."
+        )
 
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
         if isinstance(name_or_database, TornadoDatabase):
             name_or_database = name_or_database.delegate.name
 
-        async_method = asynchronize(
-            self, self.delegate.drop_database, False, True)
+        async_method = asynchronize(self.delegate.drop_database, False, True)
         async_method(name_or_database, callback=callback)
 
     @property
@@ -544,12 +549,15 @@ class TornadoConnection(TornadoConnectionBase):
     # HACK!: For unittests that examine this attribute
     _Connection__pool           = ReadOnlyDelegateProperty()
 
-    def new_delegate(self, *args, **kwargs):
+    def _new_delegate(self, *args, **kwargs):
         kwargs['auto_start_request'] = False
         kwargs['_pool_class'] = TornadoPool
         return pymongo.connection.Connection(*args, **kwargs)
 
-
+    def _get_pools(self):
+        # TODO: expose the PyMongo pool, or otherwise avoid this
+        return [self.delegate._Connection__pool]
+    
 class TornadoReplicaSetConnection(TornadoConnectionBase):
     primary                       = ReadOnlyDelegateProperty()
     secondaries                   = ReadOnlyDelegateProperty()
@@ -558,17 +566,25 @@ class TornadoReplicaSetConnection(TornadoConnectionBase):
     read_preference               = ReadOnlyDelegateProperty()
     seeds                         = ReadOnlyDelegateProperty()
 
-    def new_delegate(self, *args, **kwargs):
+    def _new_delegate(self, *args, **kwargs):
         kwargs['auto_start_request'] = False
         kwargs['_pool_class'] = TornadoPool
         return pymongo.replica_set_connection.ReplicaSetConnection(
             *args, **kwargs)
 
+    def _get_pools(self):
+        # TODO: expose the PyMongo pools, or otherwise avoid this
+        pools = []
+        for mongo in self.delegate._ReplicaSetConnection__pools.values():
+            if 'pool' in mongo:
+                pools.append(mongo['pool'])
+
+        return pools
 
 class TornadoMasterSlaveConnection(TornadoConnectionBase):
     close_cursor                  = ReadOnlyDelegateProperty()
 
-    def new_delegate(self, master, slaves, *args, **kwargs):
+    def _new_delegate(self, master, slaves, *args, **kwargs):
         if isinstance(master, TornadoConnection):
             master = master.delegate
 
@@ -594,12 +610,16 @@ class TornadoMasterSlaveConnection(TornadoConnectionBase):
 
         return tornado_slaves
 
+    def _get_pools(self):
+        # TODO: expose the PyMongo pool, or otherwise avoid this
+        return [self.master._Connection__pool]
+
     # HACK!: For unittests that examine this attribute
     _send_message_with_response   = Async(has_safe_arg=False, cb_required=True)
 
 
 class RequestContext(stack_context.StackContext):
-    def __init__(self, connection, request_id):
+    def __init__(self, pools, request_id):
         class RequestContextFactoryFactory(object):
             def __del__(self):
                 global current_request
@@ -607,7 +627,9 @@ class RequestContext(stack_context.StackContext):
 
                 # TODO: see how much this sucks & needs to be rewritten?
                 current_request = request_id
-                connection.end_request()
+                for pool in pools:
+                    pool.end_request()
+
                 current_request = None
 
             def __call__(self):
@@ -684,7 +706,7 @@ class TornadoDatabase(TornadoBase):
             name = name.delegate.name
 
         sync_method = self.delegate.drop_collection
-        async_method = asynchronize(self, sync_method, False, True)
+        async_method = asynchronize(sync_method, False, True)
         async_method(name, callback=callback)
 
     # TODO: doc why we need to override this, refactor
@@ -698,7 +720,7 @@ class TornadoDatabase(TornadoBase):
             name = name.delegate.name
 
         sync_method = self.delegate.validate_collection
-        async_method = asynchronize(self, sync_method, False, True)
+        async_method = asynchronize(sync_method, False, True)
         async_method(name, callback=callback)
 
     # TODO: test that this raises an error if collection exists in Motor, and
@@ -713,7 +735,7 @@ class TornadoDatabase(TornadoBase):
             del kwargs['callback']
 
         sync_method = self.delegate.create_collection
-        async_method = asynchronize(self, sync_method, False, False)
+        async_method = asynchronize(sync_method, False, False)
 
         def cb(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
@@ -798,7 +820,7 @@ class TornadoCollection(TornadoBase):
             callback(result, error)
 
         sync_method = self.delegate.map_reduce
-        async_mr = asynchronize(self, sync_method, False, True)
+        async_mr = asynchronize(sync_method, False, True)
         async_mr(*args, callback=inner_cb, **kwargs)
 
     def __repr__(self):
@@ -865,7 +887,7 @@ class TornadoCursor(TornadoBase):
             )
 
         self.started = True
-        async_refresh = asynchronize(self, self.delegate._refresh, False, True)
+        async_refresh = asynchronize(self.delegate._refresh, False, True)
         async_refresh(callback=callback)
 
     def each(self, callback):

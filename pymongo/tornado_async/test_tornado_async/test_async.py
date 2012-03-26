@@ -38,6 +38,7 @@ sys.path.insert(
 )
 
 import pymongo
+import pymongo.pool
 from pymongo.objectid import ObjectId
 from pymongo.tornado_async import async
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
@@ -46,7 +47,7 @@ from pymongo.errors import InvalidOperation, ConfigurationError, \
 
 from test.utils import delay
 
-import tornado.ioloop
+import tornado.ioloop, tornado.stack_context
 from tornado import gen
 
 # Tornado testing tools
@@ -380,6 +381,7 @@ class TornadoTestBasic(TornadoTest):
         out of order. Also test that TornadoConnection doesn't reuse sockets
         incorrectly.
         """
+        # TODO: this often fails, due to race conditions in the test
         # Make a big unindexed collection that will take a long time to query
         self.sync_db.drop_collection('big_coll')
         self.sync_db.big_coll.insert([
@@ -1245,6 +1247,219 @@ class TornadoTestBasic(TornadoTest):
         self.assertEqual(b, result_c["another test"])
         self.assertEqual(c, result_c)
 
+    @async_test_engine()
+    def test_max_pool_size_validation(self):
+        cx = async.TornadoConnection(host=host, port=port, max_pool_size=-1)
+        yield AssertRaises(ConfigurationError, cx.open)
+
+        cx = async.TornadoConnection(host=host, port=port, max_pool_size='foo')
+        yield AssertRaises(ConfigurationError, cx.open)
+
+        c = async.TornadoConnection(host=host, port=port, max_pool_size=100)
+        yield async.Op(c.open)
+        self.assertEqual(c.max_pool_size, 100)
+
+    def test_pool_request(self):
+        # 1. Create a connection
+        # 2. Get two sockets while keeping refs to both, check they're different
+        # 3. Dereference both sockets, check they're reclaimed by pool
+        # 4. Get a socket in a request
+        # 5. Get a socket not in a request, check different
+        # 6. Get another socket in request, check we get InvalidOperation (no
+        #   concurrent ops in request)
+        # 7. Dereference request socket, check it's reclaimed by pool
+        # 8. Get two sockets, once in request and once not, check different
+        # 9. Check that second socket in request is same as first
+        
+        # 1.
+        async.socket_uuid = True
+        cx = self.async_connection(max_pool_size=17)
+        cx_pool = cx.delegate._Connection__pool
+        loop = tornado.ioloop.IOLoop.instance()
+
+        # Connection has needed one socket so far to call isMaster
+        self.assertEqual(1, len(cx_pool.sockets))
+        self.assertFalse(cx_pool.in_request())
+
+        def get_socket():
+            # Weirdness in PyMongo, which I hope will be fixed soon: Connection
+            # does pool.get_socket(pair), while ReplicaSetConnection initializes
+            # pool with pair and just does pool.get_socket(). We're using
+            # Connection so we have to emulate its call.
+            return cx_pool.get_socket((host, port))
+
+        get_socket = async.asynchronize(get_socket, False, True)
+
+        def socket_ids():
+            return [sock_info.sock.uuid for sock_info in cx_pool.sockets]
+
+        # We need a place to keep refs to sockets so they're not reclaimed
+        # before we're ready
+        socks = {}
+        results = set()
+
+        # 2.
+        def got_sock0(sock, error):
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            socks[0] = sock
+            if 1 in socks:
+                # got_sock1 has also run; let this callback finish so its refs
+                # are deleted
+                loop.add_callback(check_socks_different_and_reclaimed0)
+
+        def got_sock1(sock, error):
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            socks[1] = sock
+            if 0 in socks:
+                # got_sock0 has also run; let this callback finish so its refs
+                # are deleted
+                loop.add_callback(check_socks_different_and_reclaimed0)
+
+        # 3.
+        def check_socks_different_and_reclaimed0():
+            self.assertNotEqual(socks[0], socks[1])
+            id_0, id_1 = socks[0].sock.uuid, socks[1].sock.uuid
+            del socks[0]
+            del socks[1]
+            self.assertTrue(id_0 in socket_ids())
+            self.assertTrue(id_1 in socket_ids())
+
+            results.add('step3')
+            
+            # 4.
+            with cx.start_request():
+                get_socket(callback=got_sock2)
+
+            # 5.
+            get_socket(callback=got_sock3)
+
+        sock2_id = [None]
+        def got_sock2(sock, error):
+            # Get request socket
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            self.assertTrue(cx_pool.in_request())
+            socks[2] = sock
+            sock2_id[0] = sock.sock.uuid
+            if 3 in socks:
+                # got_sock3 has also run
+                loop.add_callback(check_socks_different_and_reclaimed1)
+
+            # We're in a request in this function, so test step 6, after
+            # check_socks_different_and_reclaimed1 has run.
+            loop.add_timeout(
+                time.time() + 0.25,
+                lambda: get_socket(callback=check_invalid_op))
+
+        def got_sock3(sock, error):
+            # Get NON-request socket
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            self.assertFalse(cx_pool.in_request())
+            socks[3] = sock
+            if 2 in socks:
+                # got_sock2 has also run
+                loop.add_callback(check_socks_different_and_reclaimed1)
+
+        def check_socks_different_and_reclaimed1():
+            self.assertNotEqual(socks[2], socks[3])
+            id_2, id_3 = socks[2].sock.uuid, socks[3].sock.uuid
+            del socks[2]
+            del socks[3]
+
+            # sock 2 is the request socket, it hasn't been reclaimed yet
+            # because we still have check_invalid_op() pending in that request
+            self.assertFalse(id_2 in socket_ids())
+
+            # sock 3 is done and it's been reclaimed
+            self.assertTrue(id_3 in socket_ids())
+            results.add('step5')
+
+        # 6.
+        def check_invalid_op(result, error):
+            self.assertEqual(None, result)
+            self.assertTrue(isinstance(error, InvalidOperation))
+            self.assertTrue(cx_pool.in_request())
+            results.add('step6')
+
+            # 7.
+            self.assertFalse(sock2_id[0] in socket_ids())
+
+            # Schedule a callback *not* in a request
+            with tornado.stack_context.NullContext():
+                loop.add_callback(check_request_sock_reclaimed)
+
+        def check_request_sock_reclaimed():
+            self.assertFalse(cx_pool.in_request())
+
+            # TODO: I can't figure out how to force GC reliably here
+#            self.assertTrue(
+#                sock2_id[0] in socket_ids(),
+#                "Request socket not reclaimed by pool")
+
+            results.add('step7')
+            
+            # 8.
+            get_socket(callback=got_sock4)
+            
+            with cx.start_request():
+                get_socket(callback=got_sock5)
+
+        def got_sock4(sock, error):
+            self.assertFalse(cx_pool.in_request())
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            socks[4] = sock
+            if 5 in socks:
+                # got_sock5 has also run
+                check_socks_different()
+
+        sock5_id = [None]
+        def got_sock5(sock, error):
+            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+
+            socks[5] = sock
+            sock5_id[0] = sock.sock.uuid
+
+            if 4 in socks:
+                # got_sock4 has also run
+                check_socks_different()
+
+            # 9.
+            get_socket(callback=got_sock6)
+
+        def check_socks_different():
+            self.assertNotEqual(socks[4], socks[5])
+
+            # sock 5 is the request socket
+            id_4 = socks[4].sock.uuid
+            sock5_id[0] = socks[5].sock.uuid
+
+            del socks[4]
+            del socks[5]
+
+            # sock 4 is done and it's been reclaimed
+            self.assertTrue(id_4 in socket_ids())
+
+            # sock 5 still in request
+            self.assertFalse(sock5_id[0] in socket_ids())
+            results.add('step8')
+
+        def got_sock6(sock, error):
+            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
+            self.assertEqual(sock5_id[0], sock.sock.uuid)
+            results.add('step9')
+
+        # Knock over the first domino.
+        get_socket(callback=got_sock0)
+        get_socket(callback=got_sock1)
+
+        for step in (3, 5, 6, 7, 8, 9):
+            self.assertEventuallyEqual(
+                True, lambda: 'step%s' % step in results)
+
+        loop.start()
+
+
 class TornadoSSLTest(TornadoTest):
     def test_no_ssl(self):
         if have_ssl:
@@ -1303,6 +1518,7 @@ class TornadoSSLTest(TornadoTest):
 # TODO: check that sockets are returned to pool, or closed, or something
 # TODO: test unsafe remove
 # TODO: test deeply-nested callbacks
+# TODO: separate these into some class-specific modules a la PyMongo
 
 if __name__ == '__main__':
     unittest.main()

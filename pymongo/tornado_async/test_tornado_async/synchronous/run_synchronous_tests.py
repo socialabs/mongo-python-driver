@@ -42,6 +42,7 @@ excluded_tests = [
     'TestMasterSlaveConnection.test_disconnect',
     'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
     'TestDatabase.test_authenticate_and_request',
+    'TestMasterSlaveConnection.test_insert_find_one_in_request',
 
     # TODO: document these differences b/w Motor and PyMongo (most of them
     # already have TODOs in async.py, just double-check them from this list)

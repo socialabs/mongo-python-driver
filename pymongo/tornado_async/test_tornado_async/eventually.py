@@ -27,8 +27,6 @@ class AssertEventuallyTest(unittest.TestCase):
         loop = ioloop.IOLoop.instance()
 
         def callback(*args, **kwargs):
-            if args or kwargs:
-                pass
             try:
                 self.assertEqual(expected, fn(), comment)
                 # Passed
