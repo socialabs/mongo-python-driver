@@ -104,21 +104,28 @@ def async_test_engine(timeout_sec=5):
     return decorator
 
 
+class AssertRaises(tornado.gen.Task):
+    def __init__(self, exc_type, func, *args, **kwargs):
+        super(AssertRaises, self).__init__(func, *args, **kwargs)
+        if not isinstance(exc_type, type):
+            raise TypeError("%s is not a class" % repr(exc_type))
+
+        if not issubclass(exc_type, Exception):
+            raise TypeError(
+                "%s is not a subclass of Exception" % repr(exc_type))
+        self.exc_type = exc_type
+
+    def get_result(self):
+        (result, error), _ = self.runner.pop_result(self.key)
+        if not isinstance(error, self.exc_type):
+            raise AssertionError("%s not raised" % self.exc_type.__name__)
+        return result
+
 # TODO: sphinx-compat?
 # TODO: test map_reduce and inline_map_reduce
 # TODO: test that a database called sync_connection, a collection called
 #   sync_database, a collection called foo.sync_collection can be accessed via
 #   [ ]
-
-
-# TODO: rename this and make it useful to app devs who use Motor, probably
-#   make a new Task like motor.Op that does this automatically
-def check(task):
-    result, error = task.args
-    if error:
-        raise error
-
-    return result
 
 
 host = os.environ.get("DB_IP", "localhost")
@@ -247,6 +254,7 @@ class TornadoTestBasic(TornadoTest):
         coll = db.test
         self.assert_(repr(coll).startswith('TornadoCollection'))
 
+    @async_test_engine()
     def test_connection(self):
         cx = async.TornadoConnection(host, port)
 
@@ -261,31 +269,15 @@ class TornadoTestBasic(TornadoTest):
             lambda: cx['some_database_name']
         )
 
-        called = {'callback': False}
-
-        def callback(connection, error):
-            if error:
-                raise error
-
-            called['callback'] = True
-
-        self.assertEventuallyEqual(
-            True,
-            lambda: cx.connected
-        )
-
-        self.assertEventuallyEqual(
-            True,
-            lambda: called['callback']
-        )
-
-        cx.open(callback)
-        tornado.ioloop.IOLoop.instance().start()
+        result = yield async.Op(cx.open)
+        self.assertEqual(result, cx)
+        self.assertTrue(cx.connected)
 
     def test_connection_callback(self):
         cx = async.TornadoConnection(host, port)
         self.check_callback_handling(cx.open)
-        
+
+    @async_test_engine()
     def test_dotted_collection_name(self):
         # Ensure that remove, insert, and find work on collections with dots
         # in their names.
@@ -295,50 +287,14 @@ class TornadoTestBasic(TornadoTest):
             cx.test.foo.bar,
             cx.test.foo.bar.baz.quux
         ):
-            results = []
-
-            def removed1(result, error):
-                if error:
-                    raise error
-
-                results.append('removed1')
-                coll.insert({'_id':'xyzzy'}, callback=inserted)
-
-            def inserted(result, error):
-                if error:
-                    raise error
-
-                results.append(result)
-                coll.find_one({'_id':'xyzzy'}, callback=found1)
-
-            def found1(result, error):
-                if error:
-                    raise error
-
-                results.append(result)
-                coll.remove(callback=removed2)
-
-            def removed2(result, error):
-                if error:
-                    raise error
-
-                results.append('removed2')
-                coll.find_one({'_id':'xyzzy'}, callback=found2)
-
-            def found2(result, error):
-                if error:
-                    raise error
-
-                results.append(result)
-
-            self.assertEventuallyEqual(
-                ['removed1', 'xyzzy', {'_id':'xyzzy'}, 'removed2', None],
-                lambda: results
-            )
-
-            coll.remove(callback=removed1)
-
-            tornado.ioloop.IOLoop.instance().start()
+            result = yield async.Op(coll.insert, {'_id':'xyzzy'})
+            self.assertEqual(result, 'xyzzy')
+            result = yield async.Op(coll.find_one, {'_id':'xyzzy'})
+            self.assertEqual(result['_id'], 'xyzzy')
+            yield async.Op(coll.remove)
+            result = yield async.Op(coll.find_one, {'_id':'xyzzy'})
+            self.assertEqual(result, None)
+            yield async.Op(coll.remove)
 
     def test_cursor(self):
         cx = self.async_connection()
@@ -349,77 +305,62 @@ class TornadoTestBasic(TornadoTest):
         self.assertFalse(cursor.started, "Cursor shouldn't start immediately")
 
     def test_find(self):
-        # 1. Open a connection. Although in most tests I'm using the
-        # synchronized self.async_connection() for convenience, here I'll
-        # really test passing a callback to open() that does a find().
+        # 1. Open a connection.
         #
         # 2. test_collection has docs inserted in setUp(). Query for documents
         # with _id 0 through 13, in batches of 5: 0-4, 5-9, 10-13.
         #
         # 3. For each document, check if the cursor has been closed. I expect
-        # to remain open until we've retrieved doc with _id 10. Oddly, Mongo
+        # it to remain open until we've retrieved doc with _id 10. Oddly, Mongo
         # doesn't close the cursor and return cursor_id 0 if the final batch
         # exactly contains the last document -- the last batch size has to go
         # one *past* the final document in order to close the cursor.
+        connection = yield async.Op(async.TornadoConnection(host, port).open)
+
+        cursor = connection.test.test_collection.find(
+            {'_id': {'$lt':14}},
+            {'s': False}, # exclude 's' field
+            sort=[('_id', 1)],
+        ).batch_size(5)
+
         results = []
+        while True:
+            doc = yield async.Op(cursor.each)
 
-        def connected(connection, error):
-            if error:
-                raise error
+            if doc:
+                results.append(doc['_id'])
 
-            def each(doc, error):
-                if error:
-                    raise error
+            if doc and doc['_id'] < 10:
+                self.assertEqual(
+                    1 + self.open_cursors,
+                    self.get_open_cursors()
+                )
+            else:
+                self.assertEqual(
+                    self.open_cursors,
+                    self.get_open_cursors()
+                )
 
-                if doc:
-                    results.append(doc['_id'])
+            if not doc:
+                # Done iterating
+                break
 
-                if doc and doc['_id'] < 10:
-                    self.assertEqual(
-                        1 + self.open_cursors,
-                        self.get_open_cursors()
-                    )
-                else:
-                    self.assertEqual(
-                        self.open_cursors,
-                        self.get_open_cursors()
-                    )
-
-            connection.test.test_collection.find(
-                {'_id': {'$lt':14}},
-                {'s': False}, # exclude 's' field
-                sort=[('_id', 1)],
-            ).batch_size(5).each(each)
-
-        async.TornadoConnection(host, port).open(callback=connected)
-
-        self.assertEventuallyEqual(
-            range(14),
-            lambda: results
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
+        self.assertEqual(range(14), results)
 
     @async_test_engine()
     def test_find_where(self):
         # Check that $where clauses work
         coll = self.async_connection().test.test_collection
-        self.assertEqual(
-            200,
-            len(check(task=(yield gen.Task(coll.find().to_list))))
-        )
+        res = yield async.Op(coll.find().to_list)
+        self.assertEqual(200,len(res))
 
         # Get the one doc with _id of 8
         where = 'this._id == 2 * 4'
-        res0 = check(task=(yield gen.Task(
-            coll.find({'$where': where}).to_list
-        )))
+        res0 = yield async.Op(coll.find({'$where': where}).to_list)
         self.assertEqual(1, len(res0))
         self.assertEqual(8, res0[0]['_id'])
 
-        res1 = check(task=(yield gen.Task(
-            coll.find().where(where).to_list
-        )))
+        res1 = yield async.Op(coll.find().where(where).to_list)
         self.assertEqual(res0, res1)
 
     def test_find_callback(self):
@@ -442,7 +383,7 @@ class TornadoTestBasic(TornadoTest):
         # Make a big unindexed collection that will take a long time to query
         self.sync_db.drop_collection('big_coll')
         self.sync_db.big_coll.insert([
-            {'s': hex(s)} for s in range(10000)
+            {'s': hex(s)} for s in range(1000)
         ])
 
         cx = self.async_connection()
@@ -461,18 +402,18 @@ class TornadoTestBasic(TornadoTest):
 
         now = time.time()
 
-        # This find() takes 1 second
+        # This find() takes 10 seconds
         loop.add_timeout(
             now + 0.1,
             lambda: cx.test.test_collection.find(
-                {'_id': 1, '$where': delay(1)},
+                {'_id': 1, '$where': delay(10)},
                 fields={'s': True, '_id': False},
             ).each(callback)
         )
 
         # Very fast lookup
         loop.add_timeout(
-            now + 0.2,
+            now + 0.5,
             lambda: cx.test.test_collection.find(
                 {'_id': 2},
                 fields={'s': True, '_id': False},
@@ -481,10 +422,10 @@ class TornadoTestBasic(TornadoTest):
 
         # Find {'i': 3} in big_coll -- even though there's only one such record,
         # MongoDB will have to scan the whole table to know that. We expect this
-        # to be faster than 1 second (the $where clause above) and slower than
+        # to be faster than 10 seconds (the $where clause above) and slower than
         # the indexed lookup above.
         loop.add_timeout(
-            now + 0.3,
+            now + 1,
             lambda: cx.test.big_coll.find(
                 {'s': hex(3)},
                 fields={'s': True, '_id': False},
@@ -495,7 +436,7 @@ class TornadoTestBasic(TornadoTest):
         self.assertEventuallyEqual(
             [{'s': hex(s)} for s in (2, 3, 1)],
             lambda: results,
-            timeout_sec=1.3
+            timeout_sec=11
         )
 
         tornado.ioloop.IOLoop.instance().start()
@@ -550,25 +491,14 @@ class TornadoTestBasic(TornadoTest):
         tornado.ioloop.IOLoop.instance().start()
         self.assertEqual(1, len(results))
 
+    @async_test_engine()
     def test_find_one(self):
-        results = []
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.find_one(
-            {'_id': 1},
-            callback=callback
+        result = yield async.Op(
+            self.async_connection().test.test_collection.find_one,
+            {'_id': 1}
         )
 
-        self.assertEventuallyEqual(
-            # Not a list of docs, find_one() returns the doc itself
-            {'_id': 1, 's': hex(1)},
-            lambda: results[0]
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
+        self.assertEqual({'_id': 1, 's': hex(1)}, result)
 
     def test_find_one_callback(self):
         cx = self.async_connection()
@@ -626,40 +556,21 @@ class TornadoTestBasic(TornadoTest):
     @async_test_engine()
     def test_count(self):
         coll = self.async_connection().test.test_collection
-        self.assertEqual(
-            200,
-            check(task=(yield gen.Task(coll.find().count)))
-        )
-
-        self.assertEqual(
-            100,
-            check(task=(yield gen.Task(coll.find({'_id': {'$gt': 99}}).count)))
-        )
-
+        result = yield async.Op(coll.find().count)
+        self.assertEqual(200, result)
+        result = yield async.Op(coll.find({'_id': {'$gt': 99}}).count)
+        self.assertEqual(100, result)
         where = 'this._id % 2 == 0 && this._id >= 50'
-        self.assertEqual(
-            75,
-            check(task=(yield gen.Task(coll.find({'$where': where}).count)))
-        )
-
-        self.assertEqual(
-            75,
-            check(task=(yield gen.Task(coll.find().where(where).count)))
-        )
-
-        self.assertEqual(
-            25,
-            check(task=(yield gen.Task(coll.find(
-                {'_id': {'$lt': 100}}
-            ).where(where).count)))
-        )
-
-        self.assertEqual(
-            25,
-            check(task=(yield gen.Task(coll.find(
-                {'_id': {'$lt': 100}, '$where': where}
-            ).count)))
-        )
+        result = yield async.Op(coll.find({'$where': where}).count)
+        self.assertEqual(75, result)
+        result = yield async.Op(coll.find().where(where).count)
+        self.assertEqual(75, result)
+        result = yield async.Op(
+            coll.find({'_id': {'$lt': 100}}).where(where).count)
+        self.assertEqual(25, result)
+        result = yield async.Op(coll.find(
+            {'_id': {'$lt': 100}, '$where': where}).count)
+        self.assertEqual(result, 25)
 
     def test_cursor_close(self):
         """
@@ -679,8 +590,6 @@ class TornadoTestBasic(TornadoTest):
                 raise error
 
             cursor.close()
-            # TODO: this could use async_test_engine if I write a gen.Task that
-            # pauses for a time
             loop.add_timeout(time.time() + .1, loop.stop)
 
             # Cancel iteration, so the cursor isn't exhausted
@@ -695,10 +604,10 @@ class TornadoTestBasic(TornadoTest):
     @async_test_engine()
     def test_update(self):
         cx = self.async_connection()
-        result = check(task=(yield gen.Task(cx.test.test_collection.update,
+        result = yield async.Op(cx.test.test_collection.update,
             {'_id': 5},
             {'$set': {'foo': 'bar'}},
-        )))
+        )
 
         self.assertEqual(1, result['ok'])
         self.assertEqual(True, result['updatedExisting'])
@@ -721,11 +630,11 @@ class TornadoTestBasic(TornadoTest):
 
         try:
             # There's already a document with s: hex(4)
-            check(task=(yield gen.Task(
+            yield async.Op(
                 cx.test.test_collection.update,
                 {'_id': 5},
                 {'$set': {'s': hex(4)}},
-            )))
+            )
         except DuplicateKeyError:
             pass
         else:
@@ -737,102 +646,68 @@ class TornadoTestBasic(TornadoTest):
             functools.partial(cx.test.test_collection.update, {}, {})
         )
 
+    @async_test_engine()
     def test_insert(self):
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.insert(
-            {'_id': 201},
-            callback=callback,
+        result = yield async.Op(
+            self.async_connection().test.test_collection.insert,
+            {'_id': 201}
         )
 
         # insert() returns new _id
-        self.assertEventuallyEqual(201, lambda: results[0])
+        self.assertEqual(201, result)
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_insert_many(self):
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.insert(
-            [{'_id': i, 's': hex(i)} for i in range(201, 211)],
-            callback=callback,
+        result = yield async.Op(
+            self.async_connection().test.test_collection.insert,
+            [{'_id': i, 's': hex(i)} for i in range(201, 211)]
         )
 
-        self.assertEventuallyEqual(range(201, 211), lambda: results[0])
+        self.assertEqual(range(201, 211), result)
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_insert_bad(self):
         """
         Violate a unique index, make sure we handle error well
         """
-        results = []
-
-        def callback(result, error):
-            self.assert_(isinstance(error, DuplicateKeyError))
-            self.assertEqual(None, result)
-            results.append(result)
-
-        self.async_connection().test.test_collection.insert(
-            {'s': hex(4)}, # There's already a document with s: hex(4)
-            callback=callback,
+        yield AssertRaises(
+            DuplicateKeyError,
+            self.async_connection().test.test_collection.insert,
+            {'s': hex(4)} # There's already a document with s: hex(4)
         )
-
-        self.assertEventuallyEqual(None, lambda: results[0])
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
 
     def test_insert_many_one_bad(self):
         """
         Violate a unique index in one of many updates, make sure we handle error
         well
         """
-        results = []
-
-        def callback(result, error):
-            self.assert_(isinstance(error, DuplicateKeyError))
-            results.append(result)
-
-        self.async_connection().test.test_collection.insert(
+        result = yield AssertRaises(
+            DuplicateKeyError,
+            self.async_connection().test.test_collection.insert,
             [
                 {'_id': 201, 's': hex(201)},
                 {'_id': 202, 's': hex(4)}, # Already exists
                 {'_id': 203, 's': hex(203)},
-            ],
-            callback=callback,
+            ]
         )
 
 
         # In async, even though first insert succeeded, result is None
-        self.assertEventuallyEqual(None, lambda: results[0])
-
-        tornado.ioloop.IOLoop.instance().start()
-
-        self.assertEqual(1, len(results))
+        self.assertEqual(None, result)
 
         # First insert should've succeeded
-        self.assertEqual(
-            [{'_id': 201, 's': hex(201)}],
-            list(self.sync_db.test_collection.find({'_id': 201}))
+        result = yield async.Op(
+            self.sync_db.test_collection.find({'_id': 201}).to_list
         )
 
+        self.assertEqual([{'_id': 201, 's': hex(201)}], result)
+
         # Final insert didn't execute, since second failed
-        self.assertEqual(
-            [],
-            list(self.sync_db.test_collection.find({'_id': 203}))
+        result = yield async.Op(
+            self.sync_db.test_collection.find({'_id': 203}).to_list
         )
+
+        self.assertEqual([], result)
 
     def test_save_callback(self):
         cx = self.async_connection()
@@ -840,134 +715,81 @@ class TornadoTestBasic(TornadoTest):
             functools.partial(cx.test.test_collection.save, {})
         )
 
+    @async_test_engine()
     def test_save_with_id(self):
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.save(
-            {'_id': 5},
-            callback=callback,
+        result = yield async.Op(
+            self.async_connection().test.test_collection.save,
+            {'_id': 5}
         )
 
         # save() returns the _id, in this case 5
-        self.assertEventuallyEqual(5, lambda: results[0])
+        self.assertEqual(5, result)
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_save_without_id(self):
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        self.async_connection().test.test_collection.save(
-            {'fiddle': 'faddle'},
-            callback=callback,
+        result = yield async.Op(
+            self.async_connection().test.test_collection.save,
+            {'fiddle': 'faddle'}
         )
 
         # save() returns the new _id
-        self.assertEventuallyEqual(
-            True,
-            lambda: isinstance(results[0], ObjectId)
-        )
+        self.assertTrue(isinstance(result, ObjectId))
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_save_bad(self):
         """
         Violate a unique index, make sure we handle error well
         """
-        results = []
-
-        def callback(result, error):
-            self.assert_(isinstance(error, DuplicateKeyError))
-            self.assertEqual(None, result)
-            results.append(result)
-
-        self.async_connection().test.test_collection.save(
-            {'_id': 5, 's': hex(4)}, # There's already a document with s: hex(4)
-            callback=callback,
+        result = yield AssertRaises(
+            DuplicateKeyError,
+            self.async_connection().test.test_collection.save,
+            {'_id': 5, 's': hex(4)} # There's already a document with s: hex(4)
         )
 
-        self.assertEventuallyEqual(None, lambda: results[0])
+        self.assertEqual(None, result)
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
-
+    @async_test_engine()
     def test_save_multiple(self):
         """
         TODO: what are we testing here really?
         """
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
         cx = self.async_connection()
 
         for i in range(10):
             cx.test.test_collection.save(
                 {'_id': i + 500, 's': hex(i + 500)},
-                callback=callback
+                callback=(yield tornado.gen.Callback(key=i))
             )
+
+        results = yield async.WaitAllOps(range(10))
+
+        # TODO: doc that result, error are in result.args for all gen.engine
+        # yields
 
         # Once all saves complete, results will be a list of _id's, from 500 to
         # 509, but not necessarily in that order since we're async.
-        self.assertEventuallyEqual(
-            range(500, 510),
-            lambda: sorted(results)
-        )
+        self.assertEqual(range(500, 510), sorted(results))
 
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(10, len(results))
-
+    @async_test_engine()
     def test_remove(self):
         """
         Remove a document twice, check that we get a success response first time
         and an error the second time.
         """
-        results = []
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
         cx = self.async_connection()
-        cx.test.test_collection.remove(
-            {'_id': 1},
-            callback=callback
-        )
-
-        tornado.ioloop.IOLoop.instance().add_timeout(
-            0.1,
-            lambda: cx.test.test_collection.remove(
-                {'_id': 1},
-                callback=callback
-            )
-        )
+        result = yield async.Op(cx.test.test_collection.remove, {'_id': 1})
 
         # First time we remove, n = 1
-        self.assertEventuallyEqual(1, lambda: results[0]['n'])
-        self.assertEventuallyEqual(1, lambda: results[0]['ok'])
-        self.assertEventuallyEqual(None, lambda: results[0]['err'])
+        self.assertEventuallyEqual(1, lambda: result['n'])
+        self.assertEventuallyEqual(1, lambda: result['ok'])
+        self.assertEventuallyEqual(None, lambda: result['err'])
+
+        result = yield async.Op(cx.test.test_collection.remove, {'_id': 1})
 
         # Second time, document is already gone, n = 0
-        self.assertEventuallyEqual(0, lambda: results[1]['n'])
-        self.assertEventuallyEqual(1, lambda: results[1]['ok'])
-        self.assertEventuallyEqual(None, lambda: results[1]['err'])
-
-        tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(2, len(results))
+        self.assertEventuallyEqual(0, lambda: result['n'])
+        self.assertEventuallyEqual(1, lambda: result['ok'])
+        self.assertEventuallyEqual(None, lambda: result['err'])
 
     def test_remove_callback(self):
         cx = self.async_connection()
@@ -975,25 +797,20 @@ class TornadoTestBasic(TornadoTest):
             functools.partial(cx.test.test_collection.remove, {})
         )
 
+    @async_test_engine()
     def test_unsafe_remove(self):
         """
         Test that unsafe removes with no callback still work
         """
+        self.assertEqual( 1, self.sync_coll.find({'_id': 117}).count(),
+            msg="Test setup should have a document with _id 117")
+
+        coll = self.async_connection().test.test_collection
+        yield async.Op(coll.remove, {'_id': 117})
         self.assertEqual(
-            1,
-            self.sync_coll.find({'_id': 117}).count(),
-            "Test setup should have a document with _id 117"
+            0, second=(yield async.Op(coll.find({'_id': 117}).count))
         )
 
-        self.async_connection().test.test_collection.remove({'_id': 117})
-
-        self.assertEventuallyEqual(
-            0,
-            lambda: len(list(self.sync_db.test_collection.find({'_id': 117})))
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
-        
     def test_unsafe_insert(self):
         """
         Test that unsafe inserts with no callback still work
@@ -1004,7 +821,7 @@ class TornadoTestBasic(TornadoTest):
         # insert id 201 without a callback or safe=True
         self.async_connection().test.test_collection.insert({'_id': 201})
 
-        # the insert is executed
+        # the insert is eventually executed
         self.assertEventuallyEqual(
             1,
             lambda: len(list(self.sync_db.test_collection.find({'_id': 201})))
@@ -1025,23 +842,11 @@ class TornadoTestBasic(TornadoTest):
 
         tornado.ioloop.IOLoop.instance().start()
 
+    @async_test_engine()
     def test_command(self):
         cx = self.async_connection()
-        results = []
-
-        def callback(result, error):
-            if error:
-                raise error
-            results.append(result)
-
-        cx.admin.command("buildinfo", callback=callback)
-
-        self.assertEventuallyEqual(
-            int,
-            lambda: type(results[0]['bits'])
-        )
-
-        tornado.ioloop.IOLoop.instance().start()
+        result = yield async.Op(cx.admin.command, "buildinfo")
+        self.assertEqual(int, type(result['bits']))
 
     def test_command_callback(self):
         cx = self.async_connection()
@@ -1059,8 +864,6 @@ class TornadoTestBasic(TornadoTest):
 
             if not result:
                 # Done iterating
-                # TODO: turns out that passing None, None to the cb is a shitty
-                # and surprising interface, but what's better?
                 return
 
             results[0] += 1
@@ -1128,9 +931,16 @@ class TornadoTestBasic(TornadoTest):
         result correctly, which checks that we're using a single socket in the
         request as expected.
         """
+        # TODO: test that ensure_index calls the callback even if the index
+        # is already created and in the index cache - might be a special-case
+        # optimization
+
         # Use a special collection for this test
-        self.sync_db.test_get_last_error.drop()
+        sync_coll = self.sync_db.test_get_last_error
+        sync_coll.drop()
         cx = self.async_connection()
+        coll = cx.test.test_get_last_error
+
         results = []
 
         def ensured_index(result, error):
@@ -1138,21 +948,21 @@ class TornadoTestBasic(TornadoTest):
                 raise error
 
             results.append(result)
-            cx.test.test_get_last_error.insert({'x':1}, callback=inserted1)
+            coll.insert({'x':1}, callback=inserted1)
 
         def inserted1(result, error):
             if error:
                 raise error
 
             results.append(result)
-            cx.test.test_get_last_error.insert({'x':1}, callback=inserted2)
+            coll.insert({'x':1}, callback=inserted2)
 
         def inserted2(result, error):
             self.assert_(isinstance(error, DuplicateKeyError))
             results.append(result)
 
             with cx.start_request():
-                cx.test.test_get_last_error.insert(
+                coll.insert(
                     {'x':1},
                     safe=False,
                     callback=inserted3
@@ -1175,9 +985,6 @@ class TornadoTestBasic(TornadoTest):
             results.append(result)
 
         # start the sequence of callbacks
-        # TODO: test that ensure_index calls the callback even if the index
-        # is already created and in the index cache - might be a special-case
-        # optimization
         cx.test.test_get_last_error.ensure_index(
             [('x', 1)], unique=True, callback=ensured_index
         )
@@ -1208,6 +1015,40 @@ class TornadoTestBasic(TornadoTest):
 
         tornado.ioloop.IOLoop.instance().start()
         self.sync_db.test_get_last_error.drop()
+
+    @async_test_engine()
+    def test_get_last_error_gen(self):
+        # Same as test_get_last_error, but using tornado.gen
+        cx = self.async_connection()
+        coll = cx.text.test_get_last_error
+        yield async.Op(coll.drop)
+
+        result = yield async.Op(
+            coll.ensure_index, [('x', 1)], unique=True
+        )
+        self.assertEqual('x_1', result)
+
+        result = yield async.Op(coll.insert, {'x':1})
+        self.assertTrue(isinstance(result, ObjectId))
+
+        yield AssertRaises(DuplicateKeyError, coll.insert, {'x':1})
+
+        with cx.start_request():
+            result = yield async.Op(
+                coll.insert,
+                    {'x':1},
+                safe=False
+            )
+
+            # insert failed, but safe=False so it returned the
+            # driver-generated _id
+            self.assertTrue(isinstance(result, ObjectId))
+
+            # We're still in the request, so getLastError will work
+            result = yield async.Op(cx.test.error)
+            self.assertEqual(11000, result['code'])
+
+        yield async.Op(coll.drop)
 
     def test_no_concurrent_ops_in_request(self):
         # Check that an attempt to do two things at once in a request raises
@@ -1368,6 +1209,7 @@ class TornadoTestBasic(TornadoTest):
         # drop the collection
         time.sleep(0.5)
 
+    @async_test_engine()
     def test_auto_ref_and_deref(self):
         # Test same functionality as in PyMongo's test_database.py; the impl
         # for async is a little complex so we should test that it works here,
@@ -1380,33 +1222,28 @@ class TornadoTestBasic(TornadoTest):
         db.add_son_manipulator(AutoReference(db))
         db.add_son_manipulator(NamespaceInjector())
 
-        @gen.engine
-        def steps():
-            a = {"hello": u"world"}
-            b = {"test": a}
-            c = {"another test": b}
+        a = {"hello": u"world"}
+        b = {"test": a}
+        c = {"another test": b}
 
-            check(task=(yield gen.Task(db.a.remove, {})))
-            check(task=(yield gen.Task(db.b.remove, {})))
-            check(task=(yield gen.Task(db.c.remove, {})))
-            check(task=(yield gen.Task(db.a.save, a)))
-            check(task=(yield gen.Task(db.b.save, b)))
-            check(task=(yield gen.Task(db.c.save, c)))
-            a["hello"] = "mike"
-            check(task=(yield gen.Task(db.a.save, a)))
-            result_a = check(task=(yield gen.Task(db.a.find_one)))
-            result_b = check(task=(yield gen.Task(db.b.find_one)))
-            result_c = check(task=(yield gen.Task(db.c.find_one)))
+        yield async.Op(db.a.remove, {})
+        yield async.Op(db.b.remove, {})
+        yield async.Op(db.c.remove, {})
+        yield async.Op(db.a.save, a)
+        yield async.Op(db.b.save, b)
+        yield async.Op(db.c.save, c)
+        a["hello"] = "mike"
+        yield async.Op(db.a.save, a)
+        result_a = yield async.Op(db.a.find_one)
+        result_b = yield async.Op(db.b.find_one)
+        result_c = yield async.Op(db.c.find_one)
 
-            self.assertEventuallyEqual(a, lambda: result_a)
-            self.assertEventuallyEqual(a, lambda: result_b["test"])
-            self.assertEventuallyEqual(a, lambda: result_c["another test"]["test"])
-            self.assertEventuallyEqual(b, lambda: result_b)
-            self.assertEventuallyEqual(b, lambda: result_c["another test"])
-            self.assertEventuallyEqual(c, lambda: result_c)
-
-        steps()
-        tornado.ioloop.IOLoop.instance().start()
+        self.assertEqual(a, result_a)
+        self.assertEqual(a, result_b["test"])
+        self.assertEqual(a, result_c["another test"]["test"])
+        self.assertEqual(b, result_b)
+        self.assertEqual(b, result_c["another test"])
+        self.assertEqual(c, result_c)
 
 class TornadoSSLTest(TornadoTest):
     def test_no_ssl(self):

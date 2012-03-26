@@ -18,7 +18,7 @@ import functools
 import socket
 import time
 
-import tornado.ioloop, tornado.iostream
+import tornado.ioloop, tornado.iostream, tornado.gen
 from tornado import stack_context
 import greenlet
 
@@ -1002,3 +1002,35 @@ class TornadoCursor(TornadoBase):
     _Cursor__query_flags        = ReadOnlyDelegateProperty()
     _Cursor__connection_id      = ReadOnlyDelegateProperty()
     _Cursor__read_preference    = ReadOnlyDelegateProperty()
+
+
+# TODO: doc
+class Op(tornado.gen.Task):
+    def get_result(self):
+        (result, error), _ = super(Op, self).get_result()
+        if error:
+            raise error
+        return result
+
+
+class WaitOp(tornado.gen.Wait):
+    def get_result(self):
+        (result, error), _ = super(WaitOp, self).get_result()
+        if error:
+            raise error
+
+        return result
+
+
+class WaitAllOps(tornado.gen.WaitAll):
+    def get_result(self):
+        super_results = super(WaitAllOps, self).get_result()
+
+        results = []
+        for (result, error), _ in super_results:
+            if error:
+                raise error
+            else:
+                results.append(result)
+
+        return results
