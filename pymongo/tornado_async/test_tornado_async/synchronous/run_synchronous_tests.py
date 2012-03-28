@@ -29,45 +29,61 @@ excluded_tests = [
     # fix the synchro test or test the same functionality directly in Motor,
     # or document that Motor doesn't support the functionality
 
-    # Tests defined in specific suites that we skip because we test this
-    # functionality directly on Motor, rather than via fake_pymongo
+    # Motor's requests can't be simulated in fake PyMongo, so the request-
+    # handling part of test_copy_db is testing against Motor directly.
     'TestConnection.test_copy_db',
-    # This is in test_replica_set_connection, not test_connection
 
     # TODO: test the following in Motor if we haven't already ------>
-    'TestConnection.test_auto_reconnect_exception_when_read_preference_is_secondary',
-    'TestMasterSlaveConnection.test_continue_until_slave_works',
     'TestMasterSlaveConnection.test_disconnect',
     'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
     'TestDatabase.test_authenticate_and_request',
     'TestMasterSlaveConnection.test_insert_find_one_in_request',
     # <------------------- END TODO
 
+    # This test requires a lot of PyMongo-specific monkey-patching, we're
+    # not going to test this in Motor because it uses the same logic under the
+    # hood and can be assumed to work.
+    'TestMasterSlaveConnection.test_continue_until_slave_works',
+
     # Motor's reprs aren't the same as PyMongo's
     '*.test_repr',
 
-    # Tests we skip because we've decided to support these features differently
-    # in Motor than in PyMongo.
-    # TODO: document these differences b/w Motor and PyMongo (most of them
-    # already have TODOs in async.py, just double-check them from this list)
+    # Motor doesn't do auto_start_request at all
     'TestConnection.test_auto_start_request',
     'TestConnection.test_contextlib_auto_start_request',
+
+    # Motor's requests can't be simulated in fake PyMongo, so we test them
+    # directly
     'TestConnection.test_with_start_request',
+
+    # test_replica_set_connection: We test this directly, because it requires
+    # monkey-patching either socket or IOStream, depending on whether it's
+    # PyMongo or Motor
+    'TestConnection.test_auto_reconnect_exception_when_read_preference_is_secondary',
+
+    # Motor doesn't support forking or threading
     'TestConnection.test_fork',
     'TestConnection.test_interrupt_signal',
+    'TestCollection.test_ensure_unique_index_threaded',
+    'TestGridfs.test_threaded_writes',
+    'TestGridfs.test_threaded_reads',
 
+    # Motor doesn't support PyMongo's syntax, db.system.js['my_func'] = "code",
+    # users should just use system.js as a regular collection
     'TestDatabase.test_system_js',
     'TestDatabase.test_system_js_list',
 
-    'TestCollection.test_ensure_unique_index_threaded',
-
+    # Motor's cursors don't have a 'collection' attribute
     'TestCursor.test_properties',
-    'TestCursor.test_getitem_index_out_of_range',
-    'TestCursor.test_tailable',
 
-    'TestGridfs.test_threaded_writes',
-    'TestGridfs.test_threaded_reads',
+    # Motor can't raise an index error if a cursor slice is out of range; it
+    # just gets no results
+    'TestCursor.test_getitem_index_out_of_range',
+
+    # Motor's tailing works differently
+    'TestCursor.test_tailable',
 ]
+
 
 class SynchroNosePlugin(Plugin):
     name = 'synchro'

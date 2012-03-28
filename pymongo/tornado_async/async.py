@@ -982,47 +982,48 @@ class TornadoCursor(TornadoBase):
         check_callable(callback, True)
         add_callback = tornado.ioloop.IOLoop.instance().add_callback
 
-        # We'll need to modify these in inner_callback, so make it a list
-        cursor = [self.clone()]
+        cursor = self.clone()
+
+        # This is a list so we can modify it from the inner callback
         started = [False]
 
         # TODO: HACK!
-        cursor[0].delegate._Cursor__tailable = True
+        cursor.delegate._Cursor__tailable = True
 
         # If await_data parameter is set, then override whatever await_data
         # value was passed to find() (default False)
         # TODO: reconsider or at least test this crazy logic, doc
         if await_data is not None:
             # TODO: HACK!
-            cursor[0].delegate._Cursor__await_data = await_data
+            cursor.delegate._Cursor__await_data = await_data
 
         def inner_callback(result, error):
             if error:
-                cursor[0].close()
+                cursor.close()
                 callback(None, error)
             elif result is not None:
                 started[0] = True
                 if callback(result, None) is False:
-                    cursor[0].close()
+                    cursor.close()
                     return False
-            elif cursor[0].alive:
+            elif cursor.alive:
                 # result and error are both none, meaning no new data in
                 # this batch; keep on truckin'
                 add_callback(
-                    functools.partial(cursor[0].each, inner_callback)
+                    functools.partial(cursor.each, inner_callback)
                 )
             else:
                 # cursor died, start over, but only if it's because this
                 # collection was empty when we began.
                 if not started[0]:
-                    cursor[0].tail(callback, await_data)
+                    cursor.tail(callback, await_data)
                 else:
                     # TODO: why exactly would this happen?
                     exc = pymongo.errors.OperationFailure("cursor died")
                     add_callback(functools.partial(callback, None, exc))
 
         # Start tailing
-        cursor[0].each(inner_callback)
+        cursor.each(inner_callback)
 
     @property
     def buffer_size(self):
