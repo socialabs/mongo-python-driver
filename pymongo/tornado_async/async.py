@@ -993,12 +993,8 @@ class TornadoCursor(TornadoBase):
         # value was passed to find() (default False)
         # TODO: reconsider or at least test this crazy logic, doc
         if await_data is not None:
-            if await_data:
-                # TODO: HACK!
-                cursor[0].delegate._Cursor__await_data = True
-            else:
-                # TODO: HACK!
-                cursor[0].delegate._Cursor__await_data = False
+            # TODO: HACK!
+            cursor[0].delegate._Cursor__await_data = await_data
 
         def inner_callback(result, error):
             if error:
