@@ -31,37 +31,40 @@ excluded_tests = [
 
     # Tests defined in specific suites that we skip because we test this
     # functionality directly on Motor, rather than via fake_pymongo
-    'TestCollection.test_ensure_unique_index_threaded',
-    'TestConnection.test_interrupt_signal',
-    'TestConnection.test_with_start_request',
-    'TestConnection.test_fork',
     'TestConnection.test_copy_db',
     # This is in test_replica_set_connection, not test_connection
+
+    # TODO: test the following in Motor if we haven't already ------>
     'TestConnection.test_auto_reconnect_exception_when_read_preference_is_secondary',
     'TestMasterSlaveConnection.test_continue_until_slave_works',
     'TestMasterSlaveConnection.test_disconnect',
     'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
     'TestDatabase.test_authenticate_and_request',
     'TestMasterSlaveConnection.test_insert_find_one_in_request',
+    # <------------------- END TODO
 
+    # Motor's reprs aren't the same as PyMongo's
+    '*.test_repr',
+
+    # Tests we skip because we've decided to support these features differently
+    # in Motor than in PyMongo.
     # TODO: document these differences b/w Motor and PyMongo (most of them
     # already have TODOs in async.py, just double-check them from this list)
-
-    # Tests defined several places that we'll always skip because we've
-    # decided not to support these features in Motor the same as in
-    # PyMongo
-    'test_multiprocessing',
-    'test_repr',
-
-    # Tests defined in specific suites that we skip because we've
-    # decided not to support these features in Motor the same as in
-    # PyMongo
-    'TestConnection.test_contextlib_auto_start_request',
     'TestConnection.test_auto_start_request',
+    'TestConnection.test_contextlib_auto_start_request',
+    'TestConnection.test_with_start_request',
+    'TestConnection.test_fork',
+    'TestConnection.test_interrupt_signal',
+
     'TestDatabase.test_system_js',
     'TestDatabase.test_system_js_list',
+
+    'TestCollection.test_ensure_unique_index_threaded',
+
     'TestCursor.test_properties',
     'TestCursor.test_getitem_index_out_of_range',
+    'TestCursor.test_tailable',
+
     'TestGridfs.test_threaded_writes',
     'TestGridfs.test_threaded_reads',
 ]
@@ -85,19 +88,16 @@ class SynchroNosePlugin(Plugin):
         return module.__name__ not in excluded_modules
 
     def wantMethod(self, method):
+        # Run standard Nose checks on name, like "does it start with test_"?
         if not self.selector.matches(method.__name__):
             return False
 
         for excluded_name in excluded_tests:
-            if '.' in excluded_name:
-                suite_name, method_name = excluded_name.split('.')
-                if (method.im_class.__name__ == suite_name
-                    and method.__name__ == method_name
-                ):
-                    return False
-            else:
-                if method.__name__ == excluded_name:
-                    return False
+            suite_name, method_name = excluded_name.split('.')
+            if ((method.im_class.__name__ == suite_name or suite_name == '*')
+                and method.__name__ == method_name
+            ):
+                return False
 
         return True
 

@@ -20,6 +20,7 @@ import time
 import unittest
 import datetime
 import types
+import threading
 
 from nose.plugins.skip import SkipTest
 
@@ -45,7 +46,8 @@ from pymongo.son_manipulator import AutoReference, NamespaceInjector
 from pymongo.errors import InvalidOperation, ConfigurationError, \
     DuplicateKeyError
 
-from test.utils import delay
+from test import version
+from test.utils import delay, server_is_master_with_slave
 
 import tornado.ioloop, tornado.stack_context
 from tornado import gen
@@ -97,7 +99,10 @@ def async_test_engine(timeout_sec=5):
             timeout = loop.add_timeout(time.time() + timeout_sec, on_timeout)
 
             gen = func(self)
-            assert isinstance(gen, types.GeneratorType)
+            assert isinstance(gen, types.GeneratorType), (
+                "%s should be a generator, include a yield "
+                "statement" % repr(func)
+            )
             AsyncTestRunner(gen, timeout).run()
 
             loop.start()
@@ -202,7 +207,7 @@ class TornadoTest(
             tornado.ioloop.PeriodicCallback(check, period_ms).start()
             loop.start()
 
-    def check_callback_handling(self, fn, required=False):
+    def check_callback_handling(self, fn, required):
         """
         Take a function and verify that it accepts a 'callback' parameter
         and properly type-checks it. If 'required', check that fn requires
@@ -220,6 +225,16 @@ class TornadoTest(
 
         # Should not raise
         fn(callback=lambda result, error: None)
+
+    def check_required_callback(self, fn, *args, **kwargs):
+        self.check_callback_handling(
+            functools.partial(fn, *args, **kwargs),
+            True)
+
+    def check_optional_callback(self, fn, *args, **kwargs):
+        self.check_callback_handling(
+            functools.partial(fn, *args, **kwargs),
+            False)
 
     def tearDown(self):
         actual_open_cursors = self.get_open_cursors()
@@ -276,7 +291,13 @@ class TornadoTestBasic(TornadoTest):
 
     def test_connection_callback(self):
         cx = async.TornadoConnection(host, port)
-        self.check_callback_handling(cx.open)
+        self.check_optional_callback(cx.open)
+
+    def test_database_callbacks(self):
+        db = self.async_connection().test
+        self.check_optional_callback(db.drop_collection, "collection")
+        self.check_optional_callback(db.create_collection, "collection")
+        self.check_required_callback(db.validate_collection, "collection")
 
     @async_test_engine()
     def test_dotted_collection_name(self):
@@ -367,12 +388,12 @@ class TornadoTestBasic(TornadoTest):
     def test_find_callback(self):
         cx = self.async_connection()
         cursor = cx.test.test_collection.find()
-        self.check_callback_handling(cursor.each, required=True)
+        self.check_required_callback(cursor.each)
 
         # Ensure tearDown doesn't complain about open cursors
         self.wait_for_cursors()
 
-        self.check_callback_handling(cursor.to_list, required=True)
+        self.check_required_callback(cursor.to_list)
         self.wait_for_cursors()
 
     def test_find_is_async(self):
@@ -479,19 +500,14 @@ class TornadoTestBasic(TornadoTest):
             if error:
                 raise error
 
-            results.append([doc['_id'] for doc in docs])
-
-            if len(results) == 2:
-                # cancel iteration
-                return False
+            results.extend([doc['_id'] for doc in docs])
 
         cx.test.test_collection.find(
             sort=[('_id', 1)], fields=['_id']
         ).to_list(callback)
 
-        self.assertEventuallyEqual([range(200)], lambda: results)
+        self.assertEventuallyEqual(range(200), lambda: results)
         tornado.ioloop.IOLoop.instance().start()
-        self.assertEqual(1, len(results))
 
     @async_test_engine()
     def test_find_one(self):
@@ -504,10 +520,7 @@ class TornadoTestBasic(TornadoTest):
 
     def test_find_one_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            cx.test.test_collection.find_one,
-            required=True
-        )
+        self.check_required_callback(cx.test.test_collection.find_one)
 
     def test_find_one_is_async(self):
         """
@@ -644,9 +657,7 @@ class TornadoTestBasic(TornadoTest):
 
     def test_update_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            functools.partial(cx.test.test_collection.update, {}, {})
-        )
+        self.check_optional_callback(cx.test.test_collection.update, {}, {})
 
     @async_test_engine()
     def test_insert(self):
@@ -713,9 +724,7 @@ class TornadoTestBasic(TornadoTest):
 
     def test_save_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            functools.partial(cx.test.test_collection.save, {})
-        )
+        self.check_optional_callback(cx.test.test_collection.save, {})
 
     @async_test_engine()
     def test_save_with_id(self):
@@ -795,9 +804,7 @@ class TornadoTestBasic(TornadoTest):
 
     def test_remove_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            functools.partial(cx.test.test_collection.remove, {})
-        )
+        self.check_optional_callback(cx.test.test_collection.remove)
 
     @async_test_engine()
     def test_unsafe_remove(self):
@@ -852,9 +859,86 @@ class TornadoTestBasic(TornadoTest):
 
     def test_command_callback(self):
         cx = self.async_connection()
-        self.check_callback_handling(
-            functools.partial(cx.admin.command, 'buildinfo', check=False)
-        )
+        self.check_optional_callback(cx.admin.command, 'buildinfo', check=False)
+
+    @async_test_engine()
+    def test_copy_db(self):
+        cx = self.async_connection()
+        self.assertFalse(cx.in_request())
+
+        with cx.start_request():
+            self.assertTrue(cx.in_request())
+            yield AssertRaises(TypeError, cx.copy_database, 4, "foo")
+            yield AssertRaises(TypeError, cx.copy_database, "foo", 4)
+
+            yield AssertRaises(
+                pymongo.errors.InvalidName, cx.copy_database, "foo", "$foo")
+
+            yield async.Op(cx.pymongo_test.test.drop)
+            yield async.Op(cx.drop_database, "pymongo_test1")
+            yield async.Op(cx.drop_database, "pymongo_test2")
+
+            yield async.Op(cx.pymongo_test.test.insert, {"foo": "bar"})
+
+            # Due to SERVER-2329, databases may not disappear from a master in a
+            # master-slave pair
+            if not server_is_master_with_slave(self.sync_cx):
+                db_names = yield async.Op(cx.database_names)
+                self.assertFalse("pymongo_test1" in db_names)
+                self.assertFalse("pymongo_test2" in db_names)
+
+            yield async.Op(cx.copy_database, "pymongo_test", "pymongo_test1")
+
+            # copy_database() didn't accidentally end the request
+            self.assertTrue(cx.in_request())
+
+            db_names = yield async.Op(cx.database_names)
+            self.assertTrue("pymongo_test1" in db_names)
+            result = yield async.Op(cx.pymongo_test1.test.find_one)
+            self.assertEqual("bar", result["foo"])
+
+        self.assertFalse(cx.in_request())
+        yield async.Op(cx.copy_database, "pymongo_test", "pymongo_test2",
+                        "%s:%d" % (host, port))
+        # copy_database() didn't accidentally restart the request
+        self.assertFalse(cx.in_request())
+
+        db_names = yield async.Op(cx.database_names)
+        self.assertTrue("pymongo_test2" in db_names)
+        result = yield async.Op(cx.pymongo_test2.test.find_one)
+        self.assertEqual("bar", result["foo"])
+
+        if version.at_least(self.sync_cx, (1, 3, 3, 1)):
+            yield async.Op(cx.drop_database, "pymongo_test1")
+
+            yield async.Op(cx.pymongo_test.add_user, "mike", "password")
+
+            yield AssertRaises(
+                pymongo.errors.OperationFailure,
+                cx.copy_database, "pymongo_test", "pymongo_test1",
+                username="foo", password="bar")
+
+            if not server_is_master_with_slave(self.sync_cx):
+                db_names = yield async.Op(cx.database_names)
+                self.assertFalse("pymongo_test1" in db_names)
+
+            yield AssertRaises(
+                pymongo.errors.OperationFailure, cx.copy_database,
+                "pymongo_test", "pymongo_test1",
+                username="mike", password="bar")
+
+            if not server_is_master_with_slave(self.sync_cx):
+                db_names = yield async.Op(cx.database_names)
+                self.assertFalse("pymongo_test1" in db_names)
+
+            yield async.Op(
+                cx.copy_database, "pymongo_test", "pymongo_test1",
+                username="mike", password="password")
+
+            db_names = yield async.Op(cx.database_names)
+            self.assertTrue("pymongo_test1" in db_names)
+            result = yield async.Op(cx.pymongo_test1.test.find_one)
+            self.assertEqual("bar", result["foo"])
 
     def test_nested_callbacks(self):
         cx = self.async_connection()
@@ -1458,6 +1542,177 @@ class TornadoTestBasic(TornadoTest):
                 True, lambda: 'step%s' % step in results)
 
         loop.start()
+
+    def _test_tailable_cursor(self, await_data):
+        # 1. Make a capped collection
+        # 2. Spawn a thread that will use PyMongo to add data to the collection
+        #   periodically
+        # 3. Tail the capped collection with Motor
+        # 4. Shut down the thread
+        # 5. Assert tailable cursor got the right data
+        # 6. Drop the capped collection
+        # Seconds between inserts into capped collection -- simulate an
+        # unpredictable process
+        pauses = (2, 0, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0.1, 0.1, 2, 0, 0)
+
+        self.sync_db.capped.drop()
+        self.sync_db.create_collection('capped', capped=True, size=10000)
+
+        def add_docs():
+            i = 0
+            for pause in pauses:
+                time.sleep(pause)
+                self.sync_cx.test.capped.insert({'_id': i}, safe=True)
+                i += 1
+
+        t = threading.Thread(target=add_docs)
+        t.start()
+
+        # TODO: also test w/o await_data
+        cx = self.async_connection()
+        capped = cx.test.capped
+        cursor = [capped.find(tailable=True, await_data=await_data)]
+        results = []
+
+        def each(result, error):
+            if result:
+                results.append(result)
+            if len(results) == len(pauses):
+                # Cancel iteration
+                cursor[0].close()
+                return False
+
+            # On an empty capped collection the cursor will die immediately,
+            # despite await_data. Just keep trying until the thread inserts
+            # the first doc, at which point the cursor will remain alive for
+            # the rest of the test.
+            if not cursor[0].alive:
+                cursor[0] = capped.find(tailable=True, await_data=await_data)
+                cursor[0].each(each)
+
+        # Start
+        cursor[0].each(each)
+
+        self.assertEventuallyEqual(
+            results,
+            lambda: [{'_id': i} for i in range(len(pauses))],
+            timeout_sec=sum(pauses) + 1
+        )
+
+        tornado.ioloop.IOLoop.instance().start()
+
+        # We get here once assertEventuallyEqual has passed or timed out
+        t.join()
+        self.wait_for_cursors()
+
+    def test_tailable_cursor_await(self):
+        self._test_tailable_cursor(True)
+
+    def test_tailable_cursor_no_await(self):
+        self._test_tailable_cursor(False)
+
+    def _test_tail(self, await_data):
+        # Same as _test_tailable_cursor but uses Motor's own tail(callback) API
+        # TODO: combine w/ _test_tailable_cursor
+        pauses = (2, 0, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0.1, 0.1, 2, 0, 0)
+
+        self.sync_db.capped.drop()
+        self.sync_db.create_collection('capped', capped=True, size=10000)
+
+        def add_docs():
+            i = 0
+            for pause in pauses:
+                time.sleep(pause)
+                self.sync_cx.test.capped.insert({'_id': i}, safe=True)
+                i += 1
+
+        t = threading.Thread(target=add_docs)
+        t.start()
+
+        def each(result, error):
+            if result:
+                results.append(result)
+            if len(results) == len(pauses):
+                # Cancel iteration
+                results.append('cancelled')
+                return False
+
+        # Start
+        cx = self.async_connection()
+        capped = cx.test.capped
+
+        # Note we do *not* pass tailable or await_data to find(), the
+        # convenience method handles it for us.
+        capped.find().tail(each, await_data=await_data)
+        results = []
+
+        self.assertEventuallyEqual(
+            results,
+            lambda: [{'_id': i} for i in range(len(pauses))] + ['cancelled'],
+            timeout_sec=sum(pauses) + 1
+        )
+
+        tornado.ioloop.IOLoop.instance().start()
+        t.join()
+
+        # Give the final each() a chance to execute before dropping collection
+        tornado.ioloop.IOLoop.instance().add_timeout(
+            time.time() + 0.5,
+            self.sync_cx.test.capped.drop
+        )
+
+        self.wait_for_cursors()
+
+    def test_tail_await(self):
+        self._test_tail(True)
+
+    def test_tail_no_await(self):
+        self._test_tail(False)
+
+    @async_test_engine()
+    def test_cursor_slice(self):
+        cx = self.async_connection()
+
+        # test_collection was filled out in setUp()
+        coll = cx.test.test_collection
+
+        self.assertRaises(IndexError, lambda: coll.find()[-1])
+        self.assertRaises(IndexError, lambda: coll.find()[1:2:2])
+        self.assertRaises(IndexError, lambda: coll.find()[2:1])
+
+        result = yield async.Op(coll.find()[0:].to_list)
+        self.assertEqual(200, len(result))
+
+        result = yield async.Op(coll.find()[20:].to_list)
+        self.assertEqual(180, len(result))
+
+        result = yield async.Op(coll.find()[99:].to_list)
+        self.assertEqual(101, len(result))
+
+        result = yield async.Op(coll.find()[1000:].to_list)
+        self.assertEqual(0, len(result))
+
+        result = yield async.Op(coll.find()[20:25].to_list)
+        self.assertEqual(5, len(result))
+
+        # Any slice overrides all previous slices
+        result = yield async.Op(coll.find()[20:25][20:].to_list)
+        self.assertEqual(180, len(result))
+
+        result = yield async.Op(coll.find()[20:25].limit(0).skip(20).to_list)
+        self.assertEqual(180, len(result))
+
+        result = yield async.Op(coll.find().limit(0).skip(20)[20:25].to_list)
+        self.assertEqual(5, len(result))
+
+        result = yield async.Op(coll.find()[:1].to_list)
+        self.assertEqual(1, len(result))
+
+        result = yield async.Op(coll.find()[:5].to_list)
+        self.assertEqual(5, len(result))
+
+        result = yield async.Op(coll.find()[:0].to_list)
+        self.assertEqual(0, len(result))
 
 
 class TornadoSSLTest(TornadoTest):

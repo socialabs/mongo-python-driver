@@ -21,7 +21,9 @@ DO NOT USE THIS MODULE.
 import functools
 import inspect
 import os
+import sys
 import time
+import traceback
 from tornado.ioloop import IOLoop
 
 # TODO doc WTF this module does
@@ -70,22 +72,30 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     timeout = loop.add_timeout(time.time() + seconds, raise_timeout_err)
 
     def callback(result, error):
-        loop.stop()
-        loop.remove_timeout(timeout)
-        outcome['result'] = result
-        outcome['error'] = error
+        try:
+            loop.stop()
+            loop.remove_timeout(timeout)
+            outcome['result'] = result
+            outcome['error'] = error
+        except Exception:
+            traceback.print_exc(sys.stderr)
+            raise
 
-        # Special case: return False to stop iteration if this callback is
+        # Special case: return False to stop iteration in case this callback is
         # being used in Motor's find().each()
         return False
 
     kallable(callback=callback)
-    assert not loop.running(), "Loop already running in method %s" % name
-    loop.start()
-    if outcome.get('error'):
-        raise outcome['error']
+    try:
+        assert not loop.running(), "Loop already running in method %s" % name
+        loop.start()
+        if outcome.get('error'):
+            raise outcome['error']
 
-    return outcome['result']
+        return outcome['result']
+    finally:
+        if loop.running():
+            loop.stop()
 
 
 class Sync(object):
@@ -129,7 +139,7 @@ def synchronize(self, async_method, has_safe_arg):
             # TODO: document that all Motor methods accept a callback, but only
             # some require them. Get that into Sphinx somehow.
             rv = loop_timeout(
-                lambda callback: async_method(*args, callback=callback, **kwargs),
+                functools.partial(async_method, *args, **kwargs),
                 name=async_method.func_name
             )
         except OperationFailure:
@@ -405,9 +415,9 @@ class Collection(Fake):
     def map_reduce(self, *args, **kwargs):
         # We need to override map_reduce specially, because we have to wrap the
         # TornadoCollection it returns in a fake Collection.
-        rv = loop_timeout(
-            lambda callback: self.delegate.map_reduce(*args, callback=callback, **kwargs)
-        )
+        rv = loop_timeout(functools.partial(
+            self.delegate.map_reduce, *args, **kwargs
+        ))
 
         if isinstance(rv, async.TornadoCollection):
             return Collection(self.database, rv.name)

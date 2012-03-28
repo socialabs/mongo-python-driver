@@ -310,7 +310,7 @@ def asynchronize(sync_method, has_safe_arg, cb_required):
             # Schedule the callback to be run on the main greenlet
             if callback:
                 tornado.ioloop.IOLoop.instance().add_callback(
-                    lambda: callback(result, error)
+                    functools.partial(callback, result, error)
                 )
             elif error:
                 # TODO: correct?
@@ -458,11 +458,8 @@ class TornadoConnectionBase(TornadoBase):
                 # Schedule callback to be executed on main greenlet, with
                 # (self, None) if no error, else (None, error)
                 tornado.ioloop.IOLoop.instance().add_callback(
-                    lambda: callback(
-                        None if error else self,
-                        error
-                    )
-                )
+                    functools.partial(
+                        callback, None if error else self, error))
 
         # Actually connect on a child greenlet
         greenlet.greenlet(connect).switch()
@@ -501,8 +498,6 @@ class TornadoConnectionBase(TornadoBase):
         ...     # last insert.
         ...     db.error(callback=on_error)
         """
-        # TODO: raise an informative NotImplementedError in end_request(),
-        #   since Motor only supports the with-clause style; test that
         # TODO: this is so spaghetti & implicit & magic
         global current_request, current_request_seq
 
@@ -623,9 +618,9 @@ class RequestContext(stack_context.StackContext):
         class RequestContextFactoryFactory(object):
             def __del__(self):
                 global current_request
-                assert current_request is None
+                assert current_request is None, (
+                    "Expected current_request to be None when Request deleted")
 
-                # TODO: see how much this sucks & needs to be rewritten?
                 current_request = request_id
                 for pool in pools:
                     pool.end_request()
@@ -684,7 +679,10 @@ class TornadoDatabase(TornadoBase):
         # *args and **kwargs are not currently supported by pymongo Database,
         # but it doesn't cost us anything to include them and future-proof
         # this method.
-        assert isinstance(connection, TornadoConnectionBase)
+        if not isinstance(connection, TornadoConnectionBase):
+            raise TypeError("First argument to TornadoDatabase must be "
+                            "TornadoConnectionBase, not %s" % repr(connection))
+
         self.connection = connection
         self.delegate = pymongo.database.Database(
             connection.delegate, name, *args, **kwargs
@@ -699,18 +697,16 @@ class TornadoDatabase(TornadoBase):
         return 'Tornado' + self.delegate.__repr__()
 
     # TODO: doc why we need to override this, refactor
-    # TODO: test callback-checking in drop_collection
     def drop_collection(self, name_or_collection, callback):
         name = name_or_collection
         if isinstance(name, TornadoCollection):
             name = name.delegate.name
 
         sync_method = self.delegate.drop_collection
-        async_method = asynchronize(sync_method, False, True)
+        async_method = asynchronize(sync_method, False, False)
         async_method(name, callback=callback)
 
     # TODO: doc why we need to override this, refactor
-    # TODO: test callback-checking in validate_collection
     def validate_collection(self, name_or_collection, *args, **kwargs):
         callback = kwargs.get('callback')
         check_callable(callback, required=True)
@@ -779,7 +775,10 @@ class TornadoCollection(TornadoBase):
     find_one                = Async(has_safe_arg=False, cb_required=True)
         
     def __init__(self, database, name, *args, **kwargs):
-        assert isinstance(database, TornadoDatabase)
+        if not isinstance(database, TornadoDatabase):
+            raise TypeError("First argument to TornadoCollection must be "
+                            "TornadoDatabase, not %s" % repr(database))
+
         self._tdb = database
         self.delegate = pymongo.collection.Collection(self._tdb.delegate, name)
 
@@ -794,9 +793,8 @@ class TornadoCollection(TornadoBase):
         """
         Get a TornadoCursor.
         """
-        # TODO: better message
         assert 'callback' not in kwargs, (
-            "Pass a callback to each() or to_list(), not find()"
+            "Pass a callback to each, to_list, count, or tail, not to find"
         )
 
         cursor = self.delegate.find(*args, **kwargs)
@@ -807,7 +805,6 @@ class TornadoCollection(TornadoBase):
         # We need to override map_reduce specially, rather than simply
         # include it in async_ops, because we have to wrap the Collection it
         # returns in a TornadoCollection.
-
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
@@ -829,6 +826,8 @@ class TornadoCollection(TornadoBase):
     uuid_subtype = ReadWriteDelegateProperty()
 
 
+# TODO: does this need to clone the TornadoCursor or could it just return
+#   obj?
 class CallAndReturnClone(DelegateProperty):
     def __get__(self, obj, objtype):
         # self.name is set by TornadoMeta
@@ -840,7 +839,6 @@ class CallAndReturnClone(DelegateProperty):
         return return_clone
 
 
-# TODO: hint(), etc.
 class TornadoCursor(TornadoBase):
     # TODO: test all these in test_async.py
     count                       = Async(has_safe_arg=False, cb_required=True)
@@ -852,6 +850,7 @@ class TornadoCursor(TornadoBase):
     # TODO: document that we don't support cursor.collection property
     slave_okay                  = ReadOnlyDelegateProperty()
     alive                       = ReadOnlyDelegateProperty()
+    cursor_id                   = ReadOnlyDelegateProperty()
 
     batch_size                  = CallAndReturnClone()
     add_option                  = CallAndReturnClone()
@@ -871,9 +870,6 @@ class TornadoCursor(TornadoBase):
         self.delegate = cursor
         self.started = False
 
-        # Number of documents buffered in delegate
-        self.buffer_size = 0
-
     def _get_more(self, callback):
         """
         Get a batch of data asynchronously, either performing an initial query
@@ -882,7 +878,7 @@ class TornadoCursor(TornadoBase):
         """
         if self.started and not self.alive:
             raise InvalidOperation(
-                "Can't call get_more() on an TornadoCursor that has been"
+                "Can't call get_more() on a TornadoCursor that has been"
                 " exhausted or killed."
             )
 
@@ -896,78 +892,64 @@ class TornadoCursor(TornadoBase):
         callback is executed asynchronously for each document. callback is
         passed (None, None) when iteration is complete.
 
+        # TODO: note that you should close() cursor if you cancel iteration
+
         @param callback: function taking (document, error)
         """
         check_callable(callback, required=True)
+        add_callback = tornado.ioloop.IOLoop.instance().add_callback
 
-        # TODO: simplify, review
-
-        # TODO: remove so we don't have to use double-underscore hack
-        assert self.buffer_size == len(self.delegate._Cursor__data)
-
-        while self.buffer_size > 0:
-            try:
-                doc = self.delegate.next()
-            except StopIteration:
-                # We're done
-                callback(None, None)
-                return
-            except Exception, e:
-                callback(None, e)
-                return
-
-            self.buffer_size -= 1
-
-            # TODO: remove so we don't have to use double-underscore hack
-            assert self.buffer_size == len(self.delegate._Cursor__data)
-
+        # TODO: simplify, review, comment
+        def do_cb(doc):
             should_continue = callback(doc, None)
 
             # Quit if callback returns exactly False (not None)
-            if should_continue is False:
+            if should_continue is not False:
+                add_callback(functools.partial(self.each, callback))
+
+        if self.buffer_size > 0:
+            try:
+                doc = self.delegate.next()
+            except StopIteration:
+                # limit is 0
+                add_callback(functools.partial(callback, None, None))
+                add_callback(self.close)
                 return
 
-        if self.alive:
+            add_callback(functools.partial(do_cb, doc))
+        elif self.alive and (self.cursor_id or not self.started):
             def got_more(batch_size, error):
                 if error:
                     callback(None, error)
-                elif batch_size:
-                    assert self.buffer_size == 0
-                    self.buffer_size = batch_size
-                    self.each(callback)
                 else:
-                    # Complete
-                    tornado.ioloop.IOLoop.instance().add_callback(
-                        lambda: callback(None, None)
-                    )
+                    self.each(callback)
 
             self._get_more(got_more)
         else:
             # Complete
-            tornado.ioloop.IOLoop.instance().add_callback(
-                lambda: callback(None, None)
-            )
+            add_callback(functools.partial(callback, None, None))
 
     def to_list(self, callback):
         """Get a list of documents. The caller is responsible for making sure
-        that there is enough memory to store the results. to_list returns
-        immediately, and your callback is executed asynchronously with the list
-        of documents.
+        that there is enough memory to store the results -- it is strongly
+        recommended you use a limit like:
+
+        >>> collection.find().limit(some_number).to_list(callback)
+
+        to_list returns immediately, and your callback is executed
+        asynchronously with the list of documents.
 
         @param callback: function taking (documents, error)
         """
         # TODO: error if tailable
+        # TODO: significant optimization if we reimplement this without each()?
         check_callable(callback, required=True)
         the_list = []
 
         def for_each(doc, error):
             if error:
                 callback(None, error)
-
-                # stop iteration
-                return False
             elif doc is not None:
-                assert isinstance(doc, dict)
                 the_list.append(doc)
             else:
                 # Iteration complete
@@ -982,18 +964,81 @@ class TornadoCursor(TornadoBase):
         """Explicitly close this cursor.
         """
         # TODO: either use asynchronize() or explain why this works
+        # TODO: test and document a technique of calling close instead of
+        #   returning False from callback in order to cancel iteration
         greenlet.greenlet(self.delegate.close).switch()
     
     def rewind(self):
+        # TODO: test, doc -- this seems a little extra weird w/ Motor
         self.delegate.rewind()
-        self.buffer_size = 0
+        self.started = False
         return self
+
+    def tail(self, callback, await_data=None):
+        # TODO: doc, prominently =)
+        # TODO: doc that tailing an empty collection is expensive
+        # TODO: test dropping a collection while tailing it
+        # TODO: test tailing collection that isn't empty at first
+        check_callable(callback, True)
+        add_callback = tornado.ioloop.IOLoop.instance().add_callback
+
+        # We'll need to modify these in inner_callback, so make it a list
+        cursor = [self.clone()]
+        started = [False]
+
+        # TODO: HACK!
+        cursor[0].delegate._Cursor__tailable = True
+
+        # If await_data parameter is set, then override whatever await_data
+        # value was passed to find() (default False)
+        # TODO: reconsider or at least test this crazy logic, doc
+        if await_data is not None:
+            if await_data:
+                # TODO: HACK!
+                cursor[0].delegate._Cursor__await_data = True
+            else:
+                # TODO: HACK!
+                cursor[0].delegate._Cursor__await_data = False
+
+        def inner_callback(result, error):
+            if error:
+                cursor[0].close()
+                callback(None, error)
+            elif result is not None:
+                started[0] = True
+                if callback(result, None) is False:
+                    cursor[0].close()
+                    return False
+            elif cursor[0].alive:
+                # result and error are both none, meaning no new data in
+                # this batch; keep on truckin'
+                add_callback(
+                    functools.partial(cursor[0].each, inner_callback)
+                )
+            else:
+                # cursor died, start over, but only if it's because this
+                # collection was empty when we began.
+                if not started[0]:
+                    cursor[0].tail(callback, await_data)
+                else:
+                    # TODO: why exactly would this happen?
+                    exc = pymongo.errors.OperationFailure("cursor died")
+                    add_callback(functools.partial(callback, None, exc))
+
+        # Start tailing
+        cursor[0].each(inner_callback)
+
+    @property
+    def buffer_size(self):
+        # TODO: expose so we don't have to use double-underscore hack
+        return len(self.delegate._Cursor__data)
 
     def __getitem__(self, index):
         # TODO test that this raises TypeError if index is not slice, int, long
         # TODO doc that this does not raise IndexError if index > len results
         # TODO test that this raises IndexError if index < 0
         # TODO: doctest
+        # TODO: test this is an error if tailable
         if isinstance(index, slice):
              return TornadoCursor(self.delegate[index])
         else:
@@ -1005,7 +1050,7 @@ class TornadoCursor(TornadoBase):
             return self[self.delegate._Cursor__skip+index:].limit(-1)
 
     def __del__(self):
-        if self.alive and self.delegate.cursor_id:
+        if self.alive and self.cursor_id:
             self.close()
 
     # HACK!: For unittests that, extremely regrettably, examine these attributes
@@ -1028,6 +1073,10 @@ class TornadoCursor(TornadoBase):
 
 # TODO: doc
 class Op(tornado.gen.Task):
+    def __init__(self, func, *args, **kwargs):
+        check_callable(func, True)
+        super(Op, self).__init__(func, *args, **kwargs)
+
     def get_result(self):
         (result, error), _ = super(Op, self).get_result()
         if error:

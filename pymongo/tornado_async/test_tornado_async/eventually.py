@@ -15,6 +15,11 @@ class AssertEventuallyTest(unittest.TestCase):
     def assertEventuallyEqual(
             self, expected, fn, msg=None, timeout_sec=None
     ):
+        if not callable(fn):
+            self.fail(
+                "Second argument to assertEventuallyEqual must be callable, "
+                "not %s" % repr(fn))
+
         frame_info = inspect.stack()[1]
         comment = '%s:%s in %s' % (frame_info[1], frame_info[2], frame_info[3])
         if msg is not None:
