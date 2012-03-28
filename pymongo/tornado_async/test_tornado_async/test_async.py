@@ -40,7 +40,7 @@ sys.path.insert(
 
 import pymongo
 import pymongo.pool
-from pymongo.objectid import ObjectId
+from bson.objectid import ObjectId
 from pymongo.tornado_async import async
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 from pymongo.errors import InvalidOperation, ConfigurationError, \
@@ -397,18 +397,9 @@ class TornadoTestBasic(TornadoTest):
         self.wait_for_cursors()
 
     def test_find_is_async(self):
-        """
-        Confirm find() is async by launching three operations which will finish
-        out of order. Also test that TornadoConnection doesn't reuse sockets
-        incorrectly.
-        """
-        # TODO: this often fails, due to race conditions in the test
-        # Make a big unindexed collection that will take a long time to query
-        self.sync_db.drop_collection('big_coll')
-        self.sync_db.big_coll.insert([
-            {'s': hex(s)} for s in range(1000)
-        ])
-
+        # Confirm find() is async by launching two operations which will finish
+        # out of order. Also test that TornadoConnection doesn't reuse sockets
+        # incorrectly.
         cx = self.async_connection()
 
         results = []
@@ -419,47 +410,35 @@ class TornadoTestBasic(TornadoTest):
             if doc:
                 results.append(doc)
 
-        # Launch 3 find operations for _id's 1, 2, and 3, which will finish in
-        # order 2, 3, then 1.
+        # Launch find operations for _id's 1 and 2 which will finish in order
+        # 2, then 1.
         loop = tornado.ioloop.IOLoop.instance()
 
         now = time.time()
 
-        # This find() takes 10 seconds
+        # This find() takes 0.5 seconds
         loop.add_timeout(
             now + 0.1,
             lambda: cx.test.test_collection.find(
-                {'_id': 1, '$where': delay(10)},
+                {'_id': 1, '$where': delay(0.5)},
                 fields={'s': True, '_id': False},
             ).each(callback)
         )
 
         # Very fast lookup
         loop.add_timeout(
-            now + 0.5,
+            now + 0.2,
             lambda: cx.test.test_collection.find(
                 {'_id': 2},
                 fields={'s': True, '_id': False},
             ).each(callback)
         )
 
-        # Find {'i': 3} in big_coll -- even though there's only one such record,
-        # MongoDB will have to scan the whole table to know that. We expect this
-        # to be faster than 10 seconds (the $where clause above) and slower than
-        # the indexed lookup above.
-        loop.add_timeout(
-            now + 1,
-            lambda: cx.test.big_coll.find(
-                {'s': hex(3)},
-                fields={'s': True, '_id': False},
-            ).each(callback)
-        )
-
-        # Results were appended in order 2, 3, 1
+        # Results were appended in order 2, 1
         self.assertEventuallyEqual(
-            [{'s': hex(s)} for s in (2, 3, 1)],
+            [{'s': hex(s)} for s in (2, 1)],
             lambda: results,
-            timeout_sec=11
+            timeout_sec=2
         )
 
         tornado.ioloop.IOLoop.instance().start()
@@ -601,11 +580,11 @@ class TornadoTestBasic(TornadoTest):
         loop = tornado.ioloop.IOLoop.instance()
 
         def found(result, error):
+            loop.stop()
             if error:
                 raise error
 
             cursor.close()
-            loop.add_timeout(time.time() + .1, loop.stop)
 
             # Cancel iteration, so the cursor isn't exhausted
             return False
@@ -615,6 +594,7 @@ class TornadoTestBasic(TornadoTest):
 
         # Start the find(), the callback will close the cursor
         loop.start()
+        self.wait_for_cursors()
 
     @async_test_engine()
     def test_update(self):
