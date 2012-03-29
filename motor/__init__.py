@@ -12,41 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tornado asynchronous Python driver for MongoDB."""
+"""Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import functools
 import socket
 import time
 import uuid
 
-import tornado.ioloop, tornado.iostream, tornado.gen
-from tornado import stack_context
+from tornado import ioloop, iostream, gen, stack_context
 import greenlet
 
-
 import pymongo
-from pymongo.pool import BasePool, NO_REQUEST, NO_SOCKET_YET
-import pymongo.connection
-import pymongo.replica_set_connection
+from pymongo.pool import BasePool, NO_REQUEST
 import pymongo.master_slave_connection
 import pymongo.database
 import pymongo.collection
-import pymongo.cursor
 import pymongo.son_manipulator
 from pymongo.errors import InvalidOperation
 
 
-have_ssl = True
-try:
-    import ssl
-except ImportError:
-    have_ssl = False
-
-
-# For testing
+# Hook for unittesting; if true all MotorSockets get unique ids
 socket_uuid = False
 
-__all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
+__all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 
 # TODO: sphinx-formatted docstrings
 # TODO: note you can't use from multithreaded app, consider special checks
@@ -56,7 +44,7 @@ __all__ = ['TornadoConnection', 'TornadoReplicaSetConnection']
 #   timeouts as efficiently as possible
 # TODO: examine & document what connection and network timeouts mean here
 # TODO: verify cursors are closed ASAP
-# TODO: document use of TornadoConnection.delegate, TornadoDatabase.delegate, etc.
+# TODO: document use of MotorConnection.delegate, MotorDatabase.delegate, etc.
 # TODO: check handling of safe and get_last_error_options() and kwargs in
 #   Collection, make sure we respect them
 # TODO: What's with this warning when running tests?:
@@ -76,17 +64,17 @@ def check_callable(kallable, required=False):
         raise TypeError("callback must be callable")
 
 
-def tornado_sock_method(check_closed=False):
+def motor_sock_method(check_closed=False):
     def wrap(method):
         @functools.wraps(method)
-        def _tornado_sock_method(self, *args, **kwargs):
+        def _motor_sock_method(self, *args, **kwargs):
             child_gr = greenlet.getcurrent()
             assert child_gr.parent, "Should be on child greenlet"
 
             # We need to alter this value in inner functions, hence the list
             timeout = [None]
             self_timeout = self.timeout
-            loop = tornado.ioloop.IOLoop.instance()
+            loop = ioloop.IOLoop.instance()
             if self_timeout:
                 def timeout_err():
                     timeout[0] = None
@@ -124,11 +112,11 @@ def tornado_sock_method(check_closed=False):
             # Resume main greenlet
             return child_gr.parent.switch()
 
-        return _tornado_sock_method
+        return _motor_sock_method
     return wrap
 
 
-class TornadoSocket(object):
+class MotorSocket(object):
     """
     Replace socket with a class that yields from the current greenlet, if we're
     on a child greenlet, when making blocking calls, and uses Tornado IOLoop to
@@ -140,9 +128,9 @@ class TornadoSocket(object):
         self.use_ssl = use_ssl
         self.timeout = None
         if self.use_ssl:
-           self.stream = tornado.iostream.SSLIOStream(sock)
+           self.stream = iostream.SSLIOStream(sock)
         else:
-           self.stream = tornado.iostream.IOStream(sock)
+           self.stream = iostream.IOStream(sock)
 
         if socket_uuid:
             self.uuid = uuid.uuid4()
@@ -158,18 +146,18 @@ class TornadoSocket(object):
         # callbacks.
         self.timeout = timeout
 
-    @tornado_sock_method(check_closed=True)
+    @motor_sock_method(check_closed=True)
     def connect(self, pair, callback):
         """
         @param pair: A tuple, (host, port)
         """
         self.stream.connect(pair, callback)
 
-    @tornado_sock_method()
+    @motor_sock_method()
     def sendall(self, data, callback):
         self.stream.write(data, callback)
 
-    @tornado_sock_method()
+    @motor_sock_method()
     def recv(self, num_bytes, callback):
         self.stream.read_bytes(num_bytes, callback)
 
@@ -184,13 +172,13 @@ class TornadoSocket(object):
         self.close()
 
 
-class TornadoPool(pymongo.pool.BasePool):
-    """A simple connection pool of TornadoSockets.
+class MotorPool(pymongo.pool.BasePool):
+    """A simple connection pool of MotorSockets.
     """
     def __init__(self, *args, **kwargs):
         self._current_request_to_sock = {}
         self._request_socks_outstanding = set()
-        super(TornadoPool, self).__init__(*args, **kwargs)
+        super(MotorPool, self).__init__(*args, **kwargs)
 
     def create_connection(self, pair):
         assert greenlet.getcurrent().parent, "Should be on child greenlet"
@@ -211,21 +199,21 @@ class TornadoPool(pymongo.pool.BasePool):
 
             # TODO: support IPV6; somehow we're not properly catching the error
             # right now and trying IPV4 as we intend in this loop, see
-            # TornadoSocket.connect()
+            # MotorSocket.connect()
             if af == socket.AF_INET6:
                 continue
             try:
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                tornado_sock = TornadoSocket(sock, use_ssl=self.use_ssl)
-                tornado_sock.settimeout(self.conn_timeout)
+                motor_sock = MotorSocket(sock, use_ssl=self.use_ssl)
+                motor_sock.settimeout(self.conn_timeout)
 
-                # TornadoSocket will pause the current greenlet and resume it when
-                # connection has completed
-                tornado_sock.connect(pair or self.pair)
-                tornado_sock.settimeout(self.net_timeout)
-                return tornado_sock
+                # MotorSocket will pause the current greenlet and resume it
+                # when connection has completed
+                motor_sock.connect(pair or self.pair)
+                motor_sock.settimeout(self.net_timeout)
+                return motor_sock
 
             except socket.error, e:
                 err = e
@@ -251,12 +239,12 @@ class TornadoPool(pymongo.pool.BasePool):
             # in between.
             self._request_socks_outstanding.add(current_request)
 
-        return super(TornadoPool, self).get_socket(pair)
+        return super(MotorPool, self).get_socket(pair)
 
     def return_socket(self, sock_info):
         if self.in_request():
             self._request_socks_outstanding.discard(current_request)
-        super(TornadoPool, self).return_socket(sock_info)
+        super(MotorPool, self).return_socket(sock_info)
 
     def _set_request_state(self, sock_info):
         if sock_info == NO_REQUEST:
@@ -280,7 +268,7 @@ def asynchronize(sync_method, has_safe_arg, cb_required):
     @param cb_required:     If True, raise TypeError if no callback is passed
     """
     # TODO doc
-    # TODO: staticmethod of base class for Tornado objects, add some custom
+    # TODO: staticmethod of base class for Motor objects, add some custom
     #   stuff, like Connection can't do anything before open()
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
@@ -309,7 +297,7 @@ def asynchronize(sync_method, has_safe_arg, cb_required):
 
             # Schedule the callback to be run on the main greenlet
             if callback:
-                tornado.ioloop.IOLoop.instance().add_callback(
+                ioloop.IOLoop.instance().add_callback(
                     functools.partial(callback, result, error)
                 )
             elif error:
@@ -344,7 +332,7 @@ class Async(DelegateProperty):
         self.name = None
 
     def __get__(self, obj, objtype):
-        # self.name is set by TornadoMeta
+        # self.name is set by MotorMeta
         sync_method = getattr(obj.delegate, self.name)
         return asynchronize(
             sync_method,
@@ -355,36 +343,31 @@ class Async(DelegateProperty):
 
 class ReadOnlyDelegateProperty(DelegateProperty):
     def __get__(self, obj, objtype):
-        # self.name is set by TornadoMeta
+        # self.name is set by MotorMeta
         return getattr(obj.delegate, self.name)
 
 
 class ReadWriteDelegateProperty(ReadOnlyDelegateProperty):
     def __set__(self, obj, val):
-        # self.name is set by TornadoMeta
+        # self.name is set by MotorMeta
         setattr(obj.delegate, self.name, val)
 
 
-class TornadoMeta(type):
+class MotorMeta(type):
     def __new__(cls, name, bases, attrs):
         # Create the class.
         new_class = type.__new__(cls, name, bases, attrs)
-
-#        delegated_attrs = {}
 
         # Set DelegateProperties' names
         for name, attr in attrs.items():
             if isinstance(attr, DelegateProperty):
                 attr.name = name
 
-        # Information for users of the Delegator class or instance
-#        new_class.delegated_attrs = delegated_attrs
-
         return new_class
 
 
-class TornadoBase(object):
-    __metaclass__ = TornadoMeta
+class MotorBase(object):
+    __metaclass__ = MotorMeta
     def __cmp__(self, other):
         if isinstance(other, self.__class__):
             return cmp(self.delegate, other.delegate)
@@ -398,6 +381,9 @@ class TornadoBase(object):
     unset_lasterror_options     = ReadWriteDelegateProperty()
     name                        = ReadOnlyDelegateProperty()
 
+    def __repr__(self):
+        return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
+
     # HACK!: For unittests that examine this attribute
     # TODO: move all this kind of thing for all classes into fake_pymongo
     # instead of polluting Motor
@@ -405,7 +391,7 @@ class TornadoBase(object):
     _BaseObject__set_safe       = ReadWriteDelegateProperty()
 
 
-class TornadoConnectionBase(TornadoBase):
+class MotorConnectionBase(MotorBase):
     server_info                 = Async(has_safe_arg=False, cb_required=False)
     database_names              = Async(has_safe_arg=False, cb_required=False)
     copy_database               = Async(has_safe_arg=False, cb_required=True)
@@ -457,7 +443,7 @@ class TornadoConnectionBase(TornadoBase):
             if callback:
                 # Schedule callback to be executed on main greenlet, with
                 # (self, None) if no error, else (None, error)
-                tornado.ioloop.IOLoop.instance().add_callback(
+                ioloop.IOLoop.instance().add_callback(
                     functools.partial(
                         callback, None if error else self, error))
 
@@ -471,7 +457,7 @@ class TornadoConnectionBase(TornadoBase):
             )
             raise InvalidOperation(msg)
 
-        return TornadoDatabase(self, name)
+        return MotorDatabase(self, name)
 
     __getitem__ = __getattr__
 
@@ -481,7 +467,7 @@ class TornadoConnectionBase(TornadoBase):
            callbacks wrapped in this request's StackContext.
 
            Unlike a regular pymongo Connection, start_request() on a
-           TornadoConnection *must* be used as a context manager:
+           MotorConnection *must* be used as a context manager:
         >>> connection = TorndadoConnection()
         >>> db = connection.test
         >>> def on_error(result, error):
@@ -510,12 +496,12 @@ class TornadoConnectionBase(TornadoBase):
     def end_request(self):
         raise NotImplementedError(
             "Motor does not support end_request(). See documentation for"
-            " TornadoConnectionBase.start_request()."
+            " MotorConnectionBase.start_request()."
         )
 
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
-        if isinstance(name_or_database, TornadoDatabase):
+        if isinstance(name_or_database, MotorDatabase):
             name_or_database = name_or_database.delegate.name
 
         async_method = asynchronize(self.delegate.drop_database, False, True)
@@ -525,12 +511,8 @@ class TornadoConnectionBase(TornadoBase):
     def connected(self):
         return self.delegate is not None
 
-    def __repr__(self):
-        return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
 
-
-# TODO: better name, with 'Mongo' or 'Motor' in it!
-class TornadoConnection(TornadoConnectionBase):
+class MotorConnection(MotorConnectionBase):
     # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
     close_cursor                = Async(has_safe_arg=False, cb_required=True)
     kill_cursors                = Async(has_safe_arg=False, cb_required=True)
@@ -546,14 +528,14 @@ class TornadoConnection(TornadoConnectionBase):
 
     def _new_delegate(self, *args, **kwargs):
         kwargs['auto_start_request'] = False
-        kwargs['_pool_class'] = TornadoPool
+        kwargs['_pool_class'] = MotorPool
         return pymongo.connection.Connection(*args, **kwargs)
 
     def _get_pools(self):
         # TODO: expose the PyMongo pool, or otherwise avoid this
         return [self.delegate._Connection__pool]
     
-class TornadoReplicaSetConnection(TornadoConnectionBase):
+class MotorReplicaSetConnection(MotorConnectionBase):
     primary                       = ReadOnlyDelegateProperty()
     secondaries                   = ReadOnlyDelegateProperty()
     arbiters                      = ReadOnlyDelegateProperty()
@@ -563,7 +545,7 @@ class TornadoReplicaSetConnection(TornadoConnectionBase):
 
     def _new_delegate(self, *args, **kwargs):
         kwargs['auto_start_request'] = False
-        kwargs['_pool_class'] = TornadoPool
+        kwargs['_pool_class'] = MotorPool
         return pymongo.replica_set_connection.ReplicaSetConnection(
             *args, **kwargs)
 
@@ -576,14 +558,14 @@ class TornadoReplicaSetConnection(TornadoConnectionBase):
 
         return pools
 
-class TornadoMasterSlaveConnection(TornadoConnectionBase):
-    close_cursor                  = ReadOnlyDelegateProperty()
+class MotorMasterSlaveConnection(MotorConnectionBase):
+    close_cursor = ReadOnlyDelegateProperty()
 
     def _new_delegate(self, master, slaves, *args, **kwargs):
-        if isinstance(master, TornadoConnection):
+        if isinstance(master, MotorConnection):
             master = master.delegate
 
-        slaves = [s.delegate if isinstance(s, TornadoConnection) else s
+        slaves = [s.delegate if isinstance(s, MotorConnection) else s
             for s in slaves]
 
         return pymongo.master_slave_connection.MasterSlaveConnection(
@@ -591,26 +573,23 @@ class TornadoMasterSlaveConnection(TornadoConnectionBase):
 
     @property
     def master(self):
-        tornado_master = TornadoConnection()
-        tornado_master.delegate = self.delegate.master
-        return tornado_master
+        motor_master = MotorConnection()
+        motor_master.delegate = self.delegate.master
+        return motor_master
 
     @property
     def slaves(self):
-        tornado_slaves = []
-        for s in self.delegate.slaves:
-            tornado_connection = TornadoConnection()
-            tornado_connection.delegate = s
-            tornado_slaves.append(tornado_connection)
+        motor_slaves = []
+        for slave in self.delegate.slaves:
+            motor_connection = MotorConnection()
+            motor_connection.delegate = slave
+            motor_slaves.append(motor_connection)
 
-        return tornado_slaves
+        return motor_slaves
 
     def _get_pools(self):
         # TODO: expose the PyMongo pool, or otherwise avoid this
         return [self.master._Connection__pool]
-
-    # HACK!: For unittests that examine this attribute
-    _send_message_with_response   = Async(has_safe_arg=False, cb_required=True)
 
 
 class RequestContext(stack_context.StackContext):
@@ -649,8 +628,8 @@ class RequestContext(stack_context.StackContext):
         super(RequestContext, self).__init__(RequestContextFactoryFactory())
 
 
-class TornadoDatabase(TornadoBase):
-    # list of overridden async operations on a TornadoDatabase instance
+class MotorDatabase(MotorBase):
+    # list of overridden async operations on a MotorDatabase instance
     set_profiling_level           = Async(has_safe_arg=False, cb_required=False)
     reset_error_history           = Async(has_safe_arg=False, cb_required=False)
     add_user                      = Async(has_safe_arg=False, cb_required=False)
@@ -679,9 +658,9 @@ class TornadoDatabase(TornadoBase):
         # *args and **kwargs are not currently supported by pymongo Database,
         # but it doesn't cost us anything to include them and future-proof
         # this method.
-        if not isinstance(connection, TornadoConnectionBase):
-            raise TypeError("First argument to TornadoDatabase must be "
-                            "TornadoConnectionBase, not %s" % repr(connection))
+        if not isinstance(connection, MotorConnectionBase):
+            raise TypeError("First argument to MotorDatabase must be "
+                            "MotorConnectionBase, not %s" % repr(connection))
 
         self.connection = connection
         self.delegate = pymongo.database.Database(
@@ -689,17 +668,14 @@ class TornadoDatabase(TornadoBase):
         )
 
     def __getattr__(self, name):
-        return TornadoCollection(self, name)
+        return MotorCollection(self, name)
 
     __getitem__ = __getattr__
-
-    def __repr__(self):
-        return 'Tornado' + self.delegate.__repr__()
 
     # TODO: doc why we need to override this, refactor
     def drop_collection(self, name_or_collection, callback):
         name = name_or_collection
-        if isinstance(name, TornadoCollection):
+        if isinstance(name, MotorCollection):
             name = name.delegate.name
 
         sync_method = self.delegate.drop_collection
@@ -712,7 +688,7 @@ class TornadoDatabase(TornadoBase):
         check_callable(callback, required=True)
 
         name = name_or_collection
-        if isinstance(name, TornadoCollection):
+        if isinstance(name, MotorCollection):
             name = name.delegate.name
 
         sync_method = self.delegate.validate_collection
@@ -724,7 +700,7 @@ class TornadoDatabase(TornadoBase):
     def create_collection(self, name, *args, **kwargs):
         # We need to override create_collection specially, rather than simply
         # include it in async_ops, because we have to wrap the Collection it
-        # returns in a TornadoCollection.
+        # returns in a MotorCollection.
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
@@ -735,7 +711,7 @@ class TornadoDatabase(TornadoBase):
 
         def cb(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
-                collection = TornadoCollection(self, name)
+                collection = MotorCollection(self, name)
 
             callback(collection, error)
 
@@ -745,13 +721,13 @@ class TornadoDatabase(TornadoBase):
     def add_son_manipulator(self, manipulator):
         if isinstance(manipulator, pymongo.son_manipulator.AutoReference):
             db = manipulator.database
-            if isinstance(db, TornadoDatabase):
+            if isinstance(db, MotorDatabase):
                 manipulator.database = db.delegate
 
         self.delegate.add_son_manipulator(manipulator)
 
 
-class TornadoCollection(TornadoBase):
+class MotorCollection(MotorBase):
     create_index            = Async(has_safe_arg=False, cb_required=False)
     drop_indexes            = Async(has_safe_arg=False, cb_required=False)
     drop_index              = Async(has_safe_arg=False, cb_required=False)
@@ -775,36 +751,36 @@ class TornadoCollection(TornadoBase):
     find_one                = Async(has_safe_arg=False, cb_required=True)
         
     def __init__(self, database, name, *args, **kwargs):
-        if not isinstance(database, TornadoDatabase):
-            raise TypeError("First argument to TornadoCollection must be "
-                            "TornadoDatabase, not %s" % repr(database))
+        if not isinstance(database, MotorDatabase):
+            raise TypeError("First argument to MotorCollection must be "
+                            "MotorDatabase, not %s" % repr(database))
 
         self._tdb = database
         self.delegate = pymongo.collection.Collection(self._tdb.delegate, name)
 
     def __getattr__(self, name):
         # dotted collection name, like foo.bar
-        return TornadoCollection(
+        return MotorCollection(
             self._tdb,
             self.name + '.' + name
         )
 
     def find(self, *args, **kwargs):
         """
-        Get a TornadoCursor.
+        Get a MotorCursor.
         """
         assert 'callback' not in kwargs, (
             "Pass a callback to each, to_list, count, or tail, not to find"
         )
 
         cursor = self.delegate.find(*args, **kwargs)
-        return TornadoCursor(cursor)
+        return MotorCursor(cursor)
 
     # TODO: refactor
     def map_reduce(self, *args, **kwargs):
         # We need to override map_reduce specially, rather than simply
         # include it in async_ops, because we have to wrap the Collection it
-        # returns in a TornadoCollection.
+        # returns in a MotorCollection.
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
@@ -820,17 +796,14 @@ class TornadoCollection(TornadoBase):
         async_mr = asynchronize(sync_method, False, True)
         async_mr(*args, callback=inner_cb, **kwargs)
 
-    def __repr__(self):
-        return 'Tornado' + repr(self.delegate)
-
     uuid_subtype = ReadWriteDelegateProperty()
 
 
-# TODO: does this need to clone the TornadoCursor or could it just return
+# TODO: does this need to clone the MotorCursor or could it just return
 #   obj?
 class CallAndReturnClone(DelegateProperty):
     def __get__(self, obj, objtype):
-        # self.name is set by TornadoMeta
+        # self.name is set by MotorMeta
         method = getattr(obj.delegate, self.name)
 
         def return_clone(*args, **kwargs):
@@ -839,7 +812,7 @@ class CallAndReturnClone(DelegateProperty):
         return return_clone
 
 
-class TornadoCursor(TornadoBase):
+class MotorCursor(MotorBase):
     # TODO: test all these in test_async.py
     count                       = Async(has_safe_arg=False, cb_required=True)
     distinct                    = Async(has_safe_arg=False, cb_required=True)
@@ -878,7 +851,7 @@ class TornadoCursor(TornadoBase):
         """
         if self.started and not self.alive:
             raise InvalidOperation(
-                "Can't call get_more() on a TornadoCursor that has been"
+                "Can't call get_more() on a MotorCursor that has been"
                 " exhausted or killed."
             )
 
@@ -897,7 +870,7 @@ class TornadoCursor(TornadoBase):
         @param callback: function taking (document, error)
         """
         check_callable(callback, required=True)
-        add_callback = tornado.ioloop.IOLoop.instance().add_callback
+        add_callback = ioloop.IOLoop.instance().add_callback
 
         # TODO: simplify, review, comment
         def do_cb(doc):
@@ -958,7 +931,7 @@ class TornadoCursor(TornadoBase):
         self.each(for_each)
 
     def clone(self):
-        return TornadoCursor(self.delegate.clone())
+        return MotorCursor(self.delegate.clone())
 
     def close(self):
         """Explicitly close this cursor.
@@ -980,7 +953,7 @@ class TornadoCursor(TornadoBase):
         # TODO: test dropping a collection while tailing it
         # TODO: test tailing collection that isn't empty at first
         check_callable(callback, True)
-        add_callback = tornado.ioloop.IOLoop.instance().add_callback
+        add_callback = ioloop.IOLoop.instance().add_callback
 
         cursor = self.clone()
 
@@ -1037,7 +1010,7 @@ class TornadoCursor(TornadoBase):
         # TODO: doctest
         # TODO: test this is an error if tailable
         if isinstance(index, slice):
-             return TornadoCursor(self.delegate[index])
+             return MotorCursor(self.delegate[index])
         else:
             if not isinstance(index, (int, long)):
                 raise TypeError("index %r cannot be applied to Cursor "
@@ -1068,8 +1041,8 @@ class TornadoCursor(TornadoBase):
     _Cursor__read_preference    = ReadOnlyDelegateProperty()
 
 
-# TODO: doc
-class Op(tornado.gen.Task):
+# TODO: test, doc
+class Op(gen.Task):
     def __init__(self, func, *args, **kwargs):
         check_callable(func, True)
         super(Op, self).__init__(func, *args, **kwargs)
@@ -1081,7 +1054,7 @@ class Op(tornado.gen.Task):
         return result
 
 
-class WaitOp(tornado.gen.Wait):
+class WaitOp(gen.Wait):
     def get_result(self):
         (result, error), _ = super(WaitOp, self).get_result()
         if error:
@@ -1090,7 +1063,7 @@ class WaitOp(tornado.gen.Wait):
         return result
 
 
-class WaitAllOps(tornado.gen.WaitAll):
+class WaitAllOps(gen.WaitAll):
     def get_result(self):
         super_results = super(WaitAllOps, self).get_result()
 
