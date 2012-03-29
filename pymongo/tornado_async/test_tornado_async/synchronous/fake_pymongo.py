@@ -62,7 +62,9 @@ timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 # TODO: maybe just get rid of this and put it all in synchronize()?
 def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
     loop = IOLoop.instance()
+    assert not loop.running(), "Loop already running in method %s" % name
     loop._callbacks[:] = []
+    loop._timeouts[:] = []
     outcome = {}
 
     def raise_timeout_err():
@@ -87,7 +89,6 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
 
     kallable(callback=callback)
     try:
-        assert not loop.running(), "Loop already running in method %s" % name
         loop.start()
         if outcome.get('error'):
             raise outcome['error']
