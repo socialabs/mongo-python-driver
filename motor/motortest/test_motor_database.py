@@ -20,6 +20,7 @@ import motor
 from motor.motortest import MotorTest, async_test_engine, host, port
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 
+# TODO: test that db = MotorDatabase(conn, 'test') works
 
 class MotorDatabaseTest(MotorTest):
     def test_database_callbacks(self):

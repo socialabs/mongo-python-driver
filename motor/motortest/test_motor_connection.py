@@ -136,16 +136,14 @@ class MotorConnectionTest(MotorTest):
             self.assertEqual("bar", result["foo"])
 
     def test_get_last_error(self):
-        """
-        Create a unique index on 'x', insert the same value for x twice,
-        assert DuplicateKeyError is passed to callback for second insert.
-        Try again in a request, with an unsafe insert followed by an explicit
-        call to database.error(), which raises InvalidOperation because we
-        can't make two concurrent operations in a request. Finally, insert
-        unsafely and call error() again, check that we get the getLastError
-        result correctly, which checks that we're using a single socket in the
-        request as expected.
-        """
+        # Create a unique index on 'x', insert the same value for x twice,
+        # assert DuplicateKeyError is passed to callback for second insert.
+        # Try again in a request, with an unsafe insert followed by an explicit
+        # call to database.error(), which raises InvalidOperation because we
+        # can't make two concurrent operations in a request. Finally, insert
+        # unsafely and call error() again, check that we get the getLastError
+        # result correctly, which checks that we're using a single socket in
+        # the request as expected.
         # TODO: test that ensure_index calls the callback even if the index
         # is already created and in the index cache - might be a special-case
         # optimization

@@ -26,6 +26,7 @@ from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
 from test.utils import delay
 
+# TODO: test that collection = MotorCollection(db, 'test') works
 
 class MotorCollectionTest(MotorTest):
     @async_test_engine()
@@ -222,10 +223,8 @@ class MotorCollectionTest(MotorTest):
         self.check_required_callback(cx.test.test_collection.find_one)
 
     def test_find_one_is_async(self):
-        """
-        Confirm find_one() is async by launching two operations which will
-        finish out of order.
-        """
+        # Confirm find_one() is async by launching two operations which will
+        # finish out of order.
         results = []
 
         def callback(result, error):
@@ -282,9 +281,7 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_update_bad(self):
-        """
-        Violate a unique index, make sure we handle error well
-        """
+        # Violate a unique index, make sure we handle error well
         results = []
 
         def callback(result, error):
@@ -328,9 +325,7 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_insert_bad(self):
-        """
-        Violate a unique index, make sure we handle error well
-        """
+        # Violate a unique index, make sure we handle error well
         yield AssertRaises(
             DuplicateKeyError,
             self.motor_connection(host, port).test.test_collection.insert,
@@ -338,10 +333,7 @@ class MotorCollectionTest(MotorTest):
         )
 
     def test_insert_many_one_bad(self):
-        """
-        Violate a unique index in one of many updates, make sure we handle error
-        well
-        """
+        # Violate a unique index in one of many updates, handle error
         result = yield AssertRaises(
             DuplicateKeyError,
             self.motor_connection(host, port).test.test_collection.insert,
@@ -393,9 +385,7 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_save_bad(self):
-        """
-        Violate a unique index, make sure we handle error well
-        """
+        # Violate a unique index, make sure we handle error well
         yield AssertRaises(
             DuplicateKeyError,
             self.motor_connection(host, port).test.test_collection.save,
@@ -404,9 +394,7 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_save_multiple(self):
-        """
-        TODO: what are we testing here really?
-        """
+        # TODO: what are we testing here really?
         cx = self.motor_connection(host, port)
 
         for i in range(10):
@@ -426,10 +414,8 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_remove(self):
-        """
-        Remove a document twice, check that we get a success response first time
-        and an error the second time.
-        """
+        # Remove a document twice, check that we get a success response first
+        # time and an error the second time.
         cx = self.motor_connection(host, port)
         result = yield motor.Op(cx.test.test_collection.remove, {'_id': 1})
 
@@ -451,9 +437,7 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_unsafe_remove(self):
-        """
-        Test that unsafe removes with no callback still work
-        """
+        # Test that unsafe removes with no callback still work
         self.assertEqual(1, self.sync_coll.find({'_id': 117}).count(),
             msg="Test setup should have a document with _id 117")
 
@@ -462,9 +446,8 @@ class MotorCollectionTest(MotorTest):
         yield AssertEqual(0, coll.find({'_id': 117}).count)
 
     def test_unsafe_insert(self):
-        """
-        Test that unsafe inserts with no callback still work
-        """
+        # Test that unsafe inserts with no callback still work
+
         # id 201 not present
         self.assertEqual(0, self.sync_coll.find({'_id': 201}).count())
 
@@ -481,9 +464,7 @@ class MotorCollectionTest(MotorTest):
         ioloop.IOLoop.instance().start()
 
     def test_unsafe_save(self):
-        """
-        Test that unsafe saves with no callback still work
-        """
+        # Test that unsafe saves with no callback still work
         self.motor_connection(host, port).test.test_collection.save(
             {'_id': 201})
 

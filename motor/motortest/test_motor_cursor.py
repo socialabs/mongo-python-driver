@@ -49,15 +49,13 @@ class MotorCursorTest(MotorTest):
             coll.find({'_id': {'$lt': 100}, '$where': where}).count)
 
     def test_cursor_close(self):
-        """
-        The flow here is complex; we're testing that a cursor can be explicitly
-        closed.
-        1. Create a cursor on the server by running find()
-        2. In the find() callback, start closing the cursor
-        3. Wait a little to make sure the cursor closes
-        4. Stop the IOLoop so we can exit test_cursor_close()
-        5. In MotorTest.tearDown(), we'll assert all cursors have closed.
-        """
+        # The flow here is complex; we're testing that a cursor can be explicitly
+        # closed.
+        # 1. Create a cursor on the server by running find()
+        # 2. In the find() callback, start closing the cursor
+        # 3. Wait a little to make sure the cursor closes
+        # 4. Stop the IOLoop so we can exit test_cursor_close()
+        # 5. In MotorTest.tearDown(), we'll assert all cursors have closed.
         cx = self.motor_connection(host, port)
         loop = ioloop.IOLoop.instance()
 

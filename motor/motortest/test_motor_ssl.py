@@ -46,9 +46,7 @@ class MotorSSLTest(MotorTest):
     #            ReplicaSetConnection, ssl=True)
 
     def test_simple_ops(self):
-        """
-        TODO: this is duplicative of test_nested_callbacks_2
-        """
+        # TODO: this is duplicative of test_nested_callbacks_2
         if not have_ssl:
             raise SkipTest()
 

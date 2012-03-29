@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake PyMongo implementation built on top of Motor, for the sole purpose of
-checking that Motor passes the same unittests as PyMongo.
+"""Fake synchronous PyMongo implementation built on top of Motor, for the sole
+purpose of checking that Motor passes the same unittests as PyMongo.
 
 DO NOT USE THIS MODULE.
 """
@@ -26,12 +26,8 @@ import time
 import traceback
 from tornado.ioloop import IOLoop
 
-# TODO doc WTF this module does
-# TODO sometimes I refer to things as 'async', sometimes as 'tornado' -- maybe
-# everything should be called 'motor'?
-
-from pymongo import son_manipulator, common
-from pymongo.tornado_async import async
+import motor
+from pymongo import son_manipulator
 from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
 
 
@@ -53,8 +49,6 @@ __all__ = [
     'MasterSlaveConnection',
 ]
 
-
-# TODO: doc
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 
 
@@ -112,8 +106,8 @@ class Sync(object):
 def synchronize(self, async_method, has_safe_arg):
     """
     @param self:                A Fake object, e.g. fake_pymongo Connection
-    @param async_method:        Bound method of a TornadoConnection,
-                                TornadoDatabase, etc.
+    @param async_method:        Bound method of a MotorConnection,
+                                MotorDatabase, etc.
     @param has_safe_arg:        Whether the method takes a 'safe' argument
     @return:                    A synchronous wrapper around the method
     """
@@ -154,7 +148,7 @@ def synchronize(self, async_method, has_safe_arg):
     return synchronized_method
 
 
-class FakeWrapReturnValue(async.DelegateProperty):
+class FakeWrapReturnValue(motor.DelegateProperty):
     def __get__(self, obj, objtype):
         # self.name is set by FakeMeta
         method = getattr(obj.delegate, self.name)
@@ -163,7 +157,7 @@ class FakeWrapReturnValue(async.DelegateProperty):
             rv = method(*args, **kwargs)
             # TODO: check for the other Motor classes and wrap them
             # in appropriate Fakes
-            if isinstance(rv, async.TornadoCursor):
+            if isinstance(rv, motor.MotorCursor):
                 return Cursor(rv)
             else:
                 return rv
@@ -193,22 +187,22 @@ class FakeMeta(type):
                 # this attribute, e.g. Database.create_collection which is
                 # special-cased.
                 if attrname not in attrs:
-                    if isinstance(delegate_attr, async.Async):
+                    if isinstance(delegate_attr, motor.Async):
                         # Re-synchronize the method
                         sync_method = Sync(attrname, delegate_attr.has_safe_arg)
                         setattr(new_class, attrname, sync_method)
-                    elif isinstance(delegate_attr, async.CallAndReturnClone):
+                    elif isinstance(delegate_attr, motor.CallAndReturnClone):
                         # Wrap Motor objects returned from functions in Fakes
                         wrapper = FakeWrapReturnValue()
                         wrapper.name = attrname
                         setattr(new_class, attrname, wrapper)
-                    elif isinstance(delegate_attr, async.DelegateProperty):
+                    elif isinstance(delegate_attr, motor.DelegateProperty):
                         # Delegate the property from Fake to Motor
                         setattr(new_class, attrname, delegate_attr)
 
         # Set DelegateProperties' names
         for name, attr in attrs.items():
-            if isinstance(attr, async.DelegateProperty):
+            if isinstance(attr, motor.DelegateProperty):
                 attr.name = name
 
         return new_class
@@ -216,7 +210,7 @@ class FakeMeta(type):
 
 class Fake(object):
     """
-    Wraps a TornadoConnection, TornadoDatabase, or TornadoCollection and
+    Wraps a MotorConnection, MotorDatabase, or MotorCollection and
     makes it act like the synchronous pymongo equivalent
     """
     __metaclass__ = FakeMeta
@@ -230,7 +224,7 @@ class Connection(Fake):
     HOST = 'localhost'
     PORT = 27017
 
-    __delegate_class__ = async.TornadoConnection
+    __delegate_class__ = motor.MotorConnection
 
     def __init__(self, host=None, port=None, *args, **kwargs):
         # Motor doesn't implement auto_start_request
@@ -245,7 +239,7 @@ class Connection(Fake):
         self.fake_connect()
 
     def fake_connect(self):
-        # Try to connect the TornadoConnection before continuing; raise
+        # Try to connect the MotorConnection before continuing; raise
         # ConnectionFailure if it doesn't work.
         exc = ConnectionFailure(
             "fake_pymongo.Connection: Can't connect"
@@ -291,7 +285,7 @@ class Connection(Fake):
 
 
 class ReplicaSetConnection(Connection):
-    __delegate_class__ = async.TornadoReplicaSetConnection
+    __delegate_class__ = motor.MotorReplicaSetConnection
 
     def __init__(self, *args, **kwargs):
         # Motor doesn't implement auto_start_request
@@ -305,10 +299,10 @@ class ReplicaSetConnection(Connection):
 
 
 class MasterSlaveConnection(Connection):
-    __delegate_class__ = async.TornadoMasterSlaveConnection
+    __delegate_class__ = motor.MotorMasterSlaveConnection
 
     def __init__(self, master, slaves, *args, **kwargs):
-        # TornadoMasterSlaveConnection expects TornadoConnections or regular
+        # MotorMasterSlaveConnection expects MotorConnections or regular
         # pymongo Connections as arguments, but not Fakes.
         if isinstance(master, Connection):
             master = master.delegate
@@ -340,7 +334,7 @@ class MasterSlaveConnection(Connection):
 
 
 class Database(Fake):
-    __delegate_class__ = async.TornadoDatabase
+    __delegate_class__ = motor.MotorDatabase
 
     def __init__(self, connection, name):
         assert isinstance(connection, Connection), (
@@ -349,7 +343,7 @@ class Database(Fake):
         self.connection = connection
 
         self.delegate = connection.delegate[name]
-        assert isinstance(self.delegate, async.TornadoDatabase)
+        assert isinstance(self.delegate, motor.MotorDatabase)
 
     def add_son_manipulator(self, manipulator):
         if isinstance(manipulator, son_manipulator.AutoReference):
@@ -381,13 +375,13 @@ class Database(Fake):
 
     # TODO: refactor
     def create_collection(self, name, *args, **kwargs):
-        # Special case, since TornadoDatabase.create_collection returns a
-        # TornadoCollection
+        # Special case, since MotorDatabase.create_collection returns a
+        # MotorCollection
         collection = synchronize(self, self.delegate.create_collection, has_safe_arg=False)(
             name, *args, **kwargs
         )
 
-        if isinstance(collection, async.TornadoCollection):
+        if isinstance(collection, motor.MotorCollection):
             collection = Collection(self, name)
 
         return collection
@@ -399,28 +393,28 @@ class Database(Fake):
 
 
 class Collection(Fake):
-    __delegate_class__ = async.TornadoCollection
+    __delegate_class__ = motor.MotorCollection
 
     def __init__(self, database, name):
         assert isinstance(database, Database)
         self.database = database
 
         self.delegate = database.delegate[name]
-        assert isinstance(self.delegate, async.TornadoCollection)
+        assert isinstance(self.delegate, motor.MotorCollection)
 
     def find(self, *args, **kwargs):
-        # Return a fake Cursor that wraps the TornadoCursor
+        # Return a fake Cursor that wraps the MotorCursor
         return Cursor(self.delegate.find(*args, **kwargs))
 
     # TODO: refactor
     def map_reduce(self, *args, **kwargs):
         # We need to override map_reduce specially, because we have to wrap the
-        # TornadoCollection it returns in a fake Collection.
+        # MotorCollection it returns in a fake Collection.
         rv = loop_timeout(functools.partial(
             self.delegate.map_reduce, *args, **kwargs
         ))
 
-        if isinstance(rv, async.TornadoCollection):
+        if isinstance(rv, motor.MotorCollection):
             return Collection(self.database, rv.name)
         else:
             return rv
@@ -433,14 +427,14 @@ class Collection(Fake):
 
     
 class Cursor(Fake):
-    __delegate_class__ = async.TornadoCursor
+    __delegate_class__ = motor.MotorCursor
 
-    close                               = async.ReadOnlyDelegateProperty()
+    close                               = motor.ReadOnlyDelegateProperty()
     rewind                              = FakeWrapReturnValue()
     clone                               = FakeWrapReturnValue()
 
-    def __init__(self, tornado_cursor):
-        self.delegate = tornado_cursor
+    def __init__(self, motor_cursor):
+        self.delegate = motor_cursor
 
     def __iter__(self):
         return self

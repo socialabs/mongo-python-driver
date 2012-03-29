@@ -24,6 +24,7 @@ import motor
 from motor.motortest import eventually, puritanical
 from tornado import gen, ioloop
 
+
 host = os.environ.get("DB_IP", "localhost")
 port = int(os.environ.get("DB_PORT", 27017))
 
@@ -51,6 +52,8 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 # TODO: test unsafe remove
 # TODO: test deeply-nested callbacks
 # TODO: separate these into some class-specific modules a la PyMongo
+# TODO: don't break the test suite if we can't import tornado and/or greenlet;
+#    gracefully skip motortests
 
 
 def async_test_engine(timeout_sec=5):
@@ -105,6 +108,8 @@ def async_test_engine(timeout_sec=5):
             loop.start()
         return _async_test
     return decorator
+
+async_test_engine.__test__ = False # Nose otherwise mistakes it for a test
 
 
 class AssertRaises(gen.Task):

@@ -1,13 +1,39 @@
+# Copyright 2012 10gen, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Test Motor by testing that Synchro, a fake PyMongo implementation built on
+top of Motor, passes the same unittests as PyMongo.
+
+This program monkey-patches sys.modules, so run it alone, rather than as part
+of a larger test suite.
+
+The environment variable TIMEOUT_SEC controls how long Synchro waits for each
+Motor operation to complete, default 5 seconds.
+"""
+
 import sys
+from os import path
+
 import nose
 from nose.config import Config
-from os import path
-import re
-import fake_pymongo
 from nose.plugins import Plugin
 from nose.plugins.manager import PluginManager
 from nose.selector import Selector
-from pymongo.tornado_async.test_tornado_async.puritanical import PuritanicalIOLoop
+
+from motor.motortest import synchro
+from motor.motortest.puritanical import PuritanicalIOLoop
+
 
 # TODO: running this file without a test-module name does nothing; it should run
 #   all PyMongo tests except test_gevent
@@ -25,11 +51,11 @@ excluded_modules = [
 ]
 
 excluded_tests = [
-    # TODO: For each of these, examine why the synchro test fails and either
-    # fix the synchro test or test the same functionality directly in Motor,
+    # TODO: For each of these, examine why the Synchro test fails and either
+    # fix the Synchro test or test the same functionality directly in Motor,
     # or document that Motor doesn't support the functionality
 
-    # Motor's requests can't be simulated in fake PyMongo, so the request-
+    # Motor's requests can't be simulated in Synchro, so the request-
     # handling part of test_copy_db is testing against Motor directly.
     'TestConnection.test_copy_db',
 
@@ -52,7 +78,7 @@ excluded_tests = [
     'TestConnection.test_auto_start_request',
     'TestConnection.test_contextlib_auto_start_request',
 
-    # Motor's requests can't be simulated in fake PyMongo, so we test them
+    # Motor's requests can't be simulated in Synchro, so we test them
     # directly
     'TestConnection.test_with_start_request',
 
@@ -117,13 +143,14 @@ class SynchroNosePlugin(Plugin):
 
         return True
 
+
 if __name__ == '__main__':
     PuritanicalIOLoop().install()
 
-    # Monkey-patch all pymongo's unittests so they think our fake pymongo is the
-    # real one
+    # Monkey-patch all pymongo's unittests so they think Synchro is the
+    # real PyMongo
     # TODO: try using 'from imp import new_module' instead of this?
-    sys.modules['pymongo'] = fake_pymongo
+    sys.modules['pymongo'] = synchro
 
     for submod in [
         'connection',
@@ -133,15 +160,15 @@ if __name__ == '__main__':
         'database',
         'pool',
     ]:
-        # So that 'from pymongo.connection import Connection' gets the fake
-        # Connection, not the real
-        sys.modules['pymongo.%s' % submod] = fake_pymongo
+        # So that 'from pymongo.connection import Connection' gets the Synchro
+        # Connection, not the real one.
+        sys.modules['pymongo.%s' % submod] = synchro
 
     # Find our directory
     this_dir = path.dirname(__file__)
 
     # Find test dir
-    test_dir = path.normpath(path.join(this_dir, '../../../../test'))
+    test_dir = path.normpath(path.join(this_dir, '../../../test'))
     print 'Running tests in %s' % test_dir
 
     # Exclude a test that hangs and prevents the run from completing - we should
