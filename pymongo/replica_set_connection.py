@@ -246,13 +246,13 @@ class ReplicaSetConnection(common.BaseObject):
         else:
             self.__seeds.update(uri_parser.split_hosts(host, port))
 
+        self.pool_class = kwargs.pop('_pool_class', None)
+
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
             self.__opts[option] = value
 
-        if self.__opts.get('_pool_class'):
-            self.pool_class = self.__opts['_pool_class']
-        else:
+        if not self.pool_class:
             if self.__opts.get('use_greenlets', False):
                 if not pool.have_greenlet:
                     raise ConfigurationError(
@@ -549,8 +549,8 @@ class ReplicaSetConnection(common.BaseObject):
                 if host in self.__pools:
                     mongo = self.__pools[host]
                     sock_info = self.__socket(mongo)
-		    res = self.__simple_command(
-			sock_info, 'admin', {'ismaster': 1})
+                    res = self.__simple_command(
+                        sock_info, 'admin', {'ismaster': 1})
                     mongo['pool'].return_socket(sock_info)
                 else:
                     res, conn = self.__is_master(host)
