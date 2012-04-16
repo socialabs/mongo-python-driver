@@ -229,7 +229,7 @@ class Connection(common.BaseObject):
         self.__host = None
         self.__port = None
 
-	self.pool_class = kwargs.pop('_pool_class', None)
+        self.pool_class = kwargs.pop('_pool_class', None)
 
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
@@ -254,19 +254,19 @@ class Connection(common.BaseObject):
         if self.__use_ssl and not pool.have_ssl:
             raise ConfigurationError("The ssl module is not available. If you "
                                      "are using a python version previous to "
-				     "2.6 you must install the ssl package "
-				     "from PyPI.")
+                                     "2.6 you must install the ssl package "
+                                     "from PyPI.")
 
-	if not self.pool_class:
-	    if options.get('use_greenlets', False):
-		if not pool.have_greenlet:
-		    raise ConfigurationError(
-			"The greenlet module is not available. "
-			"Install the greenlet package from PyPI."
-		    )
-		self.pool_class = pool.GreenletPool
-	    else:
-		self.pool_class = pool.Pool
+        if not self.pool_class:
+            if options.get('use_greenlets', False):
+                if not pool.have_greenlet:
+                    raise ConfigurationError(
+                        "The greenlet module is not available. "
+                        "Install the greenlet package from PyPI."
+                    )
+                self.pool_class = pool.GreenletPool
+            else:
+                self.pool_class = pool.Pool
 
         self.__pool = self.pool_class(
             None,

@@ -628,9 +628,9 @@ class TestCursor(unittest.TestCase):
         self.assertRaises(IndexError, lambda x: self.db.test.find()[x], -1)
 
     def test_getitem_index_out_of_range(self):
-	self.db.drop_collection("test")
-	for i in range(100):
-	    self.db.test.save({"i": i})
+        self.db.drop_collection("test")
+        for i in range(100):
+            self.db.test.save({"i": i})
 
         self.assertRaises(IndexError, lambda x: self.db.test.find()[x], 100)
         self.assertRaises(IndexError,
