@@ -60,7 +60,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 # TODO: document requests and describe how concurrent ops are prevented,
 #   demo how to avoid errors. Describe using NullContext to clear request.
 # TODO: document that Motor doesn't do auto_start_request
-
+# TODO: is while cursor.alive or while True the right way to iterate with
+#   gen.engine and next()?
 
 def check_callable(kallable, required=False):
     if required and not kallable:

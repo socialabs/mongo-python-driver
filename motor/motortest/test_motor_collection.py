@@ -72,7 +72,7 @@ class MotorCollectionTest(MotorTest):
         ).batch_size(5)
 
         results = []
-        while cursor.alive:
+        while True:
             doc = yield motor.Op(cursor.next)
 
             if doc:
