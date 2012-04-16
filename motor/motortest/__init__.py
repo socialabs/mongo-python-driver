@@ -105,9 +105,12 @@ def async_test_engine(timeout_sec=5):
                 "statement" % func
                 )
 
-            AsyncTestRunner(gen, timeout).run()
-
+            runner = AsyncTestRunner(gen, timeout)
+            runner.run()
             loop.start()
+            if not runner.finished:
+                raise Exception('%s did not finish' % func)
+
         return _async_test
     return decorator
 
