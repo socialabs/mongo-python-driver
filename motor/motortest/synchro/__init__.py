@@ -501,6 +501,12 @@ class Cursor(Synchro):
                 self, self.delegate[index].each, has_safe_arg=False)
             return sync_next()
 
+    # Return MotorCollection wrapped in Synchro Collection
+    @property
+    @wrap_synchro
+    def collection(self):
+        return self.delegate.collection
+
     _Cursor__query_options     = SynchroProperty()
     _Cursor__retrieved         = SynchroProperty()
     _Cursor__skip              = SynchroProperty()

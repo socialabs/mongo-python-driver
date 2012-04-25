@@ -100,9 +100,6 @@ excluded_tests = [
     'TestDatabase.test_system_js',
     'TestDatabase.test_system_js_list',
 
-    # Motor's cursors don't have a 'collection' attribute
-    'TestCursor.test_properties',
-
     # Motor can't raise an index error if a cursor slice is out of range; it
     # just gets no results
     'TestCursor.test_getitem_index_out_of_range',

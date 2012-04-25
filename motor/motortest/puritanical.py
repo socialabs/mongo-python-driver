@@ -43,5 +43,4 @@ class PuritanicalTest(unittest.TestCase):
 
         # So any function that calls IOLoop.instance() gets the
         # PuritanicalIOLoop instead of the default loop.
-        loop = PuritanicalIOLoop()
-        loop.install()
+        PuritanicalIOLoop().install()

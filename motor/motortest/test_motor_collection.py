@@ -245,11 +245,11 @@ class MotorCollectionTest(MotorTest):
 
     @async_test_engine()
     def test_find_one(self):
+        cx = self.motor_connection(host, port)
         yield AssertEqual(
             {'_id': 1, 's': hex(1)},
             self.motor_connection(host, port).test.test_collection.find_one,
-            {'_id': 1}
-        )
+            {'_id': 1})
 
     def test_find_one_callback(self):
         cx = self.motor_connection(host, port)
@@ -453,16 +453,16 @@ class MotorCollectionTest(MotorTest):
         result = yield motor.Op(cx.test.test_collection.remove, {'_id': 1})
 
         # First time we remove, n = 1
-        self.assertEventuallyEqual(1, lambda: result['n'])
-        self.assertEventuallyEqual(1, lambda: result['ok'])
-        self.assertEventuallyEqual(None, lambda: result['err'])
+        self.assertEqual(1, result['n'])
+        self.assertEqual(1, result['ok'])
+        self.assertEqual(None, result['err'])
 
         result = yield motor.Op(cx.test.test_collection.remove, {'_id': 1})
 
         # Second time, document is already gone, n = 0
-        self.assertEventuallyEqual(0, lambda: result['n'])
-        self.assertEventuallyEqual(1, lambda: result['ok'])
-        self.assertEventuallyEqual(None, lambda: result['err'])
+        self.assertEqual(0, result['n'])
+        self.assertEqual(1, result['ok'])
+        self.assertEqual(None, result['err'])
 
     def test_remove_callback(self):
         cx = self.motor_connection(host, port)

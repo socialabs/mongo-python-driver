@@ -62,6 +62,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 # TODO: document that Motor doesn't do auto_start_request
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
+# TODO: document, smugly, that Motor has configurable IOLoops
+
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -80,7 +82,6 @@ def motor_sock_method(check_closed=False):
             # We need to alter this value in inner functions, hence the list
             timeout = [None]
             self_timeout = self.timeout
-            loop = ioloop.IOLoop.instance()
             if self_timeout:
                 def timeout_err():
                     timeout[0] = None
@@ -88,7 +89,7 @@ def motor_sock_method(check_closed=False):
                     self.stream.close()
                     child_gr.throw(socket.timeout("timed out"))
 
-                timeout[0] = loop.add_timeout(
+                timeout[0] = self.stream.io_loop.add_timeout(
                     time.time() + self_timeout, timeout_err
                 )
 
@@ -99,7 +100,7 @@ def motor_sock_method(check_closed=False):
                 if timeout[0] or not self_timeout:
                     # We didn't time out
                     if timeout[0]:
-                        loop.remove_timeout(timeout[0])
+                        self.stream.io_loop.remove_timeout(timeout[0])
 
                     if error:
                         child_gr.throw(error)
@@ -130,14 +131,15 @@ class MotorSocket(object):
 
     We only implement those socket methods actually used by pymongo.
     """
-    def __init__(self, sock, use_ssl=False):
+    def __init__(self, sock, io_loop, use_ssl=False):
         self.use_ssl = use_ssl
         self.timeout = None
         if self.use_ssl:
-           self.stream = iostream.SSLIOStream(sock)
+           self.stream = iostream.SSLIOStream(sock, io_loop=io_loop)
         else:
-           self.stream = iostream.IOStream(sock)
+           self.stream = iostream.IOStream(sock, io_loop=io_loop)
 
+        # Unittest hook
         if socket_uuid:
             self.uuid = uuid.uuid4()
 
@@ -181,7 +183,8 @@ class MotorSocket(object):
 class MotorPool(pymongo.pool.BasePool):
     """A simple connection pool of MotorSockets.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, io_loop, *args, **kwargs):
+        self.io_loop = io_loop
         self._current_request_to_sock = {}
         self._request_socks_outstanding = set()
         super(MotorPool, self).__init__(*args, **kwargs)
@@ -212,13 +215,13 @@ class MotorPool(pymongo.pool.BasePool):
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                motor_sock = MotorSocket(sock, use_ssl=self.use_ssl)
+                motor_sock = MotorSocket(sock, self.io_loop, use_ssl=self.use_ssl)
                 motor_sock.settimeout(self.conn_timeout)
 
                 # MotorSocket will pause the current greenlet and resume it
                 # when connection has completed
                 motor_sock.connect(pair or self.pair)
-                motor_sock.settimeout(self.net_timeout)
+                motor_sock.settimeout(self.net_timeout) # TODO: necessary? BasePool.connect() handles this
                 return motor_sock
 
             except socket.error, e:
@@ -266,20 +269,23 @@ class MotorPool(pymongo.pool.BasePool):
         self._current_request_to_sock.clear()
 
 
-def asynchronize(sync_method, has_safe_arg, cb_required):
+def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     """
-    @param sync_method:     Bound method of pymongo Collection, Database,
-                            Connection, or Cursor
-    @param has_safe_arg:    Whether the method takes a 'safe' argument
-    @param cb_required:     If True, raise TypeError if no callback is passed
+    @param io_loop:           A Tornado IOLoop
+    @param sync_method:       Bound method of pymongo Collection, Database,
+                              Connection, or Cursor
+    @param has_safe_arg:      Whether the method takes a 'safe' argument
+    @param callback_required: If True, raise TypeError if no callback is passed
     """
+    assert isinstance(io_loop, ioloop.IOLoop)
+
     # TODO doc
     # TODO: staticmethod of base class for Motor objects, add some custom
     #   stuff, like Connection can't do anything before open()
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
         callback = kwargs.get('callback')
-        check_callable(callback, required=cb_required)
+        check_callable(callback, required=callback_required)
 
         if 'callback' in kwargs:
             # Don't pass callback to sync_method
@@ -298,7 +304,7 @@ def asynchronize(sync_method, has_safe_arg, cb_required):
 
             # Schedule the callback to be run on the main greenlet
             if callback:
-                ioloop.IOLoop.instance().add_callback(
+                io_loop.add_callback(
                     functools.partial(callback, result, error)
                 )
             elif error:
@@ -334,9 +340,10 @@ class Async(DelegateProperty):
         # self.name is set by MotorMeta
         sync_method = getattr(obj.delegate, self.name)
         return asynchronize(
+            obj.get_io_loop(),
             sync_method,
             has_safe_arg=self.has_safe_arg,
-            cb_required=self.cb_required
+            callback_required=self.cb_required
         )
 
 
@@ -397,10 +404,22 @@ class MotorConnectionBase(MotorBase):
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
+        # TODO: document io_loop kw arg
         if 'auto_start_request' in kwargs:
             raise pymongo.errors.ConfigurationError(
                 "Motor doesn't support auto_start_request, use "
                 "%s.start_request explicitly" % self.__class__.__name__)
+
+        # TODO: refactor into check_ioloop(kwargs)
+        if 'io_loop' in kwargs:
+            kwargs = kwargs.copy()
+            self.io_loop = kwargs.pop('io_loop')
+            if not isinstance(self.io_loop, ioloop.IOLoop):
+                raise TypeError(
+                    "io_loop must be instance of IOLoop, not %s" % (
+                        repr(self.io_loop)))
+        else:
+            self.io_loop = ioloop.IOLoop.instance()
 
         self._init_args = args
         self._init_kwargs = kwargs
@@ -414,32 +433,55 @@ class MotorConnectionBase(MotorBase):
         check_callable(callback)
 
         if self.connected:
+            # TODO: test this branch, with and without callback
             if callback:
-                callback(self, None)
+                self.io_loop.add_callback(
+                    functools.partial(callback, self, None))
             return
 
-        def connect():
-            # Run on child greenlet
-            # TODO: can this use asynchronize()?
-            error = None
-            try:
-                self.delegate = self._new_delegate(
-                    *self._init_args, **self._init_kwargs)
-
-                del self._init_args
-                del self._init_kwargs
-            except Exception, e:
-                error = e
-
-            if callback:
-                # Schedule callback to be executed on main greenlet, with
-                # (self, None) if no error, else (None, error)
-                ioloop.IOLoop.instance().add_callback(
-                    functools.partial(
-                        callback, None if error else self, error))
-
         # Actually connect on a child greenlet
+        # TODO: move self._connect back into this method
+        connect = functools.partial(self._connect, callback, self.io_loop)
         greenlet.greenlet(connect).switch()
+
+    def open_sync(self):
+        """Synchronous open(), returning self
+        """
+        if self.connected:
+            return self
+
+        # Run a private IOLoop until connected or error
+        old_loop, self.io_loop = self.io_loop, ioloop.IOLoop()
+        try:
+
+            outcome = {}
+            def callback(connection, error):
+                outcome['error'] = error
+                self.io_loop.stop()
+
+            self.open(callback)
+            self.io_loop.start()
+
+            # callback has been executed and loop stopped
+            # TODO: make sure these are deleted
+    #        del self._init_args
+    #        del self._init_kwargs
+
+        finally:
+            # Replace the private IOLoop with the default loop
+            self.io_loop = old_loop
+            self.delegate.pool_class = functools.partial(MotorPool, self.io_loop)
+            for pool in self._get_pools():
+                pool.io_loop = self.io_loop
+                pool.reset()
+
+        if outcome['error']:
+            raise outcome['error']
+
+        return self
+
+    def get_io_loop(self):
+        return self.io_loop
 
     def __getattr__(self, name):
         if not self.connected:
@@ -495,12 +537,37 @@ class MotorConnectionBase(MotorBase):
         if isinstance(name_or_database, MotorDatabase):
             name_or_database = name_or_database.delegate.name
 
-        async_method = asynchronize(self.delegate.drop_database, False, True)
+        async_method = asynchronize(
+            self.io_loop, self.delegate.drop_database, False, True)
         async_method(name_or_database, callback=callback)
 
     @property
     def connected(self):
         return self.delegate is not None
+
+    def _connect(self, callback, loop):
+        # Run on child greenlet
+        # TODO: can this use asynchronize()?
+
+        check_callable(callback, False)
+        error = None
+        try:
+            kw = self._init_kwargs
+            kw['auto_start_request'] = False
+            kw['_pool_class'] = functools.partial(MotorPool, loop)
+            self.delegate = self._new_delegate(*self._init_args, **kw)
+
+            del self._init_args
+            del self._init_kwargs
+        except Exception, e:
+            error = e
+
+        if callback:
+            # Schedule callback to be executed on main greenlet, with
+            # (self, None) if no error, else (None, error)
+            loop.add_callback(
+                functools.partial(
+                    callback, None if error else self, error))
 
 
 class MotorConnection(MotorConnectionBase):
@@ -524,8 +591,6 @@ class MotorConnection(MotorConnectionBase):
         self.admin.current_op(callback=is_locked)
 
     def _new_delegate(self, *args, **kwargs):
-        kwargs['auto_start_request'] = False
-        kwargs['_pool_class'] = MotorPool
         return pymongo.connection.Connection(*args, **kwargs)
 
     def _get_pools(self):
@@ -541,8 +606,6 @@ class MotorReplicaSetConnection(MotorConnectionBase):
     seeds                         = ReadOnlyDelegateProperty()
 
     def _new_delegate(self, *args, **kwargs):
-        kwargs['auto_start_request'] = False
-        kwargs['_pool_class'] = MotorPool
         return pymongo.replica_set_connection.ReplicaSetConnection(
             *args, **kwargs)
 
@@ -556,10 +619,14 @@ class MotorReplicaSetConnection(MotorConnectionBase):
         return pools
 
 # TODO: doc that this can take MotorConnections or PyMongo Connections
+# TODO: verify & test this w/ configurable IOLoop
 class MotorMasterSlaveConnection(MotorConnectionBase):
     close_cursor = ReadOnlyDelegateProperty()
 
     def _new_delegate(self, master, slaves, *args, **kwargs):
+        # For master connection and each slave connection, if they're
+        # MotorConnections unwrap them before passing to PyMongo
+        # MasterSlaveConnection
         if isinstance(master, MotorConnection):
             master = master.delegate
 
@@ -573,15 +640,17 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
     def master(self):
         motor_master = MotorConnection()
         motor_master.delegate = self.delegate.master
+        motor_master.io_loop = self.io_loop
         return motor_master
 
     @property
     def slaves(self):
         motor_slaves = []
         for slave in self.delegate.slaves:
-            motor_connection = MotorConnection()
-            motor_connection.delegate = slave
-            motor_slaves.append(motor_connection)
+            motor_slave = MotorConnection()
+            motor_slave.delegate = slave
+            motor_slave.io_loop = self.io_loop
+            motor_slaves.append(motor_slave)
 
         return motor_slaves
 
@@ -678,7 +747,8 @@ class MotorDatabase(MotorBase):
             name = name.delegate.name
 
         sync_method = self.delegate.drop_collection
-        async_method = asynchronize(sync_method, False, False)
+        async_method = asynchronize(
+            self.get_io_loop(), sync_method, False, False)
         async_method(name, callback=callback)
 
     # TODO: doc why we need to override this, refactor
@@ -691,7 +761,7 @@ class MotorDatabase(MotorBase):
             name = name.delegate.name
 
         sync_method = self.delegate.validate_collection
-        async_method = asynchronize(sync_method, False, True)
+        async_method = asynchronize(self.get_io_loop(), sync_method, False, True)
         async_method(name, callback=callback)
 
     # TODO: test that this raises an error if collection exists in Motor, and
@@ -706,7 +776,7 @@ class MotorDatabase(MotorBase):
             del kwargs['callback']
 
         sync_method = self.delegate.create_collection
-        async_method = asynchronize(sync_method, False, False)
+        async_method = asynchronize(self.get_io_loop(), sync_method, False, False)
 
         def cb(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
@@ -724,6 +794,9 @@ class MotorDatabase(MotorBase):
                 manipulator.database = db.delegate
 
         self.delegate.add_son_manipulator(manipulator)
+
+    def get_io_loop(self):
+        return self.connection.get_io_loop()
 
 
 class MotorCollection(MotorBase):
@@ -772,18 +845,19 @@ class MotorCollection(MotorBase):
         Get a MotorCursor.
         """
         if 'callback' in kwargs:
+            # TODO: is ConfigurationError the right exception? Not
+            #   OperationFailure?
             raise pymongo.errors.ConfigurationError(
                 "Pass a callback to next, each, to_list, count, or tail, not"
                 " to find"
             )
 
         cursor = self.delegate.find(*args, **kwargs)
-        return MotorCursor(cursor)
+        return MotorCursor(cursor, self)
 
     def map_reduce(self, *args, **kwargs):
-        # We need to override map_reduce specially, rather than simply
-        # include it in async_ops, because we have to wrap the Collection it
-        # returns in a MotorCollection.
+        # We need to override map_reduce specially because we have to wrap the
+        # Collection it returns in a MotorCollection.
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
@@ -796,8 +870,11 @@ class MotorCollection(MotorBase):
             callback(result, error)
 
         sync_method = self.delegate.map_reduce
-        async_mr = asynchronize(sync_method, False, True)
+        async_mr = asynchronize(self.get_io_loop(), sync_method, False, True)
         async_mr(*args, callback=map_reduce_callback, **kwargs)
+
+    def get_io_loop(self):
+        return self.database.get_io_loop()
 
 
 class MotorCursorChainingMethod(DelegateProperty):
@@ -821,7 +898,6 @@ class MotorCursor(MotorBase):
     next                        = Async(has_safe_arg=False, cb_required=True)
     __exit__                    = Async(has_safe_arg=False, cb_required=True)
 
-    # TODO: document that we don't support cursor.collection property
     slave_okay                  = ReadOnlyDelegateProperty()
     alive                       = ReadOnlyDelegateProperty()
     cursor_id                   = ReadOnlyDelegateProperty()
@@ -837,11 +913,23 @@ class MotorCursor(MotorBase):
     where                       = MotorCursorChainingMethod()
     __enter__                   = MotorCursorChainingMethod()
 
-    def __init__(self, cursor):
+    def __init__(self, cursor, collection):
         """
-        @param cursor:  Synchronous pymongo Cursor
+        @param cursor:      Synchronous pymongo Cursor
+        @param collection:  MotorCollection
         """
+        if not isinstance(cursor, pymongo.cursor.Cursor):
+            raise TypeError(
+                "cursor must be instance of pymongo.cursor.Cursor, not %s" % (
+                repr(cursor)))
+
+        if not isinstance(collection, MotorCollection):
+            raise TypeError(
+                "collection must be instance of MotorCollection, not %s" % (
+                repr(collection)))
+
         self.delegate = cursor
+        self.collection = collection
         self.started = False
 
     def _get_more(self, callback):
@@ -857,7 +945,8 @@ class MotorCursor(MotorBase):
             )
 
         self.started = True
-        async_refresh = asynchronize(self.delegate._refresh, False, True)
+        async_refresh = asynchronize(
+            self.get_io_loop(), self.delegate._refresh, False, True)
         async_refresh(callback=callback)
 
     def next(self, callback):
@@ -871,7 +960,7 @@ class MotorCursor(MotorBase):
         @param callback: function taking (document, error)
         """
         check_callable(callback, required=True)
-        add_callback = ioloop.IOLoop.instance().add_callback
+        add_callback = self.get_io_loop().add_callback
 
         # TODO: simplify, review, comment
         if self.buffer_size > 0:
@@ -881,6 +970,9 @@ class MotorCursor(MotorBase):
                 # Special case: limit is 0.
                 # TODO: verify limit 0 is tested.
                 add_callback(functools.partial(callback, None, None))
+
+                # TODO: shouldn't this just be self.delegate.close(), not
+                # add_callback(self.close)?
                 add_callback(self.close)
                 return
 
@@ -908,7 +1000,7 @@ class MotorCursor(MotorBase):
         @param callback: function taking (document, error)
         """
         check_callable(callback, required=True)
-        add_callback = ioloop.IOLoop.instance().add_callback
+        add_callback = self.get_io_loop().add_callback
 
         def next_callback(doc, error):
             if error:
@@ -952,7 +1044,7 @@ class MotorCursor(MotorBase):
         self.each(for_each)
 
     def clone(self):
-        return MotorCursor(self.delegate.clone())
+        return MotorCursor(self.delegate.clone(), self.collection)
 
     def close(self):
         """Explicitly close this cursor.
@@ -974,8 +1066,10 @@ class MotorCursor(MotorBase):
         # TODO: test dropping a collection while tailing it
         # TODO: test tailing collection that isn't empty at first
         check_callable(callback, True)
-        add_callback = ioloop.IOLoop.instance().add_callback
-        add_timeout = ioloop.IOLoop.instance().add_timeout
+
+        loop = self.get_io_loop()
+        add_callback = loop.add_callback
+        add_timeout = loop.add_timeout
 
         cursor = self.clone()
 
@@ -1023,6 +1117,9 @@ class MotorCursor(MotorBase):
         # Start tailing
         cursor.each(inner_callback)
 
+    def get_io_loop(self):
+        return self.collection.get_io_loop()
+
     @property
     def buffer_size(self):
         # TODO: expose so we don't have to use double-underscore hack
@@ -1035,10 +1132,10 @@ class MotorCursor(MotorBase):
         # TODO: doctest
         # TODO: test this is an error if tailable
         if isinstance(index, slice):
-             return MotorCursor(self.delegate[index])
+             return MotorCursor(self.delegate[index], self.collection)
         else:
             if not isinstance(index, (int, long)):
-                raise TypeError("index %r cannot be applied to Cursor "
+                raise TypeError("index %r cannot be applied to MotorCursor "
                                 "instances" % index)
             # Get one document, force hard limit of 1 so server closes cursor
             # immediately

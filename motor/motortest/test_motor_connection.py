@@ -57,6 +57,75 @@ class MotorConnectionTest(MotorTest):
         self.check_optional_callback(cx.open)
 
     @async_test_engine()
+    def test_open_sync(self):
+        loop = ioloop.IOLoop.instance()
+        cx = motor.MotorConnection(host, port)
+        self.assertFalse(cx.connected)
+
+        # open_sync() creates a special IOLoop just to run the connection
+        # code to completion
+        self.assertEqual(cx, cx.open_sync())
+        self.assertTrue(cx.connected)
+
+        # IOLoop was restored?
+        self.assertEqual(loop, cx.io_loop)
+
+        # Really connected?
+        result = yield motor.Op(cx.admin.command, "buildinfo")
+        self.assertEqual(int, type(result['bits']))
+
+        yield motor.Op(cx.test.test_collection.insert,
+            {'_id': 'test_open_sync'})
+        doc = yield motor.Op(
+            cx.test.test_collection.find({'_id': 'test_open_sync'}).next)
+        self.assertEqual('test_open_sync', doc['_id'])
+
+    def test_open_sync_custom_io_loop(self):
+        # Check that we can create a MotorConnection with a custom IOLoop, then
+        # call open_sync(), which uses a new loop, and the custom loop is
+        # restored.
+        loop = ioloop.IOLoop()
+        cx = motor.MotorConnection(host, port, io_loop=loop)
+        self.assertEqual(cx, cx.open_sync())
+        self.assertTrue(cx.connected)
+
+        # Custom loop restored?
+        self.assertEqual(loop, cx.io_loop)
+
+        @async_test_engine(io_loop=loop)
+        def test(self):
+            # Custom loop works?
+            yield AssertEqual(
+                {'_id': 17, 's': hex(17)},
+                cx.test.test_collection.find({'_id': 17}).next)
+
+            yield AssertEqual(
+                {'_id': 37, 's': hex(37)},
+                cx.test.test_collection.find({'_id': 37}).next)
+
+        test(self)
+
+    def test_custom_io_loop(self):
+        self.assertRaises(
+            TypeError,
+            lambda: motor.MotorConnection(host, port, io_loop='foo')
+        )
+
+        loop = ioloop.IOLoop()
+
+        @async_test_engine(io_loop=loop)
+        def test(self):
+            # Make sure we can do async things with the custom loop
+            cx = motor.MotorConnection(host, port, io_loop=loop)
+            yield AssertEqual(cx, cx.open)
+            self.assertTrue(cx.connected)
+            doc = yield motor.Op(
+                cx.test.test_collection.find({'_id': 17}).next)
+            self.assertEqual({'_id': 17, 's': hex(17)}, doc)
+
+        test(self)
+
+    @async_test_engine()
     def test_copy_db(self):
         cx = self.motor_connection(host, port)
         self.assertFalse(cx.in_request())
@@ -431,6 +500,7 @@ class MotorConnectionTest(MotorTest):
         self.assertEqual(c.max_pool_size, 100)
 
     def test_pool_request(self):
+        # TODO: rewrite with async_test_engine, this is ridiculous
         # 1. Create a connection
         # 2. Get two sockets while keeping refs to both, check they're different
         # 3. Dereference both sockets, check they're reclaimed by pool
@@ -448,8 +518,8 @@ class MotorConnectionTest(MotorTest):
         cx_pool = cx.delegate._Connection__pool
         loop = ioloop.IOLoop.instance()
 
-        # Connection has needed one socket so far to call isMaster
-        self.assertEqual(1, len(cx_pool.sockets))
+        # Connection has reset its pools after open_sync()
+        self.assertEqual(0, len(cx_pool.sockets))
         self.assertFalse(cx_pool.in_request())
 
         def get_socket():
@@ -459,7 +529,7 @@ class MotorConnectionTest(MotorTest):
             # Connection so we have to emulate its call.
             return cx_pool.get_socket((host, port))
 
-        get_socket = motor.asynchronize(get_socket, False, True)
+        get_socket = motor.asynchronize(loop, get_socket, False, True)
 
         def socket_ids():
             return [sock_info.sock.uuid for sock_info in cx_pool.sockets]

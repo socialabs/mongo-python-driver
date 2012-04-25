@@ -58,7 +58,7 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 #    this can yield false passes because the function never gets to its asserts
 
 
-def async_test_engine(timeout_sec=5):
+def async_test_engine(timeout_sec=5, io_loop=None):
     if not isinstance(timeout_sec, int) and not isinstance(timeout_sec, float):
         raise TypeError(
             "Expected int or float, got %s\n"
@@ -77,7 +77,7 @@ def async_test_engine(timeout_sec=5):
                 self.timeout = timeout
 
             def run(self):
-                loop = ioloop.IOLoop.instance()
+                loop = io_loop or ioloop.IOLoop.instance()
                 try:
                     super(AsyncTestRunner, self).run()
                 except Exception:
@@ -91,7 +91,8 @@ def async_test_engine(timeout_sec=5):
 
         @functools.wraps(func)
         def _async_test(self):
-            loop = ioloop.IOLoop.instance()
+            loop = io_loop or ioloop.IOLoop.instance()
+            assert not loop._stopped
 
             def on_timeout():
                 loop.stop()
@@ -103,12 +104,14 @@ def async_test_engine(timeout_sec=5):
             assert isinstance(gen, types.GeneratorType), (
                 "%s should be a generator, include a yield "
                 "statement" % func
-                )
+            )
 
             runner = AsyncTestRunner(gen, timeout)
             runner.run()
             loop.start()
             if not runner.finished:
+                # Something stopped the loop before func could finish or throw
+                # an exception.
                 raise Exception('%s did not finish' % func)
 
         return _async_test
@@ -190,18 +193,7 @@ class MotorTest(
         return output.get('cursors', {}).get('totalOpen')
 
     def motor_connection(self, host, port, *args, **kwargs):
-        cx = motor.MotorConnection(host, port, *args, **kwargs)
-        loop = ioloop.IOLoop.instance()
-
-        def connected(connection, error):
-            loop.stop() # So we can exit motor_connection()
-            if error:
-                raise error
-
-        cx.open(connected)
-        loop.start()
-        assert cx.connected, "Couldn't connect to MongoDB"
-        return cx
+        return motor.MotorConnection(host, port, *args, **kwargs).open_sync()
 
     def wait_for_cursors(self):
         """
