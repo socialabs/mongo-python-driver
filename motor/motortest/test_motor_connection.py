@@ -22,6 +22,7 @@ from tornado import ioloop, stack_context
 
 import motor
 import pymongo
+import pymongo.pool
 
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual)
@@ -514,30 +515,33 @@ class MotorConnectionTest(MotorTest):
 
         # 1.
         motor.socket_uuid = True
-        cx = self.motor_connection(host, port, max_pool_size=17)
-        cx_pool = cx.delegate._Connection__pool
+        cx = motor.MotorConnection(host, port, max_pool_size=17).open_sync()
+
+        cx_pool = [None]
         loop = ioloop.IOLoop.instance()
 
-        # Connection has reset its pools after open_sync()
-        self.assertEqual(0, len(cx_pool.sockets))
-        self.assertFalse(cx_pool.in_request())
-
         def get_socket():
-            # Weirdness in PyMongo, which I hope will be fixed soon: Connection
-            # does pool.get_socket(pair), while ReplicaSetConnection initializes
-            # pool with pair and just does pool.get_socket(). We're using
-            # Connection so we have to emulate its call.
-            return cx_pool.get_socket((host, port))
+            return cx_pool[0].get_socket((host, port))
 
         get_socket = motor.asynchronize(loop, get_socket, False, True)
 
         def socket_ids():
-            return [sock_info.sock.uuid for sock_info in cx_pool.sockets]
+            return [sock_info.sock.uuid for sock_info in cx_pool[0].sockets]
 
         # We need a place to keep refs to sockets so they're not reclaimed
         # before we're ready
         socks = {}
         results = set()
+
+        def opened(connection, error):
+            self.assertEqual(None, error)
+            cx_pool[0] = cx.delegate._Connection__pool
+
+            self.assertEqual(0, len(cx_pool[0].sockets))
+            self.assertFalse(cx_pool[0].in_request())
+
+            get_socket(callback=got_sock0)
+            get_socket(callback=got_sock1)
 
         # 2.
         def got_sock0(sock, error):
@@ -560,8 +564,16 @@ class MotorConnectionTest(MotorTest):
         def check_socks_different_and_reclaimed0():
             self.assertNotEqual(socks[0], socks[1])
             id_0, id_1 = socks[0].sock.uuid, socks[1].sock.uuid
-            del socks[0]
-            del socks[1]
+
+            # TODO: why is exc_clear() necessary for socks[0] to be reclaimed?
+            # It seems that sys.exc_traceback refers to a frame that's at the
+            # end of BasePool.get_socket(), which has a reference to socks[0].
+            # Perhaps I don't understand the semantics of exc_traceback. Only
+            # tested with Python 2.7.
+            import sys
+            sys.exc_clear()
+
+            socks.clear()
             self.assertTrue(id_0 in socket_ids())
             self.assertTrue(id_1 in socket_ids())
 
@@ -578,7 +590,7 @@ class MotorConnectionTest(MotorTest):
         def got_sock2(sock, error):
             # Get request socket
             self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(cx_pool[0].in_request())
             socks[2] = sock
             sock2_id[0] = sock.sock.uuid
             if 3 in socks:
@@ -594,7 +606,7 @@ class MotorConnectionTest(MotorTest):
         def got_sock3(sock, error):
             # Get NON-request socket
             self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            self.assertFalse(cx_pool.in_request())
+            self.assertFalse(cx_pool[0].in_request())
             socks[3] = sock
             if 2 in socks:
                 # got_sock2 has also run
@@ -618,7 +630,7 @@ class MotorConnectionTest(MotorTest):
         def check_invalid_op(result, error):
             self.assertEqual(None, result)
             self.assertTrue(isinstance(error, InvalidOperation))
-            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(cx_pool[0].in_request())
             results.add('step6')
 
             # 7.
@@ -629,7 +641,7 @@ class MotorConnectionTest(MotorTest):
                 loop.add_callback(check_request_sock_reclaimed)
 
         def check_request_sock_reclaimed():
-            self.assertFalse(cx_pool.in_request())
+            self.assertFalse(cx_pool[0].in_request())
 
             # TODO: I can't figure out how to force GC reliably here
 #            self.assertTrue(
@@ -645,7 +657,7 @@ class MotorConnectionTest(MotorTest):
                 get_socket(callback=got_sock5)
 
         def got_sock4(sock, error):
-            self.assertFalse(cx_pool.in_request())
+            self.assertFalse(cx_pool[0].in_request())
             self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
             socks[4] = sock
             if 5 in socks:
@@ -654,7 +666,7 @@ class MotorConnectionTest(MotorTest):
 
         sock5_id = [None]
         def got_sock5(sock, error):
-            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(cx_pool[0].in_request())
             self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
 
             socks[5] = sock
@@ -685,14 +697,13 @@ class MotorConnectionTest(MotorTest):
             results.add('step8')
 
         def got_sock6(sock, error):
-            self.assertTrue(cx_pool.in_request())
+            self.assertTrue(cx_pool[0].in_request())
             self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
             self.assertEqual(sock5_id[0], sock.sock.uuid)
             results.add('step9')
 
         # Knock over the first domino.
-        get_socket(callback=got_sock0)
-        get_socket(callback=got_sock1)
+        cx.open(opened)
 
         for step in (3, 5, 6, 7, 8, 9):
             self.assertEventuallyEqual(

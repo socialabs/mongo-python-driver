@@ -63,6 +63,7 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
 # TODO: document, smugly, that Motor has configurable IOLoops
+# TODO: since Tornado uses logging, so can we
 
 
 def check_callable(kallable, required=False):
@@ -109,9 +110,14 @@ def motor_sock_method(check_closed=False):
 
             if check_closed:
                 def closed():
+                    # TODO: test failed connection w/ timeout
+                    if timeout[0]:
+                        self.stream.io_loop.remove_timeout(timeout[0])
+
                     # There's no way to know what the error was, see
                     # https://groups.google.com/d/topic/python-tornado/3fq3mA9vmS0/discussion
                     child_gr.throw(socket.error("error"))
+
                 self.stream.set_close_callback(closed)
 
             method(self, *args, callback=callback, **kwargs)
@@ -307,9 +313,16 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
                 io_loop.add_callback(
                     functools.partial(callback, result, error)
                 )
+
+                # Break reference cycle
+                del result
             elif error:
+                del result
                 # TODO: correct?
                 raise error
+            else:
+                del result
+            pass
 
         # Start running the operation on a greenlet
         greenlet.greenlet(call_method).switch()
@@ -439,10 +452,31 @@ class MotorConnectionBase(MotorBase):
                     functools.partial(callback, self, None))
             return
 
+        def _connect():
+            # Run on child greenlet
+            check_callable(callback, False)
+            error = None
+            try:
+                kw = self._init_kwargs
+                kw['auto_start_request'] = False
+                kw['_pool_class'] = functools.partial(MotorPool, self.io_loop)
+                self.delegate = self._new_delegate(*self._init_args, **kw)
+
+                del self._init_args
+                del self._init_kwargs
+            except Exception, e:
+                error = e
+
+            if callback:
+                # Schedule callback to be executed on main greenlet, with
+                # (self, None) if no error, else (None, error)
+                self.io_loop.add_callback(
+                    functools.partial(
+                        callback, None if error else self, error))
+
         # Actually connect on a child greenlet
-        # TODO: move self._connect back into this method
-        connect = functools.partial(self._connect, callback, self.io_loop)
-        greenlet.greenlet(connect).switch()
+        gr = greenlet.greenlet(_connect)
+        gr.switch()
 
     def open_sync(self):
         """Synchronous open(), returning self
@@ -451,29 +485,33 @@ class MotorConnectionBase(MotorBase):
             return self
 
         # Run a private IOLoop until connected or error
-        old_loop, self.io_loop = self.io_loop, ioloop.IOLoop()
+        private_loop = ioloop.IOLoop()
+        standard_loop, self.io_loop = self.io_loop, private_loop
         try:
-
             outcome = {}
             def callback(connection, error):
                 outcome['error'] = error
                 self.io_loop.stop()
 
             self.open(callback)
+
+            # Returns once callback has been executed and loop stopped.
             self.io_loop.start()
-
-            # callback has been executed and loop stopped
-            # TODO: make sure these are deleted
-    #        del self._init_args
-    #        del self._init_kwargs
-
         finally:
             # Replace the private IOLoop with the default loop
-            self.io_loop = old_loop
-            self.delegate.pool_class = functools.partial(MotorPool, self.io_loop)
-            for pool in self._get_pools():
-                pool.io_loop = self.io_loop
-                pool.reset()
+            self.io_loop = standard_loop
+            if self.delegate:
+                self.delegate.pool_class = functools.partial(
+                    MotorPool, self.io_loop)
+
+                self.delegate.pool = self.delegate.pool_class(None, 17, None, None, False)
+
+                for pool in self._get_pools():
+                    pool.io_loop = self.io_loop
+                    pool.reset()
+
+            # Clean up file descriptors.
+            private_loop.close()
 
         if outcome['error']:
             raise outcome['error']
@@ -544,30 +582,6 @@ class MotorConnectionBase(MotorBase):
     @property
     def connected(self):
         return self.delegate is not None
-
-    def _connect(self, callback, loop):
-        # Run on child greenlet
-        # TODO: can this use asynchronize()?
-
-        check_callable(callback, False)
-        error = None
-        try:
-            kw = self._init_kwargs
-            kw['auto_start_request'] = False
-            kw['_pool_class'] = functools.partial(MotorPool, loop)
-            self.delegate = self._new_delegate(*self._init_args, **kw)
-
-            del self._init_args
-            del self._init_kwargs
-        except Exception, e:
-            error = e
-
-        if callback:
-            # Schedule callback to be executed on main greenlet, with
-            # (self, None) if no error, else (None, error)
-            loop.add_callback(
-                functools.partial(
-                    callback, None if error else self, error))
 
 
 class MotorConnection(MotorConnectionBase):
