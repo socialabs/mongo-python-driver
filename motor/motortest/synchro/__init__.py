@@ -39,16 +39,10 @@ from pymongo import (
     ALL, helpers, OFF, SLOW_ONLY, pool
 )
 
-from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool
-from pymongo.replica_set_connection import _partition_node
+GreenletPool = None
 
-__all__ = [
-    'ASCENDING', 'DESCENDING', 'GEO2D', 'GEOHAYSTACK', 'ReadPreference',
-    'Connection', 'ReplicaSetConnection', 'Database', 'Collection',
-    'Cursor', 'ALL', 'helpers', 'OFF', 'SLOW_ONLY', '_partition_node',
-    'NO_REQUEST', 'NO_SOCKET_YET', 'SocketInfo', 'pool', 'Pool',
-    'MasterSlaveConnection',
-]
+from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool, _closed
+from pymongo.replica_set_connection import _partition_node
 
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
 

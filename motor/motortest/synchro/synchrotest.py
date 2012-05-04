@@ -41,10 +41,10 @@ from motor.motortest.puritanical import PuritanicalIOLoop
 # TODO: test for Motor all the things test_pooling tests
 
 excluded_modules = [
-    'test.test_gevent',
     'test.test_threads',
     'test.test_threads_replica_set_connection',
     'test.test_pooling',
+    'test.test_pooling_gevent',
     'test.test_paired',
 
     # TODO:
