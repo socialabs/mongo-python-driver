@@ -15,9 +15,11 @@
 """Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import functools
+import logging
 import socket
 import time
 import uuid
+import weakref
 
 from tornado import ioloop, iostream, gen, stack_context
 import greenlet
@@ -28,7 +30,6 @@ import pymongo.database
 import pymongo.collection
 import pymongo.son_manipulator
 import pymongo.errors
-from pymongo import common
 from pymongo.pool import BasePool, NO_REQUEST
 
 # Hook for unittesting; if true all MotorSockets get unique ids
@@ -78,7 +79,8 @@ def motor_sock_method(check_closed=False):
         @functools.wraps(method)
         def _motor_sock_method(self, *args, **kwargs):
             child_gr = greenlet.getcurrent()
-            assert child_gr.parent, "Should be on child greenlet"
+            main = child_gr.parent
+            assert main, "Should be on child greenlet"
 
             # We need to alter this value in inner functions, hence the list
             timeout = [None]
@@ -99,7 +101,8 @@ def motor_sock_method(check_closed=False):
             def callback(result=None, error=None):
                 self.stream.set_close_callback(None)
                 if timeout[0] or not self_timeout:
-                    # We didn't time out
+                    # We didn't time out - clear the timeout if any, and resume
+                    # processing on child greenlet
                     if timeout[0]:
                         self.stream.io_loop.remove_timeout(timeout[0])
 
@@ -110,6 +113,7 @@ def motor_sock_method(check_closed=False):
 
             if check_closed:
                 def closed():
+                    # Run on main greenlet
                     # TODO: test failed connection w/ timeout
                     if timeout[0]:
                         self.stream.io_loop.remove_timeout(timeout[0])
@@ -120,10 +124,18 @@ def motor_sock_method(check_closed=False):
 
                 self.stream.set_close_callback(closed)
 
-            method(self, *args, callback=callback, **kwargs)
-
-            # Resume main greenlet
-            return child_gr.parent.switch()
+            try:
+                method(self, *args, callback=callback, **kwargs)
+                return main.switch()
+            except socket.error:
+                raise
+            except IOError, e:
+                # If IOStream raises generic IOError (e.g., if operation
+                # attempted on closed IOStream), then substitute socket.error,
+                # since socket.error is what PyMongo's built to handle. For
+                # example, PyMongo will catch socket.error, close the socket,
+                # and raise AutoReconnect.
+                raise socket.error(str(e))
 
         return _motor_sock_method
     return wrap
@@ -313,16 +325,8 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
                 io_loop.add_callback(
                     functools.partial(callback, result, error)
                 )
-
-                # Break reference cycle
-                del result
             elif error:
-                del result
-                # TODO: correct?
                 raise error
-            else:
-                del result
-            pass
 
         # Start running the operation on a greenlet
         greenlet.greenlet(call_method).switch()
@@ -398,6 +402,7 @@ class MotorBase(object):
     get_lasterror_options       = ReadWriteDelegateProperty()
     set_lasterror_options       = ReadWriteDelegateProperty()
     unset_lasterror_options     = ReadWriteDelegateProperty()
+    read_preference             = ReadWriteDelegateProperty()
     name                        = ReadOnlyDelegateProperty()
 
     def __repr__(self):
@@ -616,8 +621,15 @@ class MotorReplicaSetConnection(MotorConnectionBase):
     secondaries                   = ReadOnlyDelegateProperty()
     arbiters                      = ReadOnlyDelegateProperty()
     hosts                         = ReadOnlyDelegateProperty()
-    read_preference               = ReadOnlyDelegateProperty()
     seeds                         = ReadOnlyDelegateProperty()
+
+    def __init__(self, *args, **kwargs):
+        super(MotorReplicaSetConnection, self).__init__(*args, **kwargs)
+
+        # This _monitor_class will be passed to PyMongo's
+        # ReplicaSetConnection when we create it.
+        self._init_kwargs['_monitor_class'] = functools.partial(
+            MotorReplicaSetMonitor, self.io_loop)
 
     def _new_delegate(self, *args, **kwargs):
         return pymongo.replica_set_connection.ReplicaSetConnection(
@@ -631,6 +643,44 @@ class MotorReplicaSetConnection(MotorConnectionBase):
                 pools.append(mongo['pool'])
 
         return pools
+
+
+# PyMongo uses a background thread to regularly inspect the replica set and
+# monitor it for changes. In Motor, use a periodic callback on the IOLoop to
+# monitor the set.
+class MotorReplicaSetMonitor(object):
+    def __init__(self, io_loop, obj, interval=5):
+        assert isinstance(
+            obj, pymongo.replica_set_connection.ReplicaSetConnection)
+        assert isinstance(io_loop, ioloop.IOLoop)
+
+        self.ref = weakref.ref(obj)
+        self.io_loop = io_loop
+        self.interval = interval
+        self.async_refresh = asynchronize(
+            self.io_loop,
+            self.refresh,
+            has_safe_arg=False,
+            callback_required=False)
+
+    def refresh(self):
+        # Dereference the weakref to a ReplicaSetConnection. If it's no longer
+        # valid, quit.
+        rsc = self.ref()
+        if rsc:
+            try:
+                rsc.refresh()
+            except Exception:
+                logging.exception("Refreshing replica set configuration")
+
+            self.io_loop.add_timeout(
+                time.time() + self.interval, self.async_refresh)
+
+    def start(self):
+        """Refresh loop to notice changes in replica set configuration
+        """
+        self.io_loop.add_callback(self.async_refresh)
+
 
 # TODO: doc that this can take MotorConnections or PyMongo Connections
 # TODO: verify & test this w/ configurable IOLoop

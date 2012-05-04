@@ -22,15 +22,19 @@ from tornado import ioloop, iostream
 
 import motor
 from motor.motortest import (
-    MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
+    MotorTest, async_test_engine, AssertRaises)
 import pymongo.errors
+from test.test_replica_set_connection import TestConnectionReplicaSetBase
 
 
-class MotorReplicaSetTest(MotorTest):
+class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
+    def setUp(self):
+        # TODO: Make TestConnectionReplicaSetBase cooperative
+        TestConnectionReplicaSetBase.setUp(self)
+        MotorTest.setUp(self)
+
     @async_test_engine()
     def test_auto_reconnect_exception_when_read_preference_is_secondary(self):
-        # TODO: find out the repl set name and so on the same way PyMongo's RSC
-        # test does
         cx = motor.MotorReplicaSetConnection(
             'localhost:27017', replicaSet='repl0')
 

@@ -59,10 +59,10 @@ class MotorCollectionTest(MotorTest):
         # with _id 0 through 13, in batches of 5: 0-4, 5-9, 10-13.
         #
         # 3. For each document, check if the cursor has been closed. I expect
-        # it to remain open until we've retrieved doc with _id 10. Oddly, Mongo
-        # doesn't close the cursor and return cursor_id 0 if the final batch
-        # exactly contains the last document -- the last batch size has to go
-        # one *past* the final document in order to close the cursor.
+        # it to remain open until we've retrieved doc with _id 10. Mongo doesn't
+        # close the cursor and return cursor_id 0 if the final batch exactly
+        # contains the last document -- the last batch size has to go one *past*
+        # the final document in order to close the cursor.
         connection = self.motor_connection(host, port)
 
         cursor = connection.test.test_collection.find(

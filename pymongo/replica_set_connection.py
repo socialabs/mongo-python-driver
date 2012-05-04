@@ -247,6 +247,7 @@ class ReplicaSetConnection(common.BaseObject):
             self.__seeds.update(uri_parser.split_hosts(host, port))
 
         self.pool_class = kwargs.pop('_pool_class', None)
+        monitor_class = kwargs.pop('_monitor_class', None)
 
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
@@ -288,7 +289,9 @@ class ReplicaSetConnection(common.BaseObject):
 
         self.refresh()
 
-        if self.__opts.get('use_greenlets', False):
+        if monitor_class:
+            monitor = monitor_class(self)
+        elif self.__opts.get('use_greenlets', False):
             monitor = GreenletMonitor(self)
         else:
             monitor = threading.Thread(target=self.__refresh_loop)
