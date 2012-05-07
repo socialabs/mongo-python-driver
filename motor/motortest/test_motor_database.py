@@ -15,6 +15,7 @@
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import unittest
+from tornado import gen
 
 import motor
 from motor.motortest import MotorTest, async_test_engine, host, port
@@ -75,6 +76,44 @@ class MotorDatabaseTest(MotorTest):
         self.assertEqual(b, result_b)
         self.assertEqual(b, result_c["another test"])
         self.assertEqual(c, result_c)
+
+    @async_test_engine()
+    def test_authenticate_and_request(self):
+        # Database.authenticate() needs to be in a request - check that it
+        # always runs in a request, and that it restores the request state
+        # (in or not in a request) properly when it's finished.
+        cx = self.motor_connection(host, port)
+        self.assertFalse(cx.in_request())
+        db = cx.pymongo_test
+
+        yield motor.Op(db.system.users.remove)
+        yield motor.Op(db.add_user, "mike", "password")
+        users = yield motor.Op(db.system.users.find().to_list)
+        self.assertTrue("mike" in [u['user'] for u in users])
+
+        for i in range(100):
+            db.authenticate(
+                "mike", "password", callback=(yield gen.Callback(i)))
+            self.assertFalse(cx.in_request())
+
+        authentication_results = yield gen.WaitAll(range(100))
+        self.assertTrue(all(authentication_results))
+
+        # Try again, authenticating while already in a request
+        for i in range(100):
+            with cx.start_request():
+                self.assertTrue(cx.in_request())
+                db.authenticate(
+                    "mike", "password", callback=(yield gen.Callback(i)))
+
+        authentication_results = yield gen.WaitAll(range(100))
+        self.assertTrue(all(authentication_results))
+
+        # just make sure there are no exceptions here
+        yield motor.Op(db.logout)
+        yield motor.Op(db.remove_user, "mike")
+        users = yield motor.Op(db.system.users.find().to_list)
+        self.assertFalse("mike" in [u['user'] for u in users])
 
 
 if __name__ == '__main__':

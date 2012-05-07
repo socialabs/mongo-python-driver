@@ -18,7 +18,7 @@ import datetime
 import time
 import unittest
 
-from tornado import ioloop, stack_context
+from tornado import ioloop, stack_context, gen
 
 import motor
 import pymongo
@@ -126,84 +126,153 @@ class MotorConnectionTest(MotorTest):
 
         test(self)
 
-    @async_test_engine()
-    def test_copy_db(self):
+    def test_copy_db_argument_checking(self):
         cx = self.motor_connection(host, port)
         self.assertFalse(cx.in_request())
 
+        self.assertRaises(TypeError, cx.copy_database, 4, "foo")
+        self.assertRaises(TypeError, cx.copy_database, "foo", 4)
+
+        self.assertRaises(
+            pymongo.errors.InvalidName, cx.copy_database, "foo", "$foo")
+
+    @async_test_engine(timeout_sec=30)
+    def test_copy_db(self):
+        # 1. Drop old test DBs
+        # 2. Copy a test DB 20 times at once (we need to do it many times at
+        #   once to make sure Motor's internal start_request works)
+        # 3. Check that it worked
+        # 4. Copy a test DB in a request
+        # 5. Create a username and password
+        # 6. Copy a database using name and password
+        # 7. Same, in a request
+        is_ms = server_is_master_with_slave(self.sync_cx)
+        ncopies = 20
+        nrange = list(range(ncopies))
+        test_db_names = ['pymongo_test%s' % i for i in nrange]
+
+        def check_copydb_results(results):
+            for (result, error), kwargs in results:
+                self.assertEqual(None, error,
+                    "Couldn't copy pymongo_test: %s" % repr(error))
+                self.assertEqual({'ok': 1}, result,
+                    "Couldn't copy pymongo_test: %s" % repr(result))
+
+        cx = self.motor_connection(host, port)
+        self.assertFalse(cx.in_request())
+        yield motor.Op(cx.drop_database, 'pymongo_test')
+        for test_db_name in test_db_names:
+            yield motor.Op(cx.drop_database, test_db_name)
+
+        yield motor.Op(cx.pymongo_test.test.insert, {"foo": "bar"})
+        for test_db_name in test_db_names:
+            cx.copy_database("pymongo_test", test_db_name,
+                callback=(yield gen.Callback(key=test_db_name)))
+
+        results = yield gen.WaitAll(test_db_names)
+        check_copydb_results(results)
+
+        print 'all copied'
+
+        # copy_database() didn't accidentally stay in request
+        self.assertFalse(cx.in_request())
+        print 'copydb didn\'t stay in request'
+
+        # 3.
+        db_names = yield motor.Op(cx.database_names)
+        for test_db_name in test_db_names:
+            self.assertTrue(test_db_name in db_names)
+            result = yield motor.Op(cx[test_db_name].test.find_one)
+            self.assertEqual("bar", result["foo"])
+
+        for test_db_name in test_db_names:
+            yield motor.Op(cx.drop_database, test_db_name)
+
+        if not is_ms:
+            db_names = yield motor.Op(cx.database_names)
+            for test_db_name in test_db_names:
+                self.assertFalse(test_db_name in db_names)
+
+        # 4.
+        print 'test_copy_db starting request'
         with cx.start_request():
             self.assertTrue(cx.in_request())
-            yield AssertRaises(TypeError, cx.copy_database, 4, "foo")
-            yield AssertRaises(TypeError, cx.copy_database, "foo", 4)
+            print 'test_copy_db started request', motor.current_request
+            for test_db_name in test_db_names:
+                cx.copy_database("pymongo_test", test_db_name,
+                    callback=(yield gen.Callback(key=test_db_name)))
 
-            yield AssertRaises(
-                pymongo.errors.InvalidName, cx.copy_database, "foo", "$foo")
-
-            yield motor.Op(cx.pymongo_test.test.drop)
-            yield motor.Op(cx.drop_database, "pymongo_test1")
-            yield motor.Op(cx.drop_database, "pymongo_test2")
-
-            yield motor.Op(cx.pymongo_test.test.insert, {"foo": "bar"})
-
-            # Due to SERVER-2329, databases may not disappear from a master in a
-            # master-slave pair
-            if not server_is_master_with_slave(self.sync_cx):
-                db_names = yield motor.Op(cx.database_names)
-                self.assertFalse("pymongo_test1" in db_names)
-                self.assertFalse("pymongo_test2" in db_names)
-
-            yield motor.Op(cx.copy_database, "pymongo_test", "pymongo_test1")
-
-            # copy_database() didn't accidentally end the request
+            results = yield gen.WaitAll(test_db_names)
+            check_copydb_results(results)
             self.assertTrue(cx.in_request())
 
-            db_names = yield motor.Op(cx.database_names)
-            self.assertTrue("pymongo_test1" in db_names)
-            result = yield motor.Op(cx.pymongo_test1.test.find_one)
+        # Now the request is over.
+        self.assertFalse(cx.in_request())
+        for test_db_name in test_db_names:
+            self.assertTrue(test_db_name in db_names)
+            result = yield motor.Op(cx[test_db_name].test.find_one)
             self.assertEqual("bar", result["foo"])
 
-        self.assertFalse(cx.in_request())
-        yield motor.Op(cx.copy_database, "pymongo_test", "pymongo_test2",
-                        "%s:%d" % (host, port))
-        # copy_database() didn't accidentally restart the request
-        self.assertFalse(cx.in_request())
+        for test_db_name in test_db_names:
+            yield motor.Op(cx.drop_database, test_db_name)
+
+        # 5.
+        yield motor.Op(cx.pymongo_test.add_user, "mike", "password")
+
+        yield AssertRaises(
+            pymongo.errors.OperationFailure,
+            cx.copy_database, "pymongo_test", "pymongo_test1",
+            username="foo", password="bar")
+
+        yield AssertRaises(
+            pymongo.errors.OperationFailure, cx.copy_database,
+            "pymongo_test", "pymongo_test1",
+            username="mike", password="bar")
+
+        # 6.
+        for i in range(ncopies):
+            cx.copy_database(
+                "pymongo_test", "pymongo_test%s" % i,
+                username="mike", password="password",
+                callback=(yield gen.Callback(i)))
+
+        results = yield gen.WaitAll(range(ncopies))
+        check_copydb_results(results)
 
         db_names = yield motor.Op(cx.database_names)
-        self.assertTrue("pymongo_test2" in db_names)
-        result = yield motor.Op(cx.pymongo_test2.test.find_one)
-        self.assertEqual("bar", result["foo"])
+        for i in range(ncopies):
+            db_name = "pymongo_test%s" % i
+            self.assertTrue(db_name in db_names,
+                "Couldn't copy pymongo_test to %s" % db_name)
+            result = yield motor.Op(cx[db_name].test.find_one)
+            self.assertEqual("bar", result["foo"])
+            yield motor.Op(cx.drop_database, db_name)
 
-        if version.at_least(self.sync_cx, (1, 3, 3, 1)):
-            yield motor.Op(cx.drop_database, "pymongo_test1")
+        # 7.
+        self.assertFalse(cx.in_request())
+        with cx.start_request():
+            self.assertTrue(cx.in_request())
+            for i in range(ncopies):
+                cx.copy_database(
+                    "pymongo_test", "pymongo_test%s" % i,
+                    username="mike", password="password",
+                    callback=(yield gen.Callback(i)))
 
-            yield motor.Op(cx.pymongo_test.add_user, "mike", "password")
-
-            yield AssertRaises(
-                pymongo.errors.OperationFailure,
-                cx.copy_database, "pymongo_test", "pymongo_test1",
-                username="foo", password="bar")
-
-            if not server_is_master_with_slave(self.sync_cx):
-                db_names = yield motor.Op(cx.database_names)
-                self.assertFalse("pymongo_test1" in db_names)
-
-            yield AssertRaises(
-                pymongo.errors.OperationFailure, cx.copy_database,
-                "pymongo_test", "pymongo_test1",
-                username="mike", password="bar")
-
-            if not server_is_master_with_slave(self.sync_cx):
-                db_names = yield motor.Op(cx.database_names)
-                self.assertFalse("pymongo_test1" in db_names)
-
-            yield motor.Op(
-                cx.copy_database, "pymongo_test", "pymongo_test1",
-                username="mike", password="password")
+            results = yield gen.WaitAll(range(ncopies))
+            check_copydb_results(results)
 
             db_names = yield motor.Op(cx.database_names)
-            self.assertTrue("pymongo_test1" in db_names)
-            result = yield motor.Op(cx.pymongo_test1.test.find_one)
-            self.assertEqual("bar", result["foo"])
+            for i in range(ncopies):
+                db_name = "pymongo_test%s" % i
+                self.assertTrue(db_name in db_names,
+                    "Couldn't copy pymongo_test to %s" % db_name)
+                result = yield motor.Op(cx[db_name].test.find_one)
+                self.assertEqual("bar", result["foo"])
+                yield motor.Op(cx.drop_database, db_name)
+
+            self.assertTrue(cx.in_request())
+
+        self.assertFalse(cx.in_request())
 
     def test_get_last_error(self):
         # Create a unique index on 'x', insert the same value for x twice,

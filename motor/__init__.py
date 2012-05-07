@@ -31,6 +31,7 @@ import pymongo.collection
 import pymongo.son_manipulator
 import pymongo.errors
 from pymongo.pool import BasePool, NO_REQUEST
+from pymongo import helpers
 
 # Hook for unittesting; if true all MotorSockets get unique ids
 socket_uuid = False
@@ -274,6 +275,9 @@ class MotorPool(pymongo.pool.BasePool):
         super(MotorPool, self).return_socket(sock_info)
 
     def _set_request_state(self, sock_info):
+        if current_request is None:
+            print '_set_request_state %s: no current_request!' % sock_info
+        assert current_request is not None
         if sock_info == NO_REQUEST:
             self._current_request_to_sock.pop(current_request, None)
             self._request_socks_outstanding.discard(current_request)
@@ -281,7 +285,10 @@ class MotorPool(pymongo.pool.BasePool):
             self._current_request_to_sock[current_request] = sock_info
 
     def _get_request_state(self):
-        return self._current_request_to_sock.get(current_request, NO_REQUEST)
+        if current_request is None:
+            return NO_REQUEST
+        return self._current_request_to_sock.get(
+            current_request, NO_REQUEST)
 
     def _reset(self):
         self._current_request_to_sock.clear()
@@ -332,10 +339,6 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
         greenlet.greenlet(call_method).switch()
 
     return method
-
-
-current_request = None
-current_request_seq = 0
 
 
 class DelegateProperty(object):
@@ -412,13 +415,13 @@ class MotorBase(object):
 class MotorConnectionBase(MotorBase):
     server_info                 = Async(has_safe_arg=False, cb_required=False)
     database_names              = Async(has_safe_arg=False, cb_required=False)
-    copy_database               = Async(has_safe_arg=False, cb_required=True)
     close                       = ReadOnlyDelegateProperty()
     disconnect                  = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
     max_pool_size               = ReadOnlyDelegateProperty()
     in_request                  = ReadOnlyDelegateProperty()
     tz_aware                    = ReadOnlyDelegateProperty()
+    _cache_credentials          = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         # Store args and kwargs for when open() is called
@@ -539,12 +542,13 @@ class MotorConnectionBase(MotorBase):
     __getitem__ = __getattr__
 
     def start_request(self):
-        """Assigns a socket to the current Tornado StackContext. There is no
-           `end_request`: a request ends when there are no more pending
-           callbacks wrapped in this request's StackContext.
+        """Assigns a socket to the current Tornado StackContext. A request ends
+        when there are no more pending callbacks wrapped in this request's
+        StackContext.
 
-           Unlike a regular pymongo Connection, start_request() on a
-           MotorConnection *must* be used as a context manager:
+        Unlike a regular pymongo Connection, start_request() on a
+        MotorConnection *must* be used as a context manager:
+
         >>> connection = TorndadoConnection()
         >>> db = connection.test
         >>> def on_error(result, error):
@@ -563,17 +567,73 @@ class MotorConnectionBase(MotorBase):
         # TODO: this is so spaghetti & implicit & magic
         global current_request, current_request_seq
 
-        # TODO: overflow?
         current_request_seq += 1
-        current_request = current_request_seq
+        old_request, current_request = current_request, current_request_seq
         self.delegate.start_request()
-        return RequestContext(self._get_pools(), current_request)
+        current_request = old_request
+        return RequestContext(self._get_pools(), current_request_seq)
 
+    # TODO: doc, update docs on requests in general
     def end_request(self):
-        raise NotImplementedError(
-            "Motor does not support end_request(). See documentation for"
-            " MotorConnectionBase.start_request()."
-        )
+        return RequestContext(self._get_pools(), None)
+
+    # TODO: doc why we need to override this
+    # TODO: test cross-host copydb
+    # TODO: search through PyMongo for other internal uses of start_request()
+    def copy_database(self, from_name, to_name, from_host=None, username=None,
+        password=None, callback=None
+    ):
+        check_callable(callback, required=False)
+        if not isinstance(from_name, basestring):
+            raise TypeError("from_name must be an instance "
+                            "of %s" % (basestring.__name__,))
+        if not isinstance(to_name, basestring):
+            raise TypeError("to_name must be an instance "
+                            "of %s" % (basestring.__name__,))
+
+        pymongo.database._check_name(to_name)
+
+        command = {"fromdb": from_name, "todb": to_name}
+
+        if from_host is not None:
+            command["fromhost"] = from_host
+
+        loop = self.get_io_loop()
+
+        def gotnonce(result, error):
+            print 'gotnonce'
+            assert self.in_request()
+            if error and callback:
+                with self.end_request():
+                    loop.add_callback(
+                        functools.partial(callback, None, error))
+            elif not error:
+                nonce = result["nonce"]
+                key = helpers._auth_key(nonce, username, password)
+                self.admin.command(
+                    "copydb", username=unicode(username), nonce=nonce,
+                    key=key, callback=copied, **command)
+
+        def copied(result, error):
+            print 'copied', to_name, current_request
+            if username is not None:
+                assert self.in_request()
+            if callback:
+                with self.end_request():
+                    loop.add_callback(
+                        functools.partial(
+                            callback, None if error else result, error))
+
+        print 'copydb', to_name, 'starting request'
+        with self.start_request():
+            if username is not None:
+                print 'copydbgetnonce in request', current_request
+                self.admin.command(
+                    "copydbgetnonce", fromhost=from_host, callback=gotnonce)
+            else:
+                print 'copydb in request', current_request
+                self.admin.command("copydb", callback=copied, **command)
+            print 'existing request', current_request
 
     # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
@@ -723,36 +783,44 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
         return [self.master._Connection__pool]
 
 
+current_request = None
+current_request_seq = 0
+
+
 class RequestContext(stack_context.StackContext):
-    def __init__(self, pools, request_id):
+    def __init__(self, pools, request):
         class RequestContextFactoryFactory(object):
             def __del__(self):
                 global current_request
-                assert current_request is None, (
-                    "Expected current_request to be None when Request deleted")
+                if request is not None:
+                    old_request, current_request = current_request, request
+                    for pool in pools:
+                        pool.end_request()
 
-                current_request = request_id
-                for pool in pools:
-                    pool.end_request()
-
-                current_request = None
+                    current_request = old_request
 
             def __call__(self):
                 class RequestContextFactory(object):
                     def __enter__(self):
                         global current_request
-                        current_request = request_id
+                        self.old_request = current_request
+                        current_request = request
 
                     def __exit__(self, type, value, traceback):
                         global current_request
-                        assert current_request == request_id, (
-                            "request_id %s does not match expected %s" % (
-                                current_request, request_id
-                            )
-                        )
-                        current_request = None
-                        if value:
-                            raise value
+                        if current_request != request:
+                            pass
+                        print 'exiting', current_request, 'restoring', self.old_request
+                        assert current_request == request, (
+                            "request %s does not match expected %s" % (
+                                current_request, request))
+
+                        current_request = self.old_request
+
+                        # Returning False means, "Don't suppress exceptions
+                        # that happened within this context."
+                        # http://docs.python.org/library/stdtypes.html#typecontextmanager
+                        return False
 
                 return RequestContextFactory()
 
@@ -765,7 +833,6 @@ class MotorDatabase(MotorBase):
     reset_error_history           = Async(has_safe_arg=False, cb_required=False)
     add_user                      = Async(has_safe_arg=False, cb_required=False)
     remove_user                   = Async(has_safe_arg=False, cb_required=False)
-    authenticate                  = Async(has_safe_arg=False, cb_required=False)
     logout                        = Async(has_safe_arg=False, cb_required=False)
     command                       = Async(has_safe_arg=False, cb_required=False)
 
@@ -858,6 +925,46 @@ class MotorDatabase(MotorBase):
                 manipulator.database = db.delegate
 
         self.delegate.add_son_manipulator(manipulator)
+
+    # TODO: doc why we need to override this
+    def authenticate(self, name, password, callback):
+        check_callable(callback, required=True)
+        loop = self.get_io_loop()
+
+        def gotnonce(result, error):
+            assert self.connection.in_request()
+            if error:
+                loop.add_callback(
+                    functools.partial(callback, None, error))
+            else:
+                nonce = result["nonce"]
+                key = helpers._auth_key(nonce, name, password)
+                self.command(
+                    "authenticate", user=unicode(name), nonce=nonce, key=key,
+                    callback=authenticated)
+
+        def authenticated(result, error):
+            assert self.connection.in_request()
+            if isinstance(error, pymongo.errors.OperationFailure):
+                # Bad username or password
+                with self.connection.end_request():
+                    loop.add_callback(functools.partial(callback, False, None))
+            elif error:
+                # Some other error
+                with self.connection.end_request():
+                    loop.add_callback(functools.partial(callback, None, error))
+            else:
+                # Success!
+                self.connection._cache_credentials(self.name,
+                    unicode(name),
+                    unicode(password))
+
+                with self.connection.end_request():
+                    loop.add_callback(functools.partial(callback, True, None))
+
+        # Use same socket for getnonce and authenticate commands
+        with self.connection.start_request():
+            self.command("getnonce", callback=gotnonce)
 
     def get_io_loop(self):
         return self.connection.get_io_loop()
