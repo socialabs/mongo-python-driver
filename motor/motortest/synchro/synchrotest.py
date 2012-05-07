@@ -35,11 +35,6 @@ from nose.selector import Selector
 from motor.motortest import synchro
 from motor.motortest.puritanical import PuritanicalIOLoop
 
-
-# TODO: running this file without a test-module name does nothing; it should run
-#   all PyMongo tests except test_gevent
-# TODO: test for Motor all the things test_pooling tests
-
 excluded_modules = [
     'test.test_threads',
     'test.test_threads_replica_set_connection',
@@ -51,11 +46,8 @@ excluded_modules = [
     'test.test_ssl',
 ]
 
+# TODO: document these variations and omissions b/w PyMongo and the Motor API
 excluded_tests = [
-    # TODO: For each of these, examine why the Synchro test fails and either
-    # fix the Synchro test or test the same functionality directly in Motor,
-    # or document that Motor doesn't support the functionality
-
     # Synchro can't simulate requests, so test copy_db in Motor directly.
     'TestConnection.test_copy_db',
 
@@ -154,8 +146,8 @@ if __name__ == '__main__':
         'database',
         'pool',
     ]:
-        # So that 'from pymongo.connection import Connection' gets the Synchro
-        # Connection, not the real one.
+        # So that e.g. 'from pymongo.connection import Connection' gets the
+        # Synchro Connection, not the real one.
         sys.modules['pymongo.%s' % submod] = synchro
 
     # Find our directory
@@ -164,13 +156,6 @@ if __name__ == '__main__':
     # Find test dir
     test_dir = path.normpath(path.join(this_dir, '../../../test'))
     print 'Running tests in %s' % test_dir
-
-    # Exclude a test that hangs and prevents the run from completing - we should
-    # fix the test for async, eventually
-    # TODO: fix these, or implement a Motor-specific test that exercises the
-    #   same features as each of these
-    # TODO: document these variations and omissions b/w PyMongo and the Motor API
-    print 'WARNING: excluding some tests -- go in and fix them for async!'
 
     config = Config(
         plugins=PluginManager(),
