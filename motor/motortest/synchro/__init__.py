@@ -318,16 +318,13 @@ class Connection(Synchro):
 
     @unwrap_synchro
     def drop_database(self, name_or_database):
-        synchronize(self, self.delegate.drop_database, has_safe_arg=False)(
-            name_or_database)
+        sync_method = synchronize(self, self.delegate.drop_database, has_safe_arg=False)
+        return sync_method(name_or_database)
 
     def start_request(self):
-        self.request = self.delegate.start_request()
-        self.request.__enter__()
+        raise NotImplementedError()
 
-    def end_request(self):
-        if self.request:
-            self.request.__exit__(None, None, None)
+    in_request = end_request = start_request
 
     @property
     def is_locked(self):
@@ -346,7 +343,7 @@ class Connection(Synchro):
 
     __getitem__ = __getattr__
 
-    _Connection__pool           = SynchroProperty()
+    _Connection__pool = SynchroProperty()
 
 
 class ReplicaSetConnection(Connection):
@@ -363,7 +360,7 @@ class ReplicaSetConnection(Connection):
         self.synchro_connect()
 
 
-class MasterSlaveConnection(Connection):
+class MasterSlaveConnection(Synchro):
     __delegate_class__ = motor.MotorMasterSlaveConnection
 
     def __init__(self, master, slaves, *args, **kwargs):
@@ -378,8 +375,6 @@ class MasterSlaveConnection(Connection):
         self.delegate = self.__delegate_class__(
             master, slaves, *args, **kwargs
         )
-
-        self.synchro_connect()
 
     @property
     def master(self):
@@ -397,12 +392,17 @@ class MasterSlaveConnection(Connection):
 
         return synchro_slaves
 
+    def __getattr__(self, name):
+        return Database(self, name)
+
+    __getitem__ = __getattr__
+
 
 class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
 
     def __init__(self, connection, name):
-        assert isinstance(connection, Connection), (
+        assert isinstance(connection, (Connection, MasterSlaveConnection)), (
             "Expected Connection, got %s" % repr(connection)
         )
         self.connection = connection
@@ -466,11 +466,11 @@ class Collection(Synchro):
 class Cursor(Synchro):
     __delegate_class__ = motor.MotorCursor
 
-    close                      = motor.ReadOnlyDelegateProperty()
     rewind                     = WrapOutgoing()
     clone                      = WrapOutgoing()
     where                      = WrapOutgoing()
     sort                       = WrapOutgoing()
+    close                      = SynchronizeAndWrapOutgoing(has_safe_arg=False)
     explain                    = SynchronizeAndWrapOutgoing(has_safe_arg=False)
 
     def __init__(self, motor_cursor):
@@ -501,6 +501,7 @@ class Cursor(Synchro):
     def collection(self):
         return self.delegate.collection
 
+    _Cursor__id                = SynchroProperty()
     _Cursor__query_options     = SynchroProperty()
     _Cursor__retrieved         = SynchroProperty()
     _Cursor__skip              = SynchroProperty()

@@ -61,12 +61,12 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 def async_test_engine(timeout_sec=5, io_loop=None):
     if not isinstance(timeout_sec, int) and not isinstance(timeout_sec, float):
         raise TypeError(
-            "Expected int or float, got %s\n"
-            "Use async_test_engine like:\n\t@async_test_engine()\n"
-            "or:\n\t@async_test_engine(timeout_sec=10)" % (
-                repr(timeout_sec)
-                )
-        )
+"""Expected int or float, got %s
+Use async_test_engine like:
+    @async_test_engine()
+or:
+    @async_test_engine(timeout_sec=10)""" % (
+        repr(timeout_sec)))
 
     timeout_sec = max(timeout_sec, float(os.environ.get('TIMEOUT_SEC', 0)))
 
@@ -78,6 +78,9 @@ def async_test_engine(timeout_sec=5, io_loop=None):
 
             def run(self):
                 loop = io_loop or ioloop.IOLoop.instance()
+                # If loop isn't puritanical it could swallow an exception and
+                #   not marked a test failed that ought to be
+                assert isinstance(loop, puritanical.PuritanicalIOLoop)
                 try:
                     super(AsyncTestRunner, self).run()
                 except Exception:

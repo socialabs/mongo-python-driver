@@ -92,8 +92,8 @@ class MotorTailTest(MotorTest):
             True,
             lambda: (
                 results[-1] is OperationFailure and len(results) <= 4
-                and 'cancelled' not in results
-            )
+                and 'cancelled' not in results),
+            timeout_sec=10
         )
 
         ioloop.IOLoop.instance().start()

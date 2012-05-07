@@ -34,7 +34,8 @@ import pymongo.errors
 # Hook for unittesting; if true all MotorSockets get unique ids
 socket_uuid = False
 
-__all__ = ['MotorConnection', 'MotorReplicaSetConnection']
+__all__ = ['MotorConnection', 'MotorReplicaSetConnection',
+           'MotorMasterSlaveConnection']
 
 # TODO: sphinx-formatted docstrings
 # TODO: document that all Motor methods accept a callback, but only
@@ -374,34 +375,80 @@ class MotorBase(object):
 
 
 class MotorConnectionBase(MotorBase):
+    database_names              = Async(has_safe_arg=False, cb_required=False)
+    disconnect                  = ReadOnlyDelegateProperty()
+    tz_aware                    = ReadOnlyDelegateProperty()
+
+    def __init__(self, io_loop=None):
+        if io_loop:
+            if not isinstance(io_loop, ioloop.IOLoop):
+                raise TypeError(
+                    "io_loop must be instance of IOLoop, not %s" % (
+                        repr(io_loop)))
+            self.io_loop = io_loop
+        else:
+            self.io_loop = ioloop.IOLoop.instance()
+
+    def get_io_loop(self):
+        return self.io_loop
+
+    def __getattr__(self, name):
+        if not self.connected:
+            msg = "Can't access database on %s before calling open()" \
+                  " or open_sync()" % (
+                self.__class__.__name__
+            )
+            raise pymongo.errors.InvalidOperation(msg)
+
+        return MotorDatabase(self, name)
+
+    __getitem__ = __getattr__
+
+    # TODO: doc why we need to override this
+    def drop_database(self, name_or_database, callback):
+        if isinstance(name_or_database, MotorDatabase):
+            name_or_database = name_or_database.delegate.name
+
+        async_method = asynchronize(
+            self.io_loop, self.delegate.drop_database, False, True)
+        async_method(name_or_database, callback=callback)
+
+    def start_request(self):
+        raise NotImplementedError("Motor doesn't implement requests")
+
+    in_request = end_request = start_request
+
+    @property
+    def connected(self):
+        return self.delegate is not None
+
+
+class MotorConnectionBasePlus(MotorConnectionBase):
+    """MotorConnection and MotorReplicaSetConnection common functionality
+    (MotorMasterSlaveConnection is more primitive)
+    """
     server_info                 = Async(has_safe_arg=False, cb_required=False)
     copy_database               = Async(has_safe_arg=False, cb_required=False)
-    database_names              = Async(has_safe_arg=False, cb_required=False)
     close                       = ReadOnlyDelegateProperty()
-    disconnect                  = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
     max_pool_size               = ReadOnlyDelegateProperty()
-    tz_aware                    = ReadOnlyDelegateProperty()
     _cache_credentials          = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
-        # Store args and kwargs for when open() is called
-        # TODO: document io_loop kw arg
         if 'auto_start_request' in kwargs:
             raise pymongo.errors.ConfigurationError(
                 "Motor doesn't support auto_start_request")
 
-        # TODO: refactor into check_ioloop(kwargs)
+        # TODO: document io_loop kw arg
         if 'io_loop' in kwargs:
             kwargs = kwargs.copy()
-            self.io_loop = kwargs.pop('io_loop')
-            if not isinstance(self.io_loop, ioloop.IOLoop):
-                raise TypeError(
-                    "io_loop must be instance of IOLoop, not %s" % (
-                        repr(self.io_loop)))
+            io_loop = kwargs.pop('io_loop')
         else:
-            self.io_loop = ioloop.IOLoop.instance()
+            io_loop = None
 
+        super(MotorConnectionBasePlus, self).__init__(io_loop)
+
+        # Store args and kwargs for when open() is called
         self._init_args = args
         self._init_kwargs = kwargs
         self.delegate = None
@@ -486,41 +533,8 @@ class MotorConnectionBase(MotorBase):
 
         return self
 
-    def get_io_loop(self):
-        return self.io_loop
 
-    def __getattr__(self, name):
-        if not self.connected:
-            msg = "Can't access database on %s before calling open()" \
-                  " or open_sync()" % (
-                self.__class__.__name__
-            )
-            raise pymongo.errors.InvalidOperation(msg)
-
-        return MotorDatabase(self, name)
-
-    __getitem__ = __getattr__
-
-    # TODO: doc why we need to override this
-    def drop_database(self, name_or_database, callback):
-        if isinstance(name_or_database, MotorDatabase):
-            name_or_database = name_or_database.delegate.name
-
-        async_method = asynchronize(
-            self.io_loop, self.delegate.drop_database, False, True)
-        async_method(name_or_database, callback=callback)
-
-    def start_request(self):
-        raise NotImplementedError("Motor doesn't implement requests")
-
-    in_request = end_request = start_request
-
-    @property
-    def connected(self):
-        return self.delegate is not None
-
-
-class MotorConnection(MotorConnectionBase):
+class MotorConnection(MotorConnectionBasePlus):
     # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
     close_cursor                = Async(has_safe_arg=False, cb_required=True)
     kill_cursors                = Async(has_safe_arg=False, cb_required=True)
@@ -547,7 +561,8 @@ class MotorConnection(MotorConnectionBase):
         # TODO: expose the PyMongo pool, or otherwise avoid this
         return [self.delegate._Connection__pool]
 
-class MotorReplicaSetConnection(MotorConnectionBase):
+
+class MotorReplicaSetConnection(MotorConnectionBasePlus):
     primary                       = ReadOnlyDelegateProperty()
     secondaries                   = ReadOnlyDelegateProperty()
     arbiters                      = ReadOnlyDelegateProperty()
@@ -614,22 +629,53 @@ class MotorReplicaSetMonitor(object):
 
 
 # TODO: doc that this can take MotorConnections or PyMongo Connections
-# TODO: verify & test this w/ configurable IOLoop
+# TODO: examples of setting up MSCs
 class MotorMasterSlaveConnection(MotorConnectionBase):
     close_cursor = ReadOnlyDelegateProperty()
 
-    def _new_delegate(self, master, slaves, *args, **kwargs):
+    def __init__(self, master, slaves, *args, **kwargs):
+        # TODO: document io_loop kw arg
+        if 'io_loop' in kwargs:
+            kwargs = kwargs.copy()
+            io_loop = kwargs.pop('io_loop')
+        elif isinstance(master, MotorConnection):
+            io_loop = master.io_loop
+        else:
+            io_loop = None
+
+        super(MotorMasterSlaveConnection, self).__init__(io_loop)
+
         # For master connection and each slave connection, if they're
         # MotorConnections unwrap them before passing to PyMongo
         # MasterSlaveConnection
         if isinstance(master, MotorConnection):
+            if not master.connected:
+                raise pymongo.errors.InvalidOperation(
+                    "Master must already be connected")
+            if master.io_loop != self.io_loop:
+                raise pymongo.errors.ConfigurationError(
+                    "Master connection must have same IOLoop as "
+                    "MasterSlaveConnection"
+                )
             master = master.delegate
 
-        slaves = [s.delegate if isinstance(s, MotorConnection) else s
-            for s in slaves]
+        slave_delegates = []
+        for slave in slaves:
+            if isinstance(slave, MotorConnection):
+                if not slave.connected:
+                    raise pymongo.errors.InvalidOperation(
+                        "Slave must already be connected")
+                if slave.io_loop != self.io_loop:
+                    raise pymongo.errors.ConfigurationError(
+                        "Master connection must have same IOLoop as "
+                        "MasterSlaveConnection"
+                    )
+                slave_delegates.append(slave.delegate)
+            else:
+                slave_delegates.append(slave)
 
-        return pymongo.master_slave_connection.MasterSlaveConnection(
-            master, slaves, *args, **kwargs)
+        self.delegate = pymongo.master_slave_connection.MasterSlaveConnection(
+            master, slave_delegates, *args, **kwargs)
 
     @property
     def master(self):
@@ -1105,7 +1151,7 @@ class MotorCursor(MotorBase):
             self.close()
 
 
-# TODO: test, doc
+# TODO: test, doc all these three gen tasks
 class Op(gen.Task):
     def __init__(self, func, *args, **kwargs):
         check_callable(func, True)

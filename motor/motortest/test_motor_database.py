@@ -87,17 +87,13 @@ class MotorDatabaseTest(MotorTest):
         users = yield motor.Op(db.system.users.find().to_list)
         self.assertTrue("mike" in [u['user'] for u in users])
 
-
         # We need to authenticate many times at once to make sure that
         # GreenletPool's start_request() is properly isolating operations
         for i in range(100):
             db.authenticate(
                 "mike", "password", callback=(yield gen.Callback(i)))
 
-        authentication_results = yield gen.WaitAll(range(100))
-        for (result, error), kwargs in authentication_results:
-            self.assertTrue(result)
-            self.assertEqual(None, error)
+        yield motor.WaitAllOps(range(100))
 
         # just make sure there are no exceptions here
         yield motor.Op(db.logout)

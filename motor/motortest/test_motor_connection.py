@@ -14,23 +14,18 @@
 
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
 
-import datetime
 import time
 import unittest
 
-from tornado import ioloop, stack_context, gen
+from tornado import ioloop, gen
 
 import motor
 import pymongo
-import pymongo.pool
 
 from motor.motortest import (
-    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual)
-from pymongo.errors import (
-    InvalidOperation, ConfigurationError, DuplicateKeyError)
-from bson.objectid import ObjectId
+    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual, puritanical)
+from pymongo.errors import InvalidOperation, ConfigurationError
 from test.utils import server_is_master_with_slave, delay
-from test import version
 
 
 class MotorConnectionTest(MotorTest):
@@ -85,7 +80,7 @@ class MotorConnectionTest(MotorTest):
         # Check that we can create a MotorConnection with a custom IOLoop, then
         # call open_sync(), which uses a new loop, and the custom loop is
         # restored.
-        loop = ioloop.IOLoop()
+        loop = puritanical.PuritanicalIOLoop()
         cx = motor.MotorConnection(host, port, io_loop=loop)
         self.assertEqual(cx, cx.open_sync())
         self.assertTrue(cx.connected)
@@ -112,7 +107,7 @@ class MotorConnectionTest(MotorTest):
             lambda: motor.MotorConnection(host, port, io_loop='foo')
         )
 
-        loop = ioloop.IOLoop()
+        loop = puritanical.PuritanicalIOLoop()
 
         @async_test_engine(io_loop=loop)
         def test(self):
@@ -149,7 +144,7 @@ class MotorConnectionTest(MotorTest):
         test_db_names = ['pymongo_test%s' % i for i in nrange]
         cx = self.motor_connection(host, port)
 
-        def check_copydb_results(results):
+        def check_copydb_results():
             db_names = self.sync_cx.database_names()
             for test_db_name in test_db_names:
                 self.assertTrue(test_db_name in db_names)
@@ -157,12 +152,6 @@ class MotorConnectionTest(MotorTest):
                 self.assertTrue(result, "No results in %s" % test_db_name)
                 self.assertEqual("bar", result.get("foo"),
                     "Wrong result from %s: %s" % (test_db_name, result))
-
-            for (result, error), kwargs in results:
-                self.assertEqual(None, error,
-                    "Couldn't copy pymongo_test: %s" % repr(error))
-                self.assertEqual({'ok': 1}, result,
-                    "Couldn't copy pymongo_test: %s" % repr(result))
 
         def drop_all():
             for test_db_name in test_db_names:
@@ -187,8 +176,8 @@ class MotorConnectionTest(MotorTest):
             cx.copy_database("pymongo_test", test_db_name,
                 callback=(yield gen.Callback(key=test_db_name)))
 
-        results = yield gen.WaitAll(test_db_names)
-        check_copydb_results(results)
+        yield motor.WaitAllOps(test_db_names)
+        check_copydb_results()
 
         drop_all()
 
@@ -212,8 +201,8 @@ class MotorConnectionTest(MotorTest):
                 username="mike", password="password",
                 callback=(yield gen.Callback(test_db_name)))
 
-        results = yield gen.WaitAll(test_db_names)
-        check_copydb_results(results)
+        yield motor.WaitAllOps(test_db_names)
+        check_copydb_results()
 
         drop_all()
 
