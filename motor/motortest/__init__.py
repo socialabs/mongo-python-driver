@@ -19,7 +19,6 @@ import os
 import time
 import types
 import pymongo
-import pymongo.database
 
 import motor
 from motor.motortest import eventually, puritanical

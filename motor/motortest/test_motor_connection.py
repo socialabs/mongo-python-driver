@@ -128,7 +128,6 @@ class MotorConnectionTest(MotorTest):
 
     def test_copy_db_argument_checking(self):
         cx = self.motor_connection(host, port)
-        self.assertFalse(cx.in_request())
 
         self.assertRaises(TypeError, cx.copy_database, 4, "foo")
         self.assertRaises(TypeError, cx.copy_database, "foo", 4)
@@ -136,34 +135,53 @@ class MotorConnectionTest(MotorTest):
         self.assertRaises(
             pymongo.errors.InvalidName, cx.copy_database, "foo", "$foo")
 
-    @async_test_engine(timeout_sec=30)
+    @async_test_engine(timeout_sec=60)
     def test_copy_db(self):
         # 1. Drop old test DBs
-        # 2. Copy a test DB 20 times at once (we need to do it many times at
-        #   once to make sure Motor's internal start_request works)
-        # 3. Check that it worked
-        # 4. Copy a test DB in a request
-        # 5. Create a username and password
-        # 6. Copy a database using name and password
-        # 7. Same, in a request
+        # 2. Copy a test DB N times at once (we need to do it many times at
+        #   once to make sure that GreenletPool's start_request() is properly
+        #   isolating operations from each other)
+        # 3. Create a username and password
+        # 4. Copy a database using name and password
         is_ms = server_is_master_with_slave(self.sync_cx)
         ncopies = 20
         nrange = list(range(ncopies))
         test_db_names = ['pymongo_test%s' % i for i in nrange]
+        cx = self.motor_connection(host, port)
 
         def check_copydb_results(results):
+            db_names = self.sync_cx.database_names()
+            for test_db_name in test_db_names:
+                self.assertTrue(test_db_name in db_names)
+                result = self.sync_cx[test_db_name].test.find_one()
+                self.assertTrue(result, "No results in %s" % test_db_name)
+                self.assertEqual("bar", result.get("foo"),
+                    "Wrong result from %s: %s" % (test_db_name, result))
+
             for (result, error), kwargs in results:
                 self.assertEqual(None, error,
                     "Couldn't copy pymongo_test: %s" % repr(error))
                 self.assertEqual({'ok': 1}, result,
                     "Couldn't copy pymongo_test: %s" % repr(result))
 
-        cx = self.motor_connection(host, port)
-        self.assertFalse(cx.in_request())
-        yield motor.Op(cx.drop_database, 'pymongo_test')
-        for test_db_name in test_db_names:
-            yield motor.Op(cx.drop_database, test_db_name)
+        def drop_all():
+            for test_db_name in test_db_names:
+                self.sync_cx.drop_database(test_db_name)
 
+            if not is_ms:
+                # Due to SERVER-2329, databases may not disappear from a master in a
+                # master-slave pair
+                db_names = self.sync_cx.database_names()
+                for test_db_name in test_db_names:
+                    self.assertFalse(
+                        test_db_name in db_names,
+                        "%s not dropped" % test_db_name)
+
+        # 1. Drop old test DBs
+        yield motor.Op(cx.drop_database, 'pymongo_test')
+        drop_all()
+
+        # 2. Copy a test DB N times at once
         yield motor.Op(cx.pymongo_test.test.insert, {"foo": "bar"})
         for test_db_name in test_db_names:
             cx.copy_database("pymongo_test", test_db_name,
@@ -172,353 +190,32 @@ class MotorConnectionTest(MotorTest):
         results = yield gen.WaitAll(test_db_names)
         check_copydb_results(results)
 
-        print 'all copied'
+        drop_all()
 
-        # copy_database() didn't accidentally stay in request
-        self.assertFalse(cx.in_request())
-        print 'copydb didn\'t stay in request'
-
-        # 3.
-        db_names = yield motor.Op(cx.database_names)
-        for test_db_name in test_db_names:
-            self.assertTrue(test_db_name in db_names)
-            result = yield motor.Op(cx[test_db_name].test.find_one)
-            self.assertEqual("bar", result["foo"])
-
-        for test_db_name in test_db_names:
-            yield motor.Op(cx.drop_database, test_db_name)
-
-        if not is_ms:
-            db_names = yield motor.Op(cx.database_names)
-            for test_db_name in test_db_names:
-                self.assertFalse(test_db_name in db_names)
-
-        # 4.
-        print 'test_copy_db starting request'
-        with cx.start_request():
-            self.assertTrue(cx.in_request())
-            print 'test_copy_db started request', motor.current_request
-            for test_db_name in test_db_names:
-                cx.copy_database("pymongo_test", test_db_name,
-                    callback=(yield gen.Callback(key=test_db_name)))
-
-            results = yield gen.WaitAll(test_db_names)
-            check_copydb_results(results)
-            self.assertTrue(cx.in_request())
-
-        # Now the request is over.
-        self.assertFalse(cx.in_request())
-        for test_db_name in test_db_names:
-            self.assertTrue(test_db_name in db_names)
-            result = yield motor.Op(cx[test_db_name].test.find_one)
-            self.assertEqual("bar", result["foo"])
-
-        for test_db_name in test_db_names:
-            yield motor.Op(cx.drop_database, test_db_name)
-
-        # 5.
+        # 3. Create a username and password
         yield motor.Op(cx.pymongo_test.add_user, "mike", "password")
 
         yield AssertRaises(
             pymongo.errors.OperationFailure,
-            cx.copy_database, "pymongo_test", "pymongo_test1",
+            cx.copy_database, "pymongo_test", "pymongo_test0",
             username="foo", password="bar")
 
         yield AssertRaises(
             pymongo.errors.OperationFailure, cx.copy_database,
-            "pymongo_test", "pymongo_test1",
+            "pymongo_test", "pymongo_test0",
             username="mike", password="bar")
 
-        # 6.
-        for i in range(ncopies):
+        # 4. Copy a database using name and password
+        for test_db_name in test_db_names:
             cx.copy_database(
-                "pymongo_test", "pymongo_test%s" % i,
+                "pymongo_test", test_db_name,
                 username="mike", password="password",
-                callback=(yield gen.Callback(i)))
+                callback=(yield gen.Callback(test_db_name)))
 
-        results = yield gen.WaitAll(range(ncopies))
+        results = yield gen.WaitAll(test_db_names)
         check_copydb_results(results)
 
-        db_names = yield motor.Op(cx.database_names)
-        for i in range(ncopies):
-            db_name = "pymongo_test%s" % i
-            self.assertTrue(db_name in db_names,
-                "Couldn't copy pymongo_test to %s" % db_name)
-            result = yield motor.Op(cx[db_name].test.find_one)
-            self.assertEqual("bar", result["foo"])
-            yield motor.Op(cx.drop_database, db_name)
-
-        # 7.
-        self.assertFalse(cx.in_request())
-        with cx.start_request():
-            self.assertTrue(cx.in_request())
-            for i in range(ncopies):
-                cx.copy_database(
-                    "pymongo_test", "pymongo_test%s" % i,
-                    username="mike", password="password",
-                    callback=(yield gen.Callback(i)))
-
-            results = yield gen.WaitAll(range(ncopies))
-            check_copydb_results(results)
-
-            db_names = yield motor.Op(cx.database_names)
-            for i in range(ncopies):
-                db_name = "pymongo_test%s" % i
-                self.assertTrue(db_name in db_names,
-                    "Couldn't copy pymongo_test to %s" % db_name)
-                result = yield motor.Op(cx[db_name].test.find_one)
-                self.assertEqual("bar", result["foo"])
-                yield motor.Op(cx.drop_database, db_name)
-
-            self.assertTrue(cx.in_request())
-
-        self.assertFalse(cx.in_request())
-
-    def test_get_last_error(self):
-        # Create a unique index on 'x', insert the same value for x twice,
-        # assert DuplicateKeyError is passed to callback for second insert.
-        # Try again in a request, with an unsafe insert followed by an explicit
-        # call to database.error(), which raises InvalidOperation because we
-        # can't make two concurrent operations in a request. Finally, insert
-        # unsafely and call error() again, check that we get the getLastError
-        # result correctly, which checks that we're using a single socket in
-        # the request as expected.
-        # TODO: test that ensure_index calls the callback even if the index
-        # is already created and in the index cache - might be a special-case
-        # optimization
-
-        # Use a special collection for this test
-        sync_coll = self.sync_db.test_get_last_error
-        sync_coll.drop()
-        cx = self.motor_connection(host, port)
-        coll = cx.test.test_get_last_error
-
-        results = []
-
-        def ensured_index(result, error):
-            if error:
-                raise error
-
-            results.append(result)
-            coll.insert({'x':1}, callback=inserted1)
-
-        def inserted1(result, error):
-            if error:
-                raise error
-
-            results.append(result)
-            coll.insert({'x':1}, callback=inserted2)
-
-        def inserted2(result, error):
-            self.assert_(isinstance(error, DuplicateKeyError))
-            results.append(result)
-
-            with cx.start_request():
-                coll.insert(
-                    {'x':1},
-                    safe=False,
-                    callback=inserted3
-                )
-
-        def inserted3(result, error):
-            # No error, since we passed safe=False to insert()
-            self.assertEqual(None, error)
-            results.append(result)
-
-            # We're still in the request begun in inserted2
-            cx.test.error(callback=on_get_last_error)
-
-        def on_get_last_error(result, error):
-            if error:
-                # This is unexpected -- Motor raised an exception trying to
-                # execute getLastError on the server
-                raise error
-
-            results.append(result)
-
-        # start the sequence of callbacks
-        cx.test.test_get_last_error.ensure_index(
-            [('x', 1)], unique=True, callback=ensured_index
-        )
-
-        # index name
-        self.assertEventuallyEqual('x_1', lambda: results[0])
-
-        # result of first insert
-        self.assertEventuallyEqual(
-            True,
-            lambda: isinstance(results[1], ObjectId)
-        )
-
-        # result of second insert - failed with DuplicateKeyError
-        self.assertEventuallyEqual(None, lambda: results[2])
-
-        # result of third insert - failed, but safe=False
-        self.assertEventuallyEqual(
-            True,
-            lambda: isinstance(results[3], ObjectId)
-        )
-
-        # result of error()
-        self.assertEventuallyEqual(
-            11000,
-            lambda: results[4]['code']
-        )
-
-        ioloop.IOLoop.instance().start()
-        self.sync_db.test_get_last_error.drop()
-
-    @async_test_engine()
-    def test_get_last_error_gen(self):
-        # Same as test_get_last_error, but using gen
-        cx = self.motor_connection(host, port)
-        coll = cx.text.test_get_last_error
-        yield motor.Op(coll.drop)
-
-        yield AssertEqual('x_1', coll.ensure_index, [('x', 1)], unique=True)
-        result = yield motor.Op(coll.insert, {'x':1})
-        self.assertTrue(isinstance(result, ObjectId))
-
-        yield AssertRaises(DuplicateKeyError, coll.insert, {'x':1})
-
-        with cx.start_request():
-            result = yield motor.Op(
-                coll.insert,
-                    {'x':1},
-                safe=False
-            )
-
-            # insert failed, but safe=False so it returned the
-            # driver-generated _id
-            self.assertTrue(isinstance(result, ObjectId))
-
-            # We're still in the request, so getLastError will work
-            result = yield motor.Op(cx.test.error)
-            self.assertEqual(11000, result['code'])
-
-        yield motor.Op(coll.drop)
-
-    def test_no_concurrent_ops_in_request(self):
-        # Check that an attempt to do two things at once in a request raises
-        # InvalidOperation
-        results = []
-        cx = self.motor_connection(host, port)
-
-        def inserted(result, error):
-            results.append({
-                'result': result,
-                'error': error,
-            })
-
-        with cx.start_request():
-            cx.test.test_collection.insert({})
-            cx.test.test_collection.insert({}, callback=inserted)
-
-        self.assertEventuallyEqual(
-            None,
-            lambda: results[0]['result']
-        )
-
-        self.assertEventuallyEqual(
-            True,
-            lambda: isinstance(results[0]['error'], InvalidOperation)
-        )
-
-        ioloop.IOLoop.instance().start()
-
-    def _test_request(self, chain0_in_request, chain1_in_request):
-        # Sequence:
-        # We have two chains of callbacks, chain0 and chain1. A chain is a
-        # sequence of callbacks, each spawned by the previous callback on the
-        # chain. We test the following sequence:
-        #
-        # 0.00 sec: chain0 makes a bad insert
-        # 0.25 sec: chain1 makes a good insert
-        # 0.50 sec: chain0 checks getLastError
-        # 0.75 sec: chain1 checks getLastError
-        # 1.00 sec: IOLoop stops
-        #
-        # If start_request() works, then chain 0 gets the DuplicateKeyError
-        # when it runs in a request, and neither chain gets the error when
-        # they run with no request.
-        gap_seconds = 0.25
-        cx = self.motor_connection(host, port)
-        loop = ioloop.IOLoop.instance()
-
-        # Results for chain 0 and chain 1
-        results = {
-            0: [],
-            1: [],
-        }
-
-        def insert(chain_num, use_request, doc):
-            request = None
-            if use_request:
-                request = cx.start_request()
-                request.__enter__()
-
-            # Perhaps causes DuplicateKeyError, depending on doc
-            cx.test.test_collection.insert(doc)
-            loop.add_timeout(
-                datetime.timedelta(seconds=2*gap_seconds),
-                lambda: inserted(chain_num)
-            )
-
-            if use_request:
-                request.__exit__(None, None, None)
-
-        def inserted(chain_num):
-            cb = lambda result, error: got_error(chain_num, result, error)
-            cx.test.error(callback=cb)
-
-        def got_error(chain_num, result, error):
-            if error:
-                raise error
-
-            results[chain_num].append(result)
-
-        # Start chain 0. Causes DuplicateKeyError.
-        insert(chain_num=0, use_request=chain0_in_request, doc={'s': hex(4)})
-
-        # Start chain 1, 0.25 seconds from now. Succeeds: no error on insert.
-        loop.add_timeout(
-            datetime.timedelta(seconds=gap_seconds),
-            lambda: insert(
-                chain_num=1, use_request=chain1_in_request, doc={'s': hex(201)}
-            )
-        )
-
-        loop.add_timeout(datetime.timedelta(seconds=4*gap_seconds), loop.stop)
-        loop.start()
-        return results
-
-    def test_start_request(self):
-        # getLastError works correctly only chain 0 is in a request
-        results = self._test_request(True, False)
-        self.assertEqual(11000, results[0][0]['code'])
-        self.assertEqual([None], results[1])
-
-    def test_start_request2(self):
-        # getLastError works correctly when *both* chains are in requests
-        results = self._test_request(True, True)
-        self.assertEqual(11000, results[0][0]['code'])
-        self.assertEqual([None], results[1])
-
-    def test_no_start_request(self):
-        # getLastError didn't get the error: chain0 and chain1 used the
-        # same socket, so chain0's getLastError was checking on chain1's
-        # insert, which had no error.
-        results = self._test_request(False, False)
-        self.assertEqual([None], results[0])
-        self.assertEqual([None], results[1])
-
-    def test_no_start_request2(self):
-        # getLastError didn't get the error: chain0 and chain1 used the
-        # same socket, so chain0's getLastError was checking on chain1's
-        # insert, which had no error.
-        results = self._test_request(False, True)
-        self.assertEqual([None], results[0])
-        self.assertEqual([None], results[1])
+        drop_all()
 
     def test_timeout(self):
         # Launch two slow find_ones. The one with a timeout should get an error
@@ -569,216 +266,10 @@ class MotorConnectionTest(MotorTest):
         yield motor.Op(c.open)
         self.assertEqual(c.max_pool_size, 100)
 
-    def test_pool_request(self):
-        # TODO: rewrite with async_test_engine, this is ridiculous
-        # 1. Create a connection
-        # 2. Get two sockets while keeping refs to both, check they're different
-        # 3. Dereference both sockets, check they're reclaimed by pool
-        # 4. Get a socket in a request
-        # 5. Get a socket not in a request, check different
-        # 6. Get another socket in request, check we get InvalidOperation (no
-        #   concurrent ops in request)
-        # 7. Dereference request socket, check it's reclaimed by pool
-        # 8. Get two sockets, once in request and once not, check different
-        # 9. Check that second socket in request is same as first
-
-        # 1.
-        motor.socket_uuid = True
-        cx = motor.MotorConnection(host, port, max_pool_size=17).open_sync()
-
-        cx_pool = [None]
-        loop = ioloop.IOLoop.instance()
-
-        def get_socket():
-            return cx_pool[0].get_socket((host, port))
-
-        get_socket = motor.asynchronize(loop, get_socket, False, True)
-
-        def socket_ids():
-            return [sock_info.sock.uuid for sock_info in cx_pool[0].sockets]
-
-        # We need a place to keep refs to sockets so they're not reclaimed
-        # before we're ready
-        socks = {}
-        results = set()
-
-        def opened(connection, error):
-            self.assertEqual(None, error)
-            cx_pool[0] = cx.delegate._Connection__pool
-
-            self.assertEqual(0, len(cx_pool[0].sockets))
-            self.assertFalse(cx_pool[0].in_request())
-
-            get_socket(callback=got_sock0)
-            get_socket(callback=got_sock1)
-
-        # 2.
-        def got_sock0(sock, error):
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            socks[0] = sock
-            if 1 in socks:
-                # got_sock1 has also run; let this callback finish so its refs
-                # are deleted
-                loop.add_callback(check_socks_different_and_reclaimed0)
-
-        def got_sock1(sock, error):
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            socks[1] = sock
-            if 0 in socks:
-                # got_sock0 has also run; let this callback finish so its refs
-                # are deleted
-                loop.add_callback(check_socks_different_and_reclaimed0)
-
-        # 3.
-        def check_socks_different_and_reclaimed0():
-            self.assertNotEqual(socks[0], socks[1])
-            id_0, id_1 = socks[0].sock.uuid, socks[1].sock.uuid
-
-            # TODO: why is exc_clear() necessary for socks[0] to be reclaimed?
-            # It seems that sys.exc_traceback refers to a frame that's at the
-            # end of BasePool.get_socket(), which has a reference to socks[0].
-            # Perhaps I don't understand the semantics of exc_traceback. Only
-            # tested with Python 2.7.
-            import sys
-            sys.exc_clear()
-
-            socks.clear()
-            self.assertTrue(id_0 in socket_ids())
-            self.assertTrue(id_1 in socket_ids())
-
-            results.add('step3')
-
-            # 4.
-            with cx.start_request():
-                get_socket(callback=got_sock2)
-
-            # 5.
-            get_socket(callback=got_sock3)
-
-        sock2_id = [None]
-        def got_sock2(sock, error):
-            # Get request socket
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            self.assertTrue(cx_pool[0].in_request())
-            socks[2] = sock
-            sock2_id[0] = sock.sock.uuid
-            if 3 in socks:
-                # got_sock3 has also run
-                loop.add_callback(check_socks_different_and_reclaimed1)
-
-            # We're in a request in this function, so test step 6, after
-            # check_socks_different_and_reclaimed1 has run.
-            loop.add_timeout(
-                time.time() + 0.25,
-                lambda: get_socket(callback=check_invalid_op))
-
-        def got_sock3(sock, error):
-            # Get NON-request socket
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            self.assertFalse(cx_pool[0].in_request())
-            socks[3] = sock
-            if 2 in socks:
-                # got_sock2 has also run
-                loop.add_callback(check_socks_different_and_reclaimed1)
-
-        def check_socks_different_and_reclaimed1():
-            self.assertNotEqual(socks[2], socks[3])
-            id_2, id_3 = socks[2].sock.uuid, socks[3].sock.uuid
-            del socks[2]
-            del socks[3]
-
-            # sock 2 is the request socket, it hasn't been reclaimed yet
-            # because we still have check_invalid_op() pending in that request
-            self.assertFalse(id_2 in socket_ids())
-
-            # sock 3 is done and it's been reclaimed
-            self.assertTrue(id_3 in socket_ids())
-            results.add('step5')
-
-        # 6.
-        def check_invalid_op(result, error):
-            self.assertEqual(None, result)
-            self.assertTrue(isinstance(error, InvalidOperation))
-            self.assertTrue(cx_pool[0].in_request())
-            results.add('step6')
-
-            # 7.
-            self.assertFalse(sock2_id[0] in socket_ids())
-
-            # Schedule a callback *not* in a request
-            with stack_context.NullContext():
-                loop.add_callback(check_request_sock_reclaimed)
-
-        def check_request_sock_reclaimed():
-            self.assertFalse(cx_pool[0].in_request())
-
-            # TODO: I can't figure out how to force GC reliably here
-#            self.assertTrue(
-#                sock2_id[0] in socket_ids(),
-#                "Request socket not reclaimed by pool")
-
-            results.add('step7')
-
-            # 8.
-            get_socket(callback=got_sock4)
-
-            with cx.start_request():
-                get_socket(callback=got_sock5)
-
-        def got_sock4(sock, error):
-            self.assertFalse(cx_pool[0].in_request())
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            socks[4] = sock
-            if 5 in socks:
-                # got_sock5 has also run
-                check_socks_different()
-
-        sock5_id = [None]
-        def got_sock5(sock, error):
-            self.assertTrue(cx_pool[0].in_request())
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-
-            socks[5] = sock
-            sock5_id[0] = sock.sock.uuid
-
-            if 4 in socks:
-                # got_sock4 has also run
-                check_socks_different()
-
-            # 9.
-            get_socket(callback=got_sock6)
-
-        def check_socks_different():
-            self.assertNotEqual(socks[4], socks[5])
-
-            # sock 5 is the request socket
-            id_4 = socks[4].sock.uuid
-            sock5_id[0] = socks[5].sock.uuid
-
-            del socks[4]
-            del socks[5]
-
-            # sock 4 is done and it's been reclaimed
-            self.assertTrue(id_4 in socket_ids())
-
-            # sock 5 still in request
-            self.assertFalse(sock5_id[0] in socket_ids())
-            results.add('step8')
-
-        def got_sock6(sock, error):
-            self.assertTrue(cx_pool[0].in_request())
-            self.assertTrue(isinstance(sock, pymongo.pool.SocketInfo))
-            self.assertEqual(sock5_id[0], sock.sock.uuid)
-            results.add('step9')
-
-        # Knock over the first domino.
-        cx.open(opened)
-
-        for step in (3, 5, 6, 7, 8, 9):
-            self.assertEventuallyEqual(
-                True, lambda: 'step%s' % step in results)
-
-        loop.start()
+    def test_requests(self):
+        cx = self.motor_connection(host, port)
+        for method in 'start_request', 'in_request', 'end_request':
+            self.assertRaises(NotImplementedError, getattr(cx, method))
 
 
 if __name__ == '__main__':

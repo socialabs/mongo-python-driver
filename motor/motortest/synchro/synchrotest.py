@@ -56,15 +56,12 @@ excluded_tests = [
     # fix the Synchro test or test the same functionality directly in Motor,
     # or document that Motor doesn't support the functionality
 
-    # Motor's requests can't be simulated in Synchro, so the request-
-    # handling part of test_copy_db is testing against Motor directly.
+    # Synchro can't simulate requests, so test copy_db in Motor directly.
     'TestConnection.test_copy_db',
 
     # TODO: test the following in Motor if we haven't already ------>
     'TestMasterSlaveConnection.test_disconnect',
     'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
-    'TestDatabase.test_authenticate_and_request',
-    'TestMasterSlaveConnection.test_insert_find_one_in_request',
     # <------------------- END TODO
 
     # This test requires a lot of PyMongo-specific monkey-patching, we're
@@ -75,13 +72,13 @@ excluded_tests = [
     # Motor's reprs aren't the same as PyMongo's
     '*.test_repr',
 
-    # Motor doesn't do auto_start_request at all
+    # Motor doesn't do requests
     'TestConnection.test_auto_start_request',
     'TestConnection.test_contextlib_auto_start_request',
-
-    # Motor's requests can't be simulated in Synchro, so we test them
-    # directly
     'TestConnection.test_with_start_request',
+    'TestMasterSlaveConnection.test_insert_find_one_in_request',
+    'TestDatabase.test_authenticate_and_request',
+    'TestGridfs.test_request',
 
     # test_replica_set_connection: We test this directly, because it requires
     # monkey-patching either socket or IOStream, depending on whether it's
