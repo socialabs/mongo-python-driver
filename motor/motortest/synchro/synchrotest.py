@@ -59,14 +59,13 @@ excluded_tests = [
     # Synchro can't simulate requests, so test copy_db in Motor directly.
     'TestConnection.test_copy_db',
 
-    # TODO: test the following in Motor if we haven't already ------>
+    # Tested directly against Motor
     'TestMasterSlaveConnection.test_disconnect',
-    'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
-    # <------------------- END TODO
 
-    # This test requires a lot of PyMongo-specific monkey-patching, we're
-    # not going to test this in Motor because it uses the same logic under the
-    # hood and can be assumed to work.
+    # These tests require a lot of PyMongo-specific monkey-patching, we're
+    # not going to test them in Motor because master-slave uses the same logic
+    # under the hood and can be assumed to work.
+    'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
     'TestMasterSlaveConnection.test_continue_until_slave_works',
 
     # Motor's reprs aren't the same as PyMongo's
