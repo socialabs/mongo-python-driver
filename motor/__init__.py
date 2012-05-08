@@ -18,7 +18,6 @@ import functools
 import logging
 import socket
 import time
-import uuid
 import weakref
 
 from tornado import ioloop, iostream, gen, stack_context
@@ -31,8 +30,6 @@ import pymongo.collection
 import pymongo.son_manipulator
 import pymongo.errors
 
-# Hook for unittesting; if true all MotorSockets get unique ids
-socket_uuid = False
 
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
            'MotorMasterSlaveConnection']
@@ -159,10 +156,6 @@ class MotorSocket(object):
            self.stream = iostream.SSLIOStream(sock, io_loop=io_loop)
         else:
            self.stream = iostream.IOStream(sock, io_loop=io_loop)
-
-        # Unittest hook
-        if socket_uuid:
-            self.uuid = uuid.uuid4()
 
     def setsockopt(self, *args, **kwargs):
         self.stream.socket.setsockopt(*args, **kwargs)
