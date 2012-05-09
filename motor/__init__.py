@@ -18,18 +18,31 @@ import functools
 import logging
 import socket
 import time
+import warnings
 import weakref
 
-from tornado import ioloop, iostream, gen, stack_context
-import greenlet
+# So that 'setup.py doc' can import this module without Tornado or greenlet
+requirements_satisfied = True
+try:
+    from tornado import ioloop, iostream, gen, stack_context
+except ImportError:
+    requirements_satisfied = False
+    warnings.warn("Tornado not installed", ImportWarning)
+
+try:
+    import greenlet
+except ImportError:
+    requirements_satisfied = False
+    warnings.warn("Greenlet not installed", ImportWarning)
 
 import pymongo
+import pymongo.collection
+import pymongo.cursor
+import pymongo.database
+import pymongo.errors
 import pymongo.master_slave_connection
 import pymongo.pool
-import pymongo.database
-import pymongo.collection
 import pymongo.son_manipulator
-import pymongo.errors
 
 
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
@@ -185,7 +198,12 @@ class MotorSocket(object):
 
     def close(self):
         if self.stream:
-            self.stream.close()
+            try:
+                self.stream.close()
+            except KeyError:
+                # Tornado's _impl (epoll, kqueue, ...) has already removed this
+                # file descriptor from its dict.
+                pass
 
     def fileno(self):
         return self.stream.socket.fileno()
@@ -686,7 +704,6 @@ class MotorReplicaSetMonitor(object):
         self.io_loop.add_callback(self.async_refresh)
 
 
-# TODO: examples of setting up MSCs
 class MotorMasterSlaveConnection(MotorConnectionBase):
     __delegate_class__ = pymongo.master_slave_connection.MasterSlaveConnection
 
@@ -697,6 +714,36 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
 
         The master and slaves can be :class:`~pymongo.connection.Connection`
         instances or connected :class:`MotorConnection` instances.
+
+        Creating a MotorMasterSlaveConnection with PyMongo Connections:
+
+        .. testsetup::
+
+          from pymongo.connection import Connection
+          from motor import MotorMasterSlaveConnection
+
+        .. doctest::
+
+          >>> master = Connection()
+          >>> slaves = [Connection(port=27018)]
+          >>> msc = MotorMasterSlaveConnection(master, slaves)
+          >>> def inserted(result, error):
+          ...     if error:
+          ...         raise error
+          ...
+          ...     msc.test.test_collection.remove({'_id': result})
+          ...
+          >>> msc.test.test_collection.insert({'a': 1}, w=2, callback=inserted)
+
+        Creating a MotorMasterSlaveConnection with MotorConnections:
+
+          >>> master = MotorConnection()
+          >>> master.open_sync()
+          MotorConnection(Connection('localhost', 27017))
+          >>> slaves = [Connection(port=27018)]
+          >>> slaves[0].open_sync()
+          MotorConnection(Connection('localhost', 27018))
+          >>> msc = MotorMasterSlaveConnection(master, slaves)
         """
         if 'io_loop' in kwargs:
             kwargs = kwargs.copy()
@@ -812,8 +859,16 @@ class MotorDatabase(MotorBase):
 
     __getitem__ = __getattr__
 
-    # TODO: doc why we need to override this, refactor
+    # TODO: refactor
     def drop_collection(self, name_or_collection, callback):
+        """Drop a collection.
+
+        :Parameters:
+          - `name_or_collection`: the name of a collection to drop or the
+            collection object itself
+          - `callback`: Optional function taking parameters (result, error)
+        """
+
         name = name_or_collection
         if isinstance(name, MotorCollection):
             name = name.delegate.name
@@ -823,8 +878,16 @@ class MotorDatabase(MotorBase):
             self.get_io_loop(), sync_method, False, False)
         async_method(name, callback=callback)
 
-    # TODO: doc why we need to override this, refactor
+    # TODO: refactor
     def validate_collection(self, name_or_collection, *args, **kwargs):
+        """Validate a collection.
+
+        Takes same arguments as
+        :meth:`~pymongo.database.Database.validate_collection`, plus:
+
+        :Parameters:
+          - `callback`: Optional function taking parameters (result, error)
+        """
         callback = kwargs.get('callback')
         check_callable(callback, required=True)
 
@@ -833,22 +896,30 @@ class MotorDatabase(MotorBase):
             name = name.delegate.name
 
         sync_method = self.delegate.validate_collection
-        async_method = asynchronize(self.get_io_loop(), sync_method, False, True)
+        async_method = asynchronize(
+            self.get_io_loop(), sync_method, False, True)
         async_method(name, callback=callback)
 
+    # TODO: refactor
     # TODO: test that this raises an error if collection exists in Motor, and
     # test creating capped coll
     def create_collection(self, name, *args, **kwargs):
-        # We need to override create_collection specially, rather than simply
-        # include it in async_ops, because we have to wrap the Collection it
-        # returns in a MotorCollection.
+        """Create a new collection in this database. Takes same arguments as
+        :meth:`~pymongo.database.Database.create_collection`, plus:
+
+        :Parameters:
+          - `callback`: Optional function taking parameters (result, error)
+        """
+        # We override create_collection to wrap the Collection it returns in a
+        # MotorCollection.
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
             del kwargs['callback']
 
         sync_method = self.delegate.create_collection
-        async_method = asynchronize(self.get_io_loop(), sync_method, False, False)
+        async_method = asynchronize(
+            self.get_io_loop(), sync_method, False, False)
 
         def cb(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
@@ -858,8 +929,16 @@ class MotorDatabase(MotorBase):
 
         async_method(name, *args, callback=cb, **kwargs)
 
-    # TODO: doc why we need to override this
     def add_son_manipulator(self, manipulator):
+        """Add a new son manipulator to this database.
+
+        Newly added manipulators will be applied before existing ones.
+
+        :Parameters:
+          - `manipulator`: the manipulator to add
+        """
+        # We override add_son_manipulator to unwrap the AutoReference's
+        # database attribute.
         if isinstance(manipulator, pymongo.son_manipulator.AutoReference):
             db = manipulator.database
             if isinstance(db, MotorDatabase):
@@ -984,12 +1063,11 @@ class MotorCursorChainingMethod(DelegateProperty):
 
 
 class MotorCursor(MotorBase):
+    __delegate_class__ = pymongo.cursor.Cursor
     # TODO: test all these in test_motor_cursor.py
     count                       = Async(has_safe_arg=False, cb_required=True)
     distinct                    = Async(has_safe_arg=False, cb_required=True)
     explain                     = Async(has_safe_arg=False, cb_required=True)
-    next                        = Async(has_safe_arg=False, cb_required=True)
-    __exit__                    = Async(has_safe_arg=False, cb_required=True)
 
     slave_okay                  = ReadOnlyDelegateProperty()
     alive                       = ReadOnlyDelegateProperty()
@@ -1004,13 +1082,14 @@ class MotorCursor(MotorBase):
     sort                        = MotorCursorChainingMethod()
     hint                        = MotorCursorChainingMethod()
     where                       = MotorCursorChainingMethod()
-    __enter__                   = MotorCursorChainingMethod()
 
     def __init__(self, cursor, collection):
-        """
+        """You will not usually construct a MotorCursor yourself, but acquire
+        one from :meth:`MotorCollection.find`.
+
         :Parameters:
-         - `cursor`:      Synchronous pymongo Cursor
-         - `collection`:  MotorCollection
+         - `cursor`:      PyMongo :class:`~pymongo.cursor.Cursor`
+         - `collection`:  :class:`MotorCollection`
         """
         if not isinstance(cursor, pymongo.cursor.Cursor):
             raise TypeError(
@@ -1048,14 +1127,55 @@ class MotorCursor(MotorBase):
         """Asynchronously retrieve the next document in the result set,
         fetching a batch of results from the server if necessary.
 
-        # TODO: note that you should close() cursor if you cancel iteration
-        # TODO: prevent concurrent uses of this cursor, as IOStream does, and
-        #   document that and how to avoid it.
-        # TODO: doctest
+        .. testsetup::
+
+          import sys
+
+          from pymongo.connection import Connection
+          Connection().test.test_collection.remove()
+
+          from motor import MotorConnection
+          from tornado.ioloop import IOLoop
+          connection = MotorConnection().open_sync()
+          collection = connection.test.test_collection
+
+        .. doctest::
+
+          >>> cursor = None
+          >>> def inserted(result, error):
+          ...     global cursor
+          ...     if error:
+          ...         raise error
+          ...     cursor = collection.find().sort([('_id', 1)])
+          ...     cursor.next(callback=on_next)
+          ...
+          >>> def on_next(result, error):
+          ...     if error:
+          ...         raise error
+          ...     elif result:
+          ...         sys.stdout.write(str(result['_id']) + ', ')
+          ...         cursor.next(callback=on_next)
+          ...     else:
+          ...         # Iteration complete
+          ...         IOLoop.instance().stop()
+          ...         print 'done'
+          ...
+          >>> collection.insert(
+          ...     [{'_id': i} for i in range(5)], callback=inserted)
+          >>> IOLoop.instance().start()
+          0, 1, 2, 3, 4, done
+
+        In the example above there is no need to call :meth:`close`,
+        because the cursor is iterated to completion. If you cancel iteration
+        before exhausting the cursor, call :meth:`close` to immediately free
+        server resources. Otherwise, the garbage-collector will eventually
+        close the cursor when deleting it.
 
         :Parameters:
          - `callback`: function taking (document, error)
         """
+        # TODO: prevent concurrent uses of this cursor, as IOStream does, and
+        #   document that and how to avoid it.
         check_callable(callback, required=True)
         add_callback = self.get_io_loop().add_callback
 
@@ -1087,12 +1207,53 @@ class MotorCursor(MotorBase):
             add_callback(functools.partial(callback, None, None))
 
     def each(self, callback):
-        """Iterates over all the documents for this cursor. Return False from
-        the callback to stop iteration. each returns immediately, and your
-        callback is executed asynchronously for each document. callback is
-        passed (None, None) when iteration is complete.
+        """Iterates over all the documents for this cursor.
 
-        # TODO: note that you should close() cursor if you cancel iteration
+        `each` returns immediately, and `callback` is executed asynchronously
+        for each document. `callback` is passed ``(None, None)`` when iteration
+        is complete.
+
+        Return ``False`` from the callback to stop iteration. If you stop
+        iteration you should call :meth:`close` to immediately free server
+        resources for the cursor. It is unnecessary to close a cursor after
+        iterating it completely.
+
+        .. testsetup::
+
+          import sys
+
+          from pymongo.connection import Connection
+          Connection().test.test_collection.remove()
+
+          from motor import MotorConnection
+          from tornado.ioloop import IOLoop
+          connection = MotorConnection().open_sync()
+          collection = connection.test.test_collection
+
+        .. doctest::
+
+          >>> cursor = None
+          >>> def inserted(result, error):
+          ...     global cursor
+          ...     if error:
+          ...         raise error
+          ...     cursor = collection.find().sort([('_id', 1)])
+          ...     cursor.each(callback=each)
+          ...
+          >>> def each(result, error):
+          ...     if error:
+          ...         raise error
+          ...     elif result:
+          ...         sys.stdout.write(str(result['_id']) + ', ')
+          ...     else:
+          ...         # Iteration complete
+          ...         IOLoop.instance().stop()
+          ...         print 'done'
+          ...
+          >>> collection.insert(
+          ...     [{'_id': i} for i in range(5)], callback=inserted)
+          >>> IOLoop.instance().start()
+          0, 1, 2, 3, 4, done
 
         :Parameters:
          - `callback`: function taking (document, error)
@@ -1114,13 +1275,14 @@ class MotorCursor(MotorBase):
         self.next(next_callback)
 
     def to_list(self, callback):
-        """Get a list of documents. The caller is responsible for making sure
-        that there is enough memory to store the results -- it is strongly
-        recommended you use a limit like:
+        """Get a list of documents.
+
+        The caller is responsible for making sure that there is enough memory
+        to store the results -- it is strongly recommended you use a limit like:
 
         >>> collection.find().limit(some_number).to_list(callback)
 
-        to_list returns immediately, and your callback is executed
+        `to_list` returns immediately, and `callback` is executed
         asynchronously with the list of documents.
 
         :Parameters:
@@ -1225,11 +1387,46 @@ class MotorCursor(MotorBase):
         return len(self.delegate._Cursor__data)
 
     def __getitem__(self, index):
+        """Get a slice of documents from this cursor.
+
+        Raises :class:`~pymongo.errors.InvalidOperation` if this
+        cursor has already been used.
+
+        To get a single document use an integral index, e.g.::
+
+          >>> def callback(result, error):
+          ...     print result
+          ...
+          >>> db.test.find()[50].each(callback)
+
+        An :class:`~pymongo.errors.IndexErrorIndexError` will be raised if
+        the index is negative or greater than the amount of documents in
+        this cursor. Any limit previously applied to this cursor will be
+        ignored.
+
+        To get a slice of documents use a slice index, e.g.::
+
+          >>> db.test.find()[20:25].each(callback)
+
+        This will return a copy of this cursor with a limit of ``5`` and
+        skip of ``20`` applied.  Using a slice index will override any prior
+        limits or skips applied to this cursor (including those
+        applied through previous calls to this method). Raises
+        :class:`~pymongo.errors.IndexError` when the slice has a step,
+        a negative start value, or a stop value less than or equal to
+        the start value.
+
+        :Parameters:
+          - `index`: An integer or slice index to be applied to this cursor
+        """
         # TODO test that this raises TypeError if index is not slice, int, long
         # TODO doc that this does not raise IndexError if index > len results
         # TODO test that this raises IndexError if index < 0
         # TODO: doctest
         # TODO: test this is an error if tailable
+        if self.started:
+            raise pymongo.errors.InvalidOperation("MotorCursor already started")
+
         if isinstance(index, slice):
              return MotorCursor(self.delegate[index], self.collection)
         else:
@@ -1248,36 +1445,38 @@ class MotorCursor(MotorBase):
 # TODO: move to 'motorgen' submodule, test, doc all these three gen tasks, and
 #   consider if there are additional convenience methods possible. Lots of
 #   examples. Link to tornado gen docs.
-class Op(gen.Task):
-    def __init__(self, func, *args, **kwargs):
-        check_callable(func, True)
-        super(Op, self).__init__(func, *args, **kwargs)
+# TODO: some way to generate docs even without Tornado installed?
+if requirements_satisfied:
+    class Op(gen.Task):
+        def __init__(self, func, *args, **kwargs):
+            check_callable(func, True)
+            super(Op, self).__init__(func, *args, **kwargs)
 
-    def get_result(self):
-        (result, error), _ = super(Op, self).get_result()
-        if error:
-            raise error
-        return result
-
-
-class WaitOp(gen.Wait):
-    def get_result(self):
-        (result, error), _ = super(WaitOp, self).get_result()
-        if error:
-            raise error
-
-        return result
-
-
-class WaitAllOps(gen.WaitAll):
-    def get_result(self):
-        super_results = super(WaitAllOps, self).get_result()
-
-        results = []
-        for (result, error), _ in super_results:
+        def get_result(self):
+            (result, error), _ = super(Op, self).get_result()
             if error:
                 raise error
-            else:
-                results.append(result)
+            return result
 
-        return results
+
+    class WaitOp(gen.Wait):
+        def get_result(self):
+            (result, error), _ = super(WaitOp, self).get_result()
+            if error:
+                raise error
+
+            return result
+
+
+    class WaitAllOps(gen.WaitAll):
+        def get_result(self):
+            super_results = super(WaitAllOps, self).get_result()
+
+            results = []
+            for (result, error), _ in super_results:
+                if error:
+                    raise error
+                else:
+                    results.append(result)
+
+            return results

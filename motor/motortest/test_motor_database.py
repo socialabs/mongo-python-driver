@@ -15,9 +15,14 @@
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import unittest
-from tornado import gen
 
 import motor
+if not motor.requirements_satisfied:
+    from nose.plugins.skip import SkipTest
+    raise SkipTest("Tornado or greenlet not installed")
+
+from tornado import gen
+
 from motor.motortest import MotorTest, async_test_engine, host, port
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 

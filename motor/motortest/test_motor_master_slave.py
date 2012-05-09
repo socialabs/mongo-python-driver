@@ -13,19 +13,22 @@
 # limitations under the License.
 
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
-import collections
 
+import collections
 import unittest
 
-from tornado import ioloop
 from nose.plugins.skip import SkipTest
 
 import motor
-import pymongo
+if not motor.requirements_satisfied:
+    raise SkipTest("Tornado or greenlet not installed")
+
+from tornado import ioloop
 
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, host2, port2, host3, port3,
     AssertEqual, puritanical)
+import pymongo
 from pymongo.errors import (
     InvalidOperation, ConfigurationError, ConnectionFailure)
 
@@ -65,7 +68,7 @@ class MotorMasterSlaveTest(MotorTest):
         ]
 
         # Must open connections before creating MSC
-        self.assertRaises(pymongo.errors.InvalidOperation, MSC, master, slaves)
+        self.assertRaises(InvalidOperation, MSC, master, slaves)
 
         yield motor.Op(master.open)
         yield motor.Op(slaves[0].open)

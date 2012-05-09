@@ -22,12 +22,15 @@ try:
 except ImportError:
     have_ssl = False
 
-from tornado import ioloop
 from nose.plugins.skip import SkipTest
 
 import motor
-from motor.motortest import (
-    MotorTest, async_test_engine, host, port, AssertEqual)
+if not motor.requirements_satisfied:
+    raise SkipTest("Tornado or greenlet not installed")
+
+from tornado import ioloop
+
+from motor.motortest import MotorTest, host, port
 from pymongo.errors import ConfigurationError
 
 

@@ -17,12 +17,13 @@
 import time
 import unittest
 
+import motor
+if not motor.requirements_satisfied:
+    from nose.plugins.skip import SkipTest
+    raise SkipTest("Tornado or greenlet not installed")
+
 from tornado import gen, ioloop
 
-import sys
-sys.path[0:0] = "/Users/emptysquare/.virtualenvs/pymongo/mongo-python-driver"
-
-import motor
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
 from bson.objectid import ObjectId

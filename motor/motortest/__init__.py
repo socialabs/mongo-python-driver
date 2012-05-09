@@ -21,8 +21,13 @@ import types
 import pymongo
 
 import motor
-from motor.motortest import eventually, puritanical
+if not motor.requirements_satisfied:
+    from nose.plugins.skip import SkipTest
+    raise SkipTest("Tornado or greenlet not installed")
+
 from tornado import gen, ioloop
+
+from motor.motortest import eventually, puritanical
 
 
 host = os.environ.get("DB_IP", "localhost")

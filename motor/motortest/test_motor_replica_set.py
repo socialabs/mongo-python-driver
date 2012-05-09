@@ -18,9 +18,13 @@ import functools
 import socket
 import unittest
 
+import motor
+if not motor.requirements_satisfied:
+    from nose.plugins.skip import SkipTest
+    raise SkipTest("Tornado or greenlet not installed")
+
 from tornado import ioloop, iostream
 
-import motor
 from motor.motortest import (
     MotorTest, async_test_engine, AssertRaises)
 import pymongo.errors
