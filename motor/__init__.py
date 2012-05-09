@@ -25,6 +25,7 @@ import greenlet
 
 import pymongo
 import pymongo.master_slave_connection
+import pymongo.pool
 import pymongo.database
 import pymongo.collection
 import pymongo.son_manipulator
@@ -34,9 +35,6 @@ import pymongo.errors
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
            'MotorMasterSlaveConnection']
 
-# TODO: sphinx-formatted docstrings
-# TODO: document that all Motor methods accept a callback, but only
-#   some require them. Get that into Sphinx for each async method somehow
 # TODO: note you can't use from multithreaded app, can't fork, consider special
 #   checks to prevent it?
 # TODO: document that default timeout is None, ensure we're doing
@@ -66,6 +64,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 # TODO: test that ensure_index calls the callback even if the index
 #   is already created and in the index cache - might be a special-case
 #   optimization
+# TODO: perhaps remove versionchanged Sphinx annotations from proxied methods,
+#   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -142,10 +142,9 @@ def motor_sock_method(check_closed=False):
 
 
 class MotorSocket(object):
-    """
-    Replace socket with a class that yields from the current greenlet, if we're
-    on a child greenlet, when making blocking calls, and uses Tornado IOLoop to
-    schedule child greenlet for resumption when I/O is ready.
+    """Replace socket with a class that yields from the current greenlet, if
+    we're on a child greenlet, when making blocking calls, and uses Tornado
+    IOLoop to schedule child greenlet for resumption when I/O is ready.
 
     We only implement those socket methods actually used by pymongo.
     """
@@ -171,7 +170,8 @@ class MotorSocket(object):
     @motor_sock_method(check_closed=True)
     def connect(self, pair, callback):
         """
-        @param pair: A tuple, (host, port)
+        :Parameters:
+         - `pair`: A tuple, (host, port)
         """
         self.stream.connect(pair, callback)
 
@@ -196,6 +196,12 @@ class MotorSocket(object):
 
 class MotorPool(pymongo.pool.GreenletPool):
     """A simple connection pool of MotorSockets.
+
+    Note this inherits from GreenletPool so that when PyMongo internally calls
+    start_request, e.g. in Database.authenticate() or
+    Connection.copy_database(), this pool assigns a socket to the current
+    greenlet for the duration of the method. Request semantics are not exposed
+    to Motor's users.
     """
     def __init__(self, io_loop, *args, **kwargs):
         self.io_loop = io_loop
@@ -251,11 +257,12 @@ class MotorPool(pymongo.pool.GreenletPool):
 
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     """
-    @param io_loop:           A Tornado IOLoop
-    @param sync_method:       Bound method of pymongo Collection, Database,
-                              Connection, or Cursor
-    @param has_safe_arg:      Whether the method takes a 'safe' argument
-    @param callback_required: If True, raise TypeError if no callback is passed
+    :Parameters:
+     - `io_loop`:           A Tornado IOLoop
+     - `sync_method`:       Bound method of pymongo Collection, Database,
+                            Connection, or Cursor
+     - `has_safe_arg`:      Whether the method takes a 'safe' argument
+     - `callback_required`: If True, raise TypeError if no callback is passed
     """
     assert isinstance(io_loop, ioloop.IOLoop)
 
@@ -300,12 +307,15 @@ class DelegateProperty(object):
     pass
 
 
-# TODO doc
 class Async(DelegateProperty):
     def __init__(self, has_safe_arg, cb_required):
         """
-        @param has_safe_arg:    Whether the method takes a 'safe' argument
-        @param cb_required:     Whether callback is required or optional
+        A descriptor that wraps a PyMongo method, such as insert or remove, and
+        returns an asynchronous version of the method, which takes a callback.
+
+        :Parameters:
+         - `has_safe_arg`:    Whether the method takes a 'safe' argument
+         - `cb_required`:     Whether callback is required or optional
         """
         self.has_safe_arg = has_safe_arg
         self.cb_required = cb_required
@@ -368,7 +378,8 @@ class MotorBase(object):
 
 
 class MotorConnectionBase(MotorBase):
-    database_names              = Async(has_safe_arg=False, cb_required=False)
+    database_names              = Async(has_safe_arg=False, cb_required=True)
+    close_cursor                = Async(has_safe_arg=False, cb_required=False)
     disconnect                  = ReadOnlyDelegateProperty()
     tz_aware                    = ReadOnlyDelegateProperty()
 
@@ -397,8 +408,20 @@ class MotorConnectionBase(MotorBase):
 
     __getitem__ = __getattr__
 
-    # TODO: doc why we need to override this
     def drop_database(self, name_or_database, callback):
+        """Drop a database.
+
+        Raises :class:`TypeError` if `name_or_database` is not an instance of
+        :class:`basestring` (:class:`str` in python 3),
+        :class:`~pymongo.database.Database`,
+        or :class:`MotorDatabase`.
+
+        :Parameters:
+          - `name_or_database`: the name of a database to drop, or a
+            :class:`~pymongo.database.Database` instance representing the
+            database to drop
+          - `callback`: Optional function taking parameters (connection, error)
+        """
         if isinstance(name_or_database, MotorDatabase):
             name_or_database = name_or_database.delegate.name
 
@@ -413,12 +436,14 @@ class MotorConnectionBase(MotorBase):
 
     @property
     def connected(self):
+        """True after :meth:`open` or :meth:`open_sync` completes"""
         return self.delegate is not None
 
 
 class MotorConnectionBasePlus(MotorConnectionBase):
-    """MotorConnection and MotorReplicaSetConnection common functionality
-    (MotorMasterSlaveConnection is more primitive)
+    """MotorConnection and MotorReplicaSetConnection common functionality.
+    (MotorMasterSlaveConnection is more primitive, so it inherits from
+    MotorConnectionBase.)
     """
     server_info                 = Async(has_safe_arg=False, cb_required=False)
     copy_database               = Async(has_safe_arg=False, cb_required=False)
@@ -432,7 +457,6 @@ class MotorConnectionBasePlus(MotorConnectionBase):
             raise pymongo.errors.ConfigurationError(
                 "Motor doesn't support auto_start_request")
 
-        # TODO: document io_loop kw arg
         if 'io_loop' in kwargs:
             kwargs = kwargs.copy()
             io_loop = kwargs.pop('io_loop')
@@ -449,7 +473,9 @@ class MotorConnectionBasePlus(MotorConnectionBase):
     def open(self, callback):
         """
         Actually connect, passing self to a callback when connected.
-        @param callback: Optional function taking parameters (connection, error)
+
+        :Parameters:
+         - `callback`: Optional function taking parameters (connection, error)
         """
         check_callable(callback)
 
@@ -468,7 +494,7 @@ class MotorConnectionBasePlus(MotorConnectionBase):
                 kw = self._init_kwargs
                 kw['auto_start_request'] = False
                 kw['_pool_class'] = functools.partial(MotorPool, self.io_loop)
-                self.delegate = self._new_delegate(*self._init_args, **kw)
+                self.delegate = self.__delegate_class__(*self._init_args, **kw)
 
                 del self._init_args
                 del self._init_kwargs
@@ -487,7 +513,11 @@ class MotorConnectionBasePlus(MotorConnectionBase):
         gr.switch()
 
     def open_sync(self):
-        """Synchronous open(), returning self
+        """Synchronous open(), returning self.
+
+        Under the hood, this method creates a new Tornado IOLoop, runs
+        :meth:`open` on the loop, and deletes the loop when :meth:`open`
+        completes.
         """
         if self.connected:
             return self
@@ -528,8 +558,8 @@ class MotorConnectionBasePlus(MotorConnectionBase):
 
 
 class MotorConnection(MotorConnectionBasePlus):
-    # TODO: auto-gen Sphinx documentation that pulls from PyMongo for all these
-    close_cursor                = Async(has_safe_arg=False, cb_required=True)
+    __delegate_class__ = pymongo.connection.Connection
+
     kill_cursors                = Async(has_safe_arg=False, cb_required=True)
     fsync                       = Async(has_safe_arg=False, cb_required=False)
     unlock                      = Async(has_safe_arg=False, cb_required=False)
@@ -537,8 +567,35 @@ class MotorConnection(MotorConnectionBasePlus):
     host                        = ReadOnlyDelegateProperty()
     port                        = ReadOnlyDelegateProperty()
 
-    # TODO: test directly, doc this difference b/w PyMongo and Motor
+    def __init__(self, *args, **kwargs):
+        """Create a new connection to a single MongoDB instance at *host:port*.
+
+        :meth:`open` or :meth:`open_sync` must be called before using a new
+        MotorConnection.
+
+        MotorConnection takes the same constructor arguments as
+        :class:`~pymongo.connection.Connection`, as well as:
+
+        :Parameters:
+          - `io_loop` (optional): Special :class:`tornado.ioloop.IOLoop`
+            instance to use instead of default
+        """
+        super(MotorConnection, self).__init__(*args, **kwargs)
+
+    # TODO: test directly, document what 'result' means to the callback
     def is_locked(self, callback):
+        """Is this server locked? While locked, all write operations
+        are blocked, although read operations may still be allowed.
+        Use :meth:`unlock` to unlock.
+
+        :Parameters:
+         - `callback`:    function taking parameters (result, error)
+
+        .. note:: PyMongo's :attr:`~pymongo.connection.Connection.is_locked` is
+           a property that synchronously executes the `currentOp` command on the
+           server before returning. In Motor, `is_locked` must take a callback
+           and execute asynchronously.
+        """
         def is_locked(result, error):
             if error:
                 callback(None, error)
@@ -547,15 +604,14 @@ class MotorConnection(MotorConnectionBasePlus):
 
         self.admin.current_op(callback=is_locked)
 
-    def _new_delegate(self, *args, **kwargs):
-        return pymongo.connection.Connection(*args, **kwargs)
-
     def _get_pools(self):
         # TODO: expose the PyMongo pool, or otherwise avoid this
         return [self.delegate._Connection__pool]
 
 
 class MotorReplicaSetConnection(MotorConnectionBasePlus):
+    __delegate_class__ = pymongo.replica_set_connection.ReplicaSetConnection
+
     primary                       = ReadOnlyDelegateProperty()
     secondaries                   = ReadOnlyDelegateProperty()
     arbiters                      = ReadOnlyDelegateProperty()
@@ -563,16 +619,25 @@ class MotorReplicaSetConnection(MotorConnectionBasePlus):
     seeds                         = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
+        """Create a new connection to a MongoDB replica set.
+
+        :meth:`open` or :meth:`open_sync` must be called before using a new
+        MotorReplicaSetConnection.
+
+        MotorReplicaSetConnection takes the same constructor arguments as
+        :class:`~pymongo.replica_set_connection.ReplicaSetConnection`,
+        as well as:
+
+        :Parameters:
+          - `io_loop` (optional): Special :class:`tornado.ioloop.IOLoop`
+            instance to use instead of default
+        """
         super(MotorReplicaSetConnection, self).__init__(*args, **kwargs)
 
         # This _monitor_class will be passed to PyMongo's
         # ReplicaSetConnection when we create it.
         self._init_kwargs['_monitor_class'] = functools.partial(
             MotorReplicaSetMonitor, self.io_loop)
-
-    def _new_delegate(self, *args, **kwargs):
-        return pymongo.replica_set_connection.ReplicaSetConnection(
-            *args, **kwargs)
 
     def _get_pools(self):
         # TODO: expose the PyMongo pools, or otherwise avoid this
@@ -621,13 +686,18 @@ class MotorReplicaSetMonitor(object):
         self.io_loop.add_callback(self.async_refresh)
 
 
-# TODO: doc that this can take MotorConnections or PyMongo Connections
 # TODO: examples of setting up MSCs
 class MotorMasterSlaveConnection(MotorConnectionBase):
-    close_cursor = ReadOnlyDelegateProperty()
+    __delegate_class__ = pymongo.master_slave_connection.MasterSlaveConnection
 
     def __init__(self, master, slaves, *args, **kwargs):
-        # TODO: document io_loop kw arg
+        """Create a new connection to a MongoDB master-slave set.
+        Takes same arguments as
+        :class:`~pymongo.master_slave_connection.MasterSlaveConnection`.
+
+        The master and slaves can be :class:`~pymongo.connection.Connection`
+        instances or connected :class:`MotorConnection` instances.
+        """
         if 'io_loop' in kwargs:
             kwargs = kwargs.copy()
             io_loop = kwargs.pop('io_loop')
@@ -672,6 +742,7 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
 
     @property
     def master(self):
+        """A :class:`MotorConnection`"""
         motor_master = MotorConnection()
         motor_master.delegate = self.delegate.master
         motor_master.io_loop = self.io_loop
@@ -679,6 +750,7 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
 
     @property
     def slaves(self):
+        """A list of :class:`MotorConnection` instances"""
         motor_slaves = []
         for slave in self.delegate.slaves:
             motor_slave = MotorConnection()
@@ -694,6 +766,8 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
 
 
 class MotorDatabase(MotorBase):
+    __delegate_class__ = pymongo.database.Database
+
     # list of overridden async operations on a MotorDatabase instance
     set_profiling_level           = Async(has_safe_arg=False, cb_required=False)
     reset_error_history           = Async(has_safe_arg=False, cb_required=False)
@@ -798,6 +872,8 @@ class MotorDatabase(MotorBase):
 
 
 class MotorCollection(MotorBase):
+    __delegate_class__ = pymongo.collection.Collection
+
     create_index            = Async(has_safe_arg=False, cb_required=False)
     drop_indexes            = Async(has_safe_arg=False, cb_required=False)
     drop_index              = Async(has_safe_arg=False, cb_required=False)
@@ -822,6 +898,8 @@ class MotorCollection(MotorBase):
 
     uuid_subtype            = ReadWriteDelegateProperty()
 
+    full_name               = ReadOnlyDelegateProperty()
+
     def __init__(self, database, name, *args, **kwargs):
         if not isinstance(database, MotorDatabase):
             raise TypeError("First argument to MotorCollection must be "
@@ -839,13 +917,15 @@ class MotorCollection(MotorBase):
         )
 
     def find(self, *args, **kwargs):
-        """
-        Get a MotorCursor.
+        """Create a :class:`MotorCursor`. Same parameters as for
+        :meth:`~pymongo.collection.Collection.find`.
+
+        Note that :meth:`find` does not take a `callback` parameter -- pass
+        a callback to the :class:`MotorCursor`'s methods such as
+        :meth:`MotorCursor.find`.
         """
         if 'callback' in kwargs:
-            # TODO: is ConfigurationError the right exception? Not
-            #   OperationFailure?
-            raise pymongo.errors.ConfigurationError(
+            raise pymongo.errors.InvalidOperation(
                 "Pass a callback to next, each, to_list, count, or tail, not"
                 " to find"
             )
@@ -854,8 +934,23 @@ class MotorCollection(MotorBase):
         return MotorCursor(cursor, self)
 
     def map_reduce(self, *args, **kwargs):
-        # We need to override map_reduce specially because we have to wrap the
-        # Collection it returns in a MotorCollection.
+        """Perform a map/reduce operation on this collection.
+
+        If `full_response` is ``False`` (default) passes a
+        :class:`MotorCollection` instance containing
+        the results of the operation to ``callback``.
+        Otherwise, returns the full
+        response from the server to the `map reduce command`_.
+
+        Takes same arguments as
+        :meth:`~pymongo.collection.Collection.map_reduce`,
+        as well as:
+
+        :Parameters:
+         - `callback`: function taking parameters (result, error)
+
+        .. _map reduce command: http://www.mongodb.org/display/DOCS/MapReduce
+        """
         callback = kwargs.get('callback')
         check_callable(callback, required=False)
         if 'callback' in kwargs:
@@ -913,8 +1008,9 @@ class MotorCursor(MotorBase):
 
     def __init__(self, cursor, collection):
         """
-        @param cursor:      Synchronous pymongo Cursor
-        @param collection:  MotorCollection
+        :Parameters:
+         - `cursor`:      Synchronous pymongo Cursor
+         - `collection`:  MotorCollection
         """
         if not isinstance(cursor, pymongo.cursor.Cursor):
             raise TypeError(
@@ -934,7 +1030,8 @@ class MotorCursor(MotorBase):
         """
         Get a batch of data asynchronously, either performing an initial query
         or getting more data from an existing cursor.
-        @param callback:    function taking parameters (batch_size, error)
+        :Parameters:
+         - `callback`:    function taking parameters (batch_size, error)
         """
         if self.started and not self.alive:
             raise pymongo.errors.InvalidOperation(
@@ -954,8 +1051,10 @@ class MotorCursor(MotorBase):
         # TODO: note that you should close() cursor if you cancel iteration
         # TODO: prevent concurrent uses of this cursor, as IOStream does, and
         #   document that and how to avoid it.
+        # TODO: doctest
 
-        @param callback: function taking (document, error)
+        :Parameters:
+         - `callback`: function taking (document, error)
         """
         check_callable(callback, required=True)
         add_callback = self.get_io_loop().add_callback
@@ -995,7 +1094,8 @@ class MotorCursor(MotorBase):
 
         # TODO: note that you should close() cursor if you cancel iteration
 
-        @param callback: function taking (document, error)
+        :Parameters:
+         - `callback`: function taking (document, error)
         """
         check_callable(callback, required=True)
         add_callback = self.get_io_loop().add_callback
@@ -1023,7 +1123,8 @@ class MotorCursor(MotorBase):
         to_list returns immediately, and your callback is executed
         asynchronously with the list of documents.
 
-        @param callback: function taking (documents, error)
+        :Parameters:
+         - `callback`: function taking (documents, error)
         """
         # TODO: error if tailable
         # TODO: significant optimization if we reimplement this without each()?
@@ -1144,7 +1245,9 @@ class MotorCursor(MotorBase):
             self.close()
 
 
-# TODO: test, doc all these three gen tasks
+# TODO: move to 'motorgen' submodule, test, doc all these three gen tasks, and
+#   consider if there are additional convenience methods possible. Lots of
+#   examples. Link to tornado gen docs.
 class Op(gen.Task):
     def __init__(self, func, *args, **kwargs):
         check_callable(func, True)

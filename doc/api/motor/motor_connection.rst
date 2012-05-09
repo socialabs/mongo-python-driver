@@ -1,0 +1,52 @@
+:class:`MotorConnection` -- Connection to MongoDB
+=================================================
+
+.. automodule:: motor
+
+   .. autoclass:: motor.MotorConnection
+
+      .. automethod:: open
+      .. automethod:: open_sync
+      .. method:: disconnect
+
+         Disconnect from MongoDB.
+
+         Disconnecting will close all underlying sockets in the
+         connection pool. If the :class:`MotorConnection` is used again it
+         will be automatically re-opened.
+
+      .. method:: close
+
+         Alias for :meth:`disconnect`.
+
+      .. describe:: c[db_name] || c.db_name
+
+         Get the `db_name` :class:`MotorDatabase` on :class:`MotorConnection` `c`.
+
+         Raises :class:`~pymongo.errors.InvalidName` if an invalid database name is used.
+         Raises :class:`~pymongo.errors.InvalidOperation` if connection isn't opened yet.
+
+      .. automethod:: is_locked
+      .. automotorattribute:: host
+      .. automotorattribute:: port
+      .. automotorattribute:: nodes
+      .. automotorattribute:: max_pool_size
+      .. automotorattribute:: document_class
+      .. automotorattribute:: tz_aware
+      .. automotorattribute:: read_preference
+      .. automotorattribute:: slave_okay
+      .. automotorattribute:: safe
+      .. automotorattribute:: is_locked
+      .. automotormethod:: get_lasterror_options
+      .. automotormethod:: set_lasterror_options
+      .. automotormethod:: unset_lasterror_options
+      .. automotormethod:: database_names
+      .. automotormethod:: drop_database
+      .. automotormethod:: copy_database(from_name, to_name[, from_host=None[, username=None[, password=None]]])
+      .. automotormethod:: server_info
+      .. automotormethod:: start_request
+      .. automotormethod:: end_request
+      .. automotormethod:: close_cursor
+      .. automotormethod:: kill_cursors
+      .. automotormethod:: fsync
+      .. automotormethod:: unlock
