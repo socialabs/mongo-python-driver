@@ -38,6 +38,7 @@ MSC = motor.MotorMasterSlaveConnection
 
 class MotorMasterSlaveTest(MotorTest):
     def setUp(self):
+        self.fail("MotorMasterSlaveConnection is totally broken")
         super(MotorMasterSlaveTest, self).setUp()
 
         self.sync_master = pymongo.connection.Connection(host, port)
