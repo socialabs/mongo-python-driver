@@ -1068,6 +1068,7 @@ class MotorCursor(MotorBase):
     count                       = Async(has_safe_arg=False, cb_required=True)
     distinct                    = Async(has_safe_arg=False, cb_required=True)
     explain                     = Async(has_safe_arg=False, cb_required=True)
+    close                       = Async(has_safe_arg=False, cb_required=False)
 
     slave_okay                  = ReadOnlyDelegateProperty()
     alive                       = ReadOnlyDelegateProperty()
@@ -1306,14 +1307,6 @@ class MotorCursor(MotorBase):
 
     def clone(self):
         return MotorCursor(self.delegate.clone(), self.collection)
-
-    def close(self):
-        """Explicitly close this cursor.
-        """
-        # TODO: either use asynchronize() or explain why this works
-        # TODO: test and document a technique of calling close instead of
-        #   returning False from callback in order to cancel iteration
-        greenlet.greenlet(self.delegate.close).switch()
 
     def rewind(self):
         # TODO: test, doc -- this seems a little extra weird w/ Motor

@@ -76,8 +76,8 @@ class MotorCursorTest(MotorTest):
         ioloop.IOLoop.instance().start()
 
     def test_cursor_close(self):
-        # The flow here is complex; we're testing that a cursor can be explicitly
-        # closed.
+        # The flow here is complex; we're testing that a cursor can be
+        # explicitly closed.
         # 1. Create a cursor on the server by running find()
         # 2. In the find() callback, start closing the cursor
         # 3. Wait a little to make sure the cursor closes
@@ -87,21 +87,30 @@ class MotorCursorTest(MotorTest):
         loop = ioloop.IOLoop.instance()
 
         def found(result, error):
-            loop.stop()
             if error:
                 raise error
 
-            cursor.close()
+            self.assertFalse(cursor.delegate._Cursor__killed)
+            cursor.close(callback=closed)
 
             # Cancel iteration, so the cursor isn't exhausted
             return False
+
+        def closed(result, error):
+            # Cursor reports it's alive because it has buffered data, even
+            # though it's killed on the server
+            self.assertTrue(cursor.alive)
+            self.assertTrue(cursor.delegate._Cursor__killed)
+            loop.stop()
+            if error:
+                raise error
 
         cursor = cx.test.test_collection.find()
         cursor.each(callback=found)
 
         # Start the find(), the callback will close the cursor
         loop.start()
-        self.wait_for_cursors()
+        self.assertEqual(self.open_cursors, self.get_open_cursors())
 
     @async_test_engine()
     def test_cursor_slice(self):

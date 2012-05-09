@@ -501,6 +501,15 @@ class Cursor(Synchro):
     def collection(self):
         return self.delegate.collection
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+        # Don't suppress exceptions
+        return False
+
     _Cursor__id                = SynchroProperty()
     _Cursor__query_options     = SynchroProperty()
     _Cursor__retrieved         = SynchroProperty()
