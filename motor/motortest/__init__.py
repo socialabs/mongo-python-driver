@@ -40,7 +40,6 @@ host3 = os.environ.get("DB_IP3", "localhost")
 port3 = int(os.environ.get("DB_PORT3", 27019))
 
 
-# TODO: sphinx-compat?
 # TODO: test map_reduce and inline_map_reduce
 # TODO: test that a database or collection called delegate, or dotted
 #   collection including "delegate", can be accessed via [ ], doc that
@@ -56,9 +55,6 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 # TODO: check that sockets are returned to pool, or closed, or something
 # TODO: test unsafe remove
 # TODO: test deeply-nested callbacks
-# TODO: separate these into some class-specific modules a la PyMongo
-# TODO: don't break the test suite if we can't import tornado and/or greenlet;
-#    gracefully skip motortests
 # TODO: error if a generator function isn't wrapped in async_test_engine -
 #    this can yield false passes because the function never gets to its asserts
 
