@@ -20,21 +20,15 @@ from tornado import gen
 
 from tornado.ioloop import IOLoop
 
-# TODO: this replset_tools is just a copy of those in PyMongo's test/replica/,
-# since I'm not sure yet whether I can share directories with PyMongo or add
-# an __init__.py to test/replica/; find a way to share.
-import replset_tools
+from test.replica import replset_tools
 
-from pymongo import (ReplicaSetConnection,
-                     ReadPreference)
-from pymongo.connection import Connection, _partition_node
+from pymongo import ReadPreference
+from pymongo.connection import _partition_node
 from pymongo.errors import AutoReconnect, ConnectionFailure
 
 import motor
 from motor.motortest import (
-    MotorTest, async_test_engine, AssertRaises, AssertEqual)
-
-from motor.motortest import eventually, puritanical
+    async_test_engine, AssertRaises, AssertEqual, eventually, puritanical)
 
 
 class MotorTestReadPreference(

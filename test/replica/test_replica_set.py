@@ -28,6 +28,8 @@ from pymongo.errors import AutoReconnect, ConnectionFailure
 
 
 class TestReadPreference(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         members = [{}, {}, {'arbiterOnly': True}]
@@ -117,6 +119,8 @@ class TestReadPreference(unittest.TestCase):
 
 
 class TestPassiveAndHidden(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         members = [{}, {'priority': 0}, {'arbiterOnly': True},
@@ -156,6 +160,8 @@ class TestPassiveAndHidden(unittest.TestCase):
         replset_tools.kill_all_members()
 
 class TestHealthMonitor(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = replset_tools.start_replica_set([{}, {}, {}])
@@ -230,6 +236,8 @@ class TestHealthMonitor(unittest.TestCase):
 
 
 class TestWritesWithFailover(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = replset_tools.start_replica_set([{}, {}, {}])
@@ -265,6 +273,8 @@ class TestWritesWithFailover(unittest.TestCase):
 
 
 class TestReadWithFailover(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = replset_tools.start_replica_set([{}, {}, {}])
