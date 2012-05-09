@@ -80,8 +80,8 @@ class TestMasterSlaveConnection(unittest.TestCase):
             def disconnect(self):
                 self._disconnects += 1
 
-        self.connection.master = Connection()
-        self.connection.slaves = [Connection(),
+        self.connection._MasterSlaveConnection__master = Connection()
+        self.connection._MasterSlaveConnection__slaves = [Connection(),
                                                           Connection()]
 
         self.connection.disconnect()
@@ -119,7 +119,7 @@ class TestMasterSlaveConnection(unittest.TestCase):
                 NotRandomList.last_idx = idx
                 return self._items.pop(0)
 
-        self.connection.slaves = NotRandomList()
+        self.connection._MasterSlaveConnection__slaves = NotRandomList()
 
         response = self.connection._send_message_with_response('message')
         self.assertEqual((NotRandomList.last_idx, 'sent'), response)
@@ -150,7 +150,7 @@ class TestMasterSlaveConnection(unittest.TestCase):
             def __getitem__(self, idx):
                 return self._items.pop(0)
 
-        self.connection.slaves = NotRandomList()
+        self.connection._MasterSlaveConnection__slaves = NotRandomList()
 
         self.assertRaises(AutoReconnect,
             self.connection._send_message_with_response, 'message')
