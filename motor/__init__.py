@@ -712,30 +712,8 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
         Takes same arguments as
         :class:`~pymongo.master_slave_connection.MasterSlaveConnection`.
 
-        The master and slaves can be :class:`~pymongo.connection.Connection`
-        instances or connected :class:`MotorConnection` instances.
-
-        Creating a MotorMasterSlaveConnection with PyMongo Connections:
-
-        .. testsetup::
-
-          from pymongo.connection import Connection
-          from motor import MotorMasterSlaveConnection
-
-        .. doctest::
-
-          >>> master = Connection()
-          >>> slaves = [Connection(port=27018)]
-          >>> msc = MotorMasterSlaveConnection(master, slaves)
-          >>> def inserted(result, error):
-          ...     if error:
-          ...         raise error
-          ...
-          ...     msc.test.test_collection.remove({'_id': result})
-          ...
-          >>> msc.test.test_collection.insert({'a': 1}, w=2, callback=inserted)
-
-        Creating a MotorMasterSlaveConnection with MotorConnections:
+        The master and slaves must be connected :class:`MotorConnection`
+        instances.
 
           >>> master = MotorConnection()
           >>> master.open_sync()
@@ -745,6 +723,8 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
           MotorConnection(Connection('localhost', 27018))
           >>> msc = MotorMasterSlaveConnection(master, slaves)
         """
+        # NOTE: master and slaves must be MotorConnections mainly to ensure that
+        # their pool_class has been set to MotorPool.
         if 'io_loop' in kwargs:
             kwargs = kwargs.copy()
             io_loop = kwargs.pop('io_loop')
@@ -753,36 +733,39 @@ class MotorMasterSlaveConnection(MotorConnectionBase):
         else:
             io_loop = None
 
+        # Sets self.io_loop
         super(MotorMasterSlaveConnection, self).__init__(io_loop)
 
-        # For master connection and each slave connection, if they're
-        # MotorConnections unwrap them before passing to PyMongo
-        # MasterSlaveConnection
-        if isinstance(master, MotorConnection):
-            if not master.connected:
-                raise pymongo.errors.InvalidOperation(
-                    "Master must already be connected")
-            if master.io_loop != self.io_loop:
-                raise pymongo.errors.ConfigurationError(
-                    "Master connection must have same IOLoop as "
-                    "MasterSlaveConnection"
-                )
-            master = master.delegate
+        # Unwrap connections before passing to PyMongo MasterSlaveConnection
+        if not isinstance(master, MotorConnection):
+            raise TypeError(
+                "master must be a MotorConnection")
+        elif not master.connected:
+            raise pymongo.errors.InvalidOperation(
+                "master must already be connected")
+        elif self.io_loop and master.io_loop != self.io_loop:
+            raise pymongo.errors.ConfigurationError(
+                "master connection must have same IOLoop as "
+                "MasterSlaveConnection"
+            )
+
+        master = master.delegate
 
         slave_delegates = []
         for slave in slaves:
-            if isinstance(slave, MotorConnection):
-                if not slave.connected:
-                    raise pymongo.errors.InvalidOperation(
-                        "Slave must already be connected")
-                if slave.io_loop != self.io_loop:
-                    raise pymongo.errors.ConfigurationError(
-                        "Master connection must have same IOLoop as "
-                        "MasterSlaveConnection"
-                    )
-                slave_delegates.append(slave.delegate)
-            else:
-                slave_delegates.append(slave)
+            if not isinstance(slave, MotorConnection):
+                raise TypeError(
+                    "slave must be a MotorConnection")
+            elif not slave.connected:
+                raise pymongo.errors.InvalidOperation(
+                    "slave must already be connected")
+            elif slave.io_loop != self.io_loop:
+                raise pymongo.errors.ConfigurationError(
+                    "slave connection must have same IOLoop as "
+                    "MasterSlaveConnection"
+                )
+
+            slave_delegates.append(slave.delegate)
 
         self.delegate = pymongo.master_slave_connection.MasterSlaveConnection(
             master, slave_delegates, *args, **kwargs)
