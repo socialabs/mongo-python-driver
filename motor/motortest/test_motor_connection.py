@@ -22,13 +22,16 @@ if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
 
+import tornado
 from tornado import ioloop, gen
 
 import pymongo
 
 from motor.motortest import (
-    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual, puritanical)
-from pymongo.errors import InvalidOperation, ConfigurationError
+    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual,
+    puritanical)
+from pymongo.errors import (
+    InvalidOperation, ConfigurationError, ConnectionFailure)
 from test.utils import server_is_master_with_slave, delay
 
 
@@ -233,7 +236,7 @@ class MotorConnectionTest(MotorTest):
             lambda: isinstance(
                 results[0]['error'],
                 pymongo.errors.AutoReconnect
-            )
+            ) and results[0]['error'].message == 'timed out'
         )
 
         self.assertEventuallyEqual(
@@ -246,6 +249,25 @@ class MotorConnectionTest(MotorTest):
         # Make sure the delay completes before we call tearDown() and try to
         # drop the collection
         time.sleep(0.5)
+
+    @async_test_engine()
+    def test_socket_error(self):
+        exc = None
+        try:
+            # Assuming there isn't anything actually running on this port
+            yield motor.Op(motor.MotorConnection('localhost', 8765).open)
+        except Exception, e:
+            exc = e
+
+        self.assertTrue(isinstance(exc, ConnectionFailure))
+
+        # Tornado 2.3 IOStream stores the error that closed it
+        if tornado.version_info >= (2, 3):
+            # Are these assumptions valid on Windows?
+            self.assertTrue('Errno 61' in exc.message)
+            self.assertTrue('Connection refused' in exc.message)
+        else:
+            self.assertTrue('error' in exc.message)
 
     @async_test_engine()
     def test_max_pool_size_validation(self):

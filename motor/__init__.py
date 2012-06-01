@@ -132,9 +132,9 @@ def motor_sock_method(check_closed=False):
                     if timeout[0]:
                         self.stream.io_loop.remove_timeout(timeout[0])
 
-                    # There's no way to know what the error was, see
-                    # https://groups.google.com/d/topic/python-tornado/3fq3mA9vmS0/discussion
-                    child_gr.throw(socket.error("error"))
+                    # IOStream.error is a Tornado 2.3 feature
+                    error = getattr(self.stream, 'error', None)
+                    child_gr.throw(error or socket.error("error"))
 
                 self.stream.set_close_callback(closed)
 

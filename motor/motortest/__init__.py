@@ -74,7 +74,11 @@ or:
     def decorator(func):
         class AsyncTestRunner(gen.Runner):
             def __init__(self, gen, timeout):
-                super(AsyncTestRunner, self).__init__(gen)
+                # Tornado 2.3 added an argument to Runner()
+                try:
+                    super(AsyncTestRunner, self).__init__(gen, lambda: None)
+                except TypeError:
+                    super(AsyncTestRunner, self).__init__(gen)
                 self.timeout = timeout
 
             def run(self):
