@@ -162,7 +162,11 @@ class MotorConnectionTest(MotorTest):
 
         def drop_all():
             for test_db_name in test_db_names:
-                self.sync_cx.drop_database(test_db_name)
+                # Setup code has configured a short timeout, and the copying
+                # has put Mongo under enough load that we risk timeouts here
+                # unless we override.
+                self.sync_cx[test_db_name]['$cmd'].find_one(
+                    {'dropDatabase': 1}, network_timeout=30)
 
             if not is_ms:
                 # Due to SERVER-2329, databases may not disappear from a master in a
