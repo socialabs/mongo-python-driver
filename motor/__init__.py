@@ -72,6 +72,7 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
 # TODO: document, smugly, that Motor has configurable IOLoops
+# TODO: document that Motor can do unsafe writes, AsyncMongo can't
 # TODO: since Tornado uses logging, so can we
 # TODO: test cross-host copydb
 # TODO: test that ensure_index calls the callback even if the index
@@ -1169,15 +1170,11 @@ class MotorCursor(MotorBase):
                 doc = self.delegate.next()
             except StopIteration:
                 # Special case: limit is 0.
-                # TODO: verify limit 0 is tested.
                 add_callback(functools.partial(callback, None, None))
-
-                # TODO: shouldn't this just be self.delegate.close(), not
-                # add_callback(self.close)?
-                add_callback(self.close)
+                self.close()
                 return
 
-            add_callback(functools.partial(callback, doc, None))
+            callback(doc, None)
         elif self.alive and (self.cursor_id or not self.started):
             def got_more(batch_size, error):
                 if error:
@@ -1245,18 +1242,32 @@ class MotorCursor(MotorBase):
         check_callable(callback, required=True)
         add_callback = self.get_io_loop().add_callback
 
-        def next_callback(doc, error):
+        def got_more(batch_size, error):
             if error:
                 callback(None, error)
-            elif doc:
+                return
+
+            while self.buffer_size > 0:
+                try:
+                    doc = self.delegate.next() # decrements self.buffer_size
+                except StopIteration:
+                    # Special case: limit of 0
+                    add_callback(functools.partial(callback, None, None))
+                    self.close()
+                    return
+
                 # Quit if callback returns exactly False (not None)
-                if callback(doc, None) is not False:
-                    add_callback(functools.partial(self.each, callback))
+                if callback(doc, None) is False:
+                    self.close()
+                    return
+
+            if self.alive and (self.cursor_id or not self.started):
+                self._get_more(got_more)
             else:
                 # Complete
                 add_callback(functools.partial(callback, None, None))
 
-        self.next(next_callback)
+        got_more(None, None)
 
     def to_list(self, callback):
         """Get a list of documents.
@@ -1273,20 +1284,29 @@ class MotorCursor(MotorBase):
          - `callback`: function taking (documents, error)
         """
         # TODO: error if tailable
-        # TODO: significant optimization if we reimplement this without each()?
         check_callable(callback, required=True)
         the_list = []
 
-        def for_each(doc, error):
+        # Special case
+        if self.delegate._Cursor__empty:
+            callback([], None)
+            return
+
+        def got_more(batch_size, error):
             if error:
                 callback(None, error)
-            elif doc is not None:
-                the_list.append(doc)
+                return
+
+            if self.buffer_size > 0:
+                the_list.extend(self.delegate._Cursor__data)
+                self.delegate._Cursor__data[:] = []
+
+            if self.alive and (self.cursor_id or not self.started):
+                self._get_more(got_more)
             else:
-                # Iteration complete
                 callback(the_list, None)
 
-        self.each(for_each)
+        got_more(None, None)
 
     def clone(self):
         return MotorCursor(self.delegate.clone(), self.collection)

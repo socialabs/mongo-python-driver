@@ -75,6 +75,30 @@ class MotorCursorTest(MotorTest):
         self.assertEventuallyEqual(expected, lambda: results)
         ioloop.IOLoop.instance().start()
 
+    @async_test_engine()
+    def test_to_list(self):
+        coll = self.motor_connection(host, port).test.test_collection
+        cursor = coll.find({}, {'_id': 1}).sort([('_id', pymongo.ASCENDING)])
+        expected = [{'_id': i} for i in range(200)]
+        yield AssertEqual(expected, cursor.to_list)
+        cursor.close()
+        self.wait_for_cursors()
+
+    @async_test_engine()
+    def test_limit_zero(self):
+        # Limit of 0 is a weird case that PyMongo handles specially, make sure
+        # Motor does too. cursor.limit(0) means "remove limit", but cursor[:0]
+        # sets a limit of 0.
+        coll = self.motor_connection(host, port).test.test_collection
+
+        # Make sure our setup code made some documents
+        results = yield motor.Op(coll.find().to_list)
+        self.assertTrue(len(results) > 0)
+        yield AssertEqual(None, coll.find()[:0].next)
+        yield AssertEqual(None, coll.find()[:0].each)
+        yield AssertEqual([], coll.find()[:0].to_list)
+        self.wait_for_cursors()
+
     def test_cursor_close(self):
         # The flow here is complex; we're testing that a cursor can be
         # explicitly closed.
@@ -156,9 +180,6 @@ class MotorCursorTest(MotorTest):
 
         result = yield motor.Op(coll.find()[:5].to_list)
         self.assertEqual(5, len(result))
-
-        result = yield motor.Op(coll.find()[:0].to_list)
-        self.assertEqual(0, len(result))
 
 
 if __name__ == '__main__':
