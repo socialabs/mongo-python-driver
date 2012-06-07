@@ -290,6 +290,53 @@ class MotorConnectionTest(MotorTest):
         for method in 'start_request', 'in_request', 'end_request':
             self.assertRaises(NotImplementedError, getattr(cx, method))
 
+    def test_high_concurrency(self):
+        loop = ioloop.IOLoop.instance()
+        self.sync_db.insert_collection.drop()
+        self.assertEqual(200, self.sync_coll.count())
+        cx = self.motor_connection(host, port).open_sync()
+        collection = cx.test.test_collection
+
+        concurrency = 250
+        ndocs = [0]
+        ninserted = [0]
+
+        def each(result, error):
+            if error:
+                raise error
+
+            # Final call to each() has result None
+            if result:
+                ndocs[0] += 1
+
+                # Part-way through, start an insert
+                if ndocs[0] == (200 * concurrency) / 3:
+                    cx.test.insert_collection.insert(
+                        {'foo': 'bar'}, callback=inserted)
+
+        for _ in range(concurrency):
+            collection.find().each(each)
+
+        def inserted(result, error):
+            if error:
+                raise error
+
+            ninserted[0] += 1
+            if ninserted[0] < 100:
+                cx.test.insert_collection.insert(
+                    {'foo': 'bar'}, callback=inserted)
+
+        self.assertEventuallyEqual(
+            200 * concurrency, lambda: ndocs[0], timeout_sec=60)
+
+        self.assertEventuallyEqual(
+            100, lambda: ninserted[0], timeout_sec=60)
+
+        loop.start()
+
+        self.assertEqual(100, self.sync_db.insert_collection.count())
+        self.sync_db.insert_collection.drop()
+
 
 if __name__ == '__main__':
     unittest.main()
