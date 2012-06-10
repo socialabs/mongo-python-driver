@@ -230,7 +230,7 @@ else:
     features = {"c-ext": c_ext}
 
 extra_opts = {
-    "packages": ["bson", "pymongo", "gridfs"],
+    "packages": ["bson", "pymongo", "gridfs", "motor"],
     "test_suite": "nose.collector"
 }
 if PY3:
@@ -265,7 +265,7 @@ setup(
     maintainer="Bernie Hackett",
     maintainer_email="bernie@10gen.com",
     url="http://github.com/mongodb/mongo-python-driver",
-    keywords=["mongo", "mongodb", "pymongo", "gridfs", "bson"],
+    keywords=["mongo", "mongodb", "pymongo", "gridfs", "bson", "motor"],
     install_requires=[],
     features=features,
     license="Apache License, Version 2.0",
