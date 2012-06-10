@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test replica set operations and failures."""
+"""Test replica set operations and failures. A Motor version of PyMongo's
+   test/replica/test_replica_set.py
+"""
 
 import time
 import unittest
@@ -174,6 +176,7 @@ class MotorTestPassiveAndHidden(
     def tearDown(self):
         super(MotorTestPassiveAndHidden, self).setUp()
         replset_tools.kill_all_members()
+
 
 class MotorTestHealthMonitor(
     puritanical.PuritanicalTest,
@@ -355,6 +358,7 @@ class MotorTestReadWithFailover(
 
     def tearDown(self):
         replset_tools.kill_all_members()
+
 
 if __name__ == '__main__':
     unittest.main()
