@@ -26,6 +26,7 @@ from tornado import gen, ioloop
 
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
+import bson
 from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
 from test.utils import delay
@@ -574,6 +575,51 @@ class MotorCollectionTest(MotorTest):
         )
 
         ioloop.IOLoop.instance().start()
+
+    @async_test_engine()
+    def test_map_reduce(self):
+        # Count number of documents with even and odd _id
+        expected_result = [{'_id': 0, 'value': 100}, {'_id': 1, 'value': 100}]
+        map = bson.Code('function map() { emit(this._id % 2, 1); }')
+        reduce = bson.Code('''
+        function reduce(key, values) {
+            r = 0;
+            values.forEach(function(value) { r += value; });
+            return r;
+        }''')
+
+        cx = self.motor_connection(host, port)
+        yield motor.Op(cx.test.tmp_mr.drop)
+
+        # First do a standard mapreduce, should return MotorCollection
+        tmp_mr = yield motor.Op(cx.test.test_collection.map_reduce,
+            map, reduce, 'tmp_mr')
+
+        self.assertTrue(isinstance(tmp_mr, motor.MotorCollection),
+            'map_reduce should return MotorCollection, not %s' % tmp_mr)
+
+        result = yield motor.Op(tmp_mr.find().sort([('_id', 1)]).to_list)
+        self.assertEqual(expected_result, result)
+
+        # Standard mapreduce with full response
+        yield motor.Op(cx.test.tmp_mr.drop)
+        response = yield motor.Op(cx.test.test_collection.map_reduce,
+            map, reduce, 'tmp_mr', full_response=True)
+
+        self.assertTrue(isinstance(response, dict),
+            'map_reduce should return dict, not %s' % response)
+
+        self.assertEqual('tmp_mr', response['result'])
+        result = yield motor.Op(tmp_mr.find().sort([('_id', 1)]).to_list)
+        self.assertEqual(expected_result, result)
+
+        # Inline mapreduce
+        yield motor.Op(cx.test.tmp_mr.drop)
+        result = yield motor.Op(cx.test.test_collection.inline_map_reduce,
+            map, reduce)
+
+        result.sort(key=lambda doc: doc['_id'])
+        self.assertEqual(expected_result, result)
 
 
 if __name__ == '__main__':
