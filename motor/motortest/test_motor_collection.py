@@ -51,8 +51,6 @@ class MotorCollectionTest(MotorTest):
             yield motor.Op(coll.remove)
             yield AssertEqual(None, coll.find_one, {'_id':'xyzzy'})
 
-        yield motor.Op(coll.remove)
-
     @async_test_engine()
     def test_next(self):
         # 1. Open a connection.
