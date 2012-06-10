@@ -1413,7 +1413,6 @@ class MotorCursor(MotorBase):
         :Parameters:
           - `index`: An integer or slice index to be applied to this cursor
         """
-        # TODO test that this raises TypeError if index is not slice, int, long
         # TODO doc that this does not raise IndexError if index > len results
         # TODO test that this raises IndexError if index < 0
         # TODO: doctest

@@ -136,6 +136,15 @@ class MotorCursorTest(MotorTest):
         loop.start()
         self.assertEqual(self.open_cursors, self.get_open_cursors())
 
+    def test_cursor_slice_argument_checking(self):
+        cx = self.motor_connection(host, port)
+        collection = cx.test.test_collection
+
+        for arg in '', None, {}, []:
+            self.assertRaises(TypeError, lambda: collection.find()[arg])
+
+        self.assertRaises(IndexError, lambda: collection.find()[-1])
+
     @async_test_engine()
     def test_cursor_slice(self):
         # This is an asynchronous copy of PyMongo's test_getitem_slice_index in
