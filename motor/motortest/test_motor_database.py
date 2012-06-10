@@ -24,11 +24,17 @@ if not motor.requirements_satisfied:
 from tornado import gen
 
 from motor.motortest import MotorTest, async_test_engine, host, port
+import pymongo.database
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 
 # TODO: test that db = MotorDatabase(conn, 'test') works
 
 class MotorDatabaseTest(MotorTest):
+    def test_collection_named_delegate(self):
+        db = self.motor_connection(host, port).test
+        self.assertTrue(isinstance(db.delegate, pymongo.database.Database))
+        self.assertTrue(isinstance(db['delegate'], motor.MotorCollection))
+
     def test_database_callbacks(self):
         db = self.motor_connection(host, port).test
         self.check_optional_callback(db.drop_collection, "collection")

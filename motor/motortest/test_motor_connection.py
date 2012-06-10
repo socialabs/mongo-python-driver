@@ -128,6 +128,11 @@ class MotorConnectionTest(MotorTest):
 
         test(self)
 
+    def test_database_named_delegate(self):
+        cx = self.motor_connection(host, port)
+        self.assertTrue(isinstance(cx.delegate, pymongo.connection.Connection))
+        self.assertTrue(isinstance(cx['delegate'], motor.MotorDatabase))
+
     def test_copy_db_argument_checking(self):
         cx = self.motor_connection(host, port)
 

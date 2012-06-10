@@ -40,8 +40,6 @@ host3 = os.environ.get("DB_IP3", "localhost")
 port3 = int(os.environ.get("DB_PORT3", 27019))
 
 
-# TODO: test that a database or collection called delegate, or dotted
-#   collection including "delegate", can be accessed via [ ], doc that
 # TODO: a few direct tests of MasterSlave and RSC for Motor
 # TODO: test that save and insert are async somehow? MongoDB's global
 #     write lock makes this hard. Maybe with two mongod instances.
