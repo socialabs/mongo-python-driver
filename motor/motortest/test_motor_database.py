@@ -27,9 +27,19 @@ from motor.motortest import MotorTest, async_test_engine, host, port
 import pymongo.database
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 
-# TODO: test that db = MotorDatabase(conn, 'test') works
 
 class MotorDatabaseTest(MotorTest):
+    @async_test_engine()
+    def test_database(self):
+        # Test that we can create a db directly, not just from MotorConnection's
+        # accessors
+        cx = self.motor_connection(host, port)
+        db = motor.MotorDatabase(cx, 'test')
+
+        # Make sure we got the right DB and it can do an operation
+        doc = yield motor.Op(db.test_collection.find_one, {'_id': 1})
+        self.assertEqual(hex(1), doc['s'])
+
     def test_collection_named_delegate(self):
         db = self.motor_connection(host, port).test
         self.assertTrue(isinstance(db.delegate, pymongo.database.Database))

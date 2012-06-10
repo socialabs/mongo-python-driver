@@ -31,9 +31,19 @@ from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
 from test.utils import delay
 
-# TODO: test that collection = MotorCollection(db, 'test') works
 
 class MotorCollectionTest(MotorTest):
+    @async_test_engine()
+    def test_collection(self):
+        # Test that we can create a collection directly, not just from
+        # MotorConnection's accessors
+        db = self.motor_connection(host, port).test
+        collection = motor.MotorCollection(db, 'test_collection')
+
+        # Make sure we got the right collection and it can do an operation
+        doc = yield motor.Op(collection.find_one, {'_id': 1})
+        self.assertEqual(1, doc['_id'])
+
     @async_test_engine()
     def test_dotted_collection_name(self):
         # Ensure that remove, insert, and find work on collections with dots
