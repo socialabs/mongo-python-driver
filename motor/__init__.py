@@ -64,6 +64,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 # TODO: SSL, IPv6
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
+# TODO: document this supports same Python versions as Tornado (currently
+#   CPython 2.5-2.7, and 3.2
 # TODO: document that Motor doesn't do requests at all, use callbacks to
 #   ensure consistency
 # TODO: document that Motor doesn't do auto_start_request
@@ -137,7 +139,9 @@ def motor_sock_method(check_closed=False):
                 self.stream.set_close_callback(closed)
 
             try:
-                method(self, *args, callback=callback, **kwargs)
+                kwargs_cp = kwargs.copy()
+                kwargs_cp['callback'] = callback
+                method(self, *args, **kwargs_cp)
                 return main.switch()
             except socket.error:
                 raise
@@ -505,7 +509,6 @@ class MotorConnectionBasePlus(MotorConnectionBase):
 
         def _connect():
             # Run on child greenlet
-            check_callable(callback, False)
             error = None
             try:
                 kw = self._init_kwargs
@@ -860,7 +863,7 @@ class MotorDatabase(MotorBase):
             self.get_io_loop(), sync_method, False, False)
         async_method(name, callback=callback)
 
-    # TODO: refactor
+    # TODO: refactor, test
     def validate_collection(self, name_or_collection, *args, **kwargs):
         """Validate a collection.
 
@@ -870,9 +873,6 @@ class MotorDatabase(MotorBase):
         :Parameters:
           - `callback`: Optional function taking parameters (result, error)
         """
-        callback = kwargs.get('callback')
-        check_callable(callback, required=True)
-
         name = name_or_collection
         if isinstance(name, MotorCollection):
             name = name.delegate.name
@@ -880,7 +880,7 @@ class MotorDatabase(MotorBase):
         sync_method = self.delegate.validate_collection
         async_method = asynchronize(
             self.get_io_loop(), sync_method, False, True)
-        async_method(name, callback=callback)
+        async_method(name, **kwargs)
 
     # TODO: refactor
     # TODO: test that this raises an error if collection exists in Motor, and
@@ -894,11 +894,6 @@ class MotorDatabase(MotorBase):
         """
         # We override create_collection to wrap the Collection it returns in a
         # MotorCollection.
-        callback = kwargs.get('callback')
-        check_callable(callback, required=False)
-        if 'callback' in kwargs:
-            del kwargs['callback']
-
         sync_method = self.delegate.create_collection
         async_method = asynchronize(
             self.get_io_loop(), sync_method, False, False)
@@ -909,7 +904,7 @@ class MotorDatabase(MotorBase):
 
             callback(collection, error)
 
-        async_method(name, *args, callback=cb, **kwargs)
+        async_method(name, *args, **kwargs)
 
     def add_son_manipulator(self, manipulator):
         """Add a new son manipulator to this database.
@@ -1012,20 +1007,18 @@ class MotorCollection(MotorBase):
 
         .. _map reduce command: http://www.mongodb.org/display/DOCS/MapReduce
         """
-        callback = kwargs.get('callback')
-        check_callable(callback, required=False)
-        if 'callback' in kwargs:
-            kwargs = kwargs.copy()
-            del kwargs['callback']
+        kwargs_cp = kwargs.copy()
+        callback = kwargs_cp.pop('callback', None)
 
         def map_reduce_callback(result, error):
             if isinstance(result, pymongo.collection.Collection):
                 result = self.database[result.name]
             callback(result, error)
 
+        kwargs_cp['callback'] = map_reduce_callback
         sync_method = self.delegate.map_reduce
         async_mr = asynchronize(self.get_io_loop(), sync_method, False, True)
-        async_mr(*args, callback=map_reduce_callback, **kwargs)
+        async_mr(*args, **kwargs_cp)
 
     def get_io_loop(self):
         return self.database.get_io_loop()
