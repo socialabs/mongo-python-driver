@@ -40,10 +40,6 @@ host3 = os.environ.get("DB_IP3", "localhost")
 port3 = int(os.environ.get("DB_PORT3", 27019))
 
 
-# TODO: a few direct tests of MasterSlave and RSC for Motor
-# TODO: test that save and insert are async somehow? MongoDB's global
-#     write lock makes this hard. Maybe with two mongod instances.
-# TODO: test master/slave, shard, replica set
 # TODO: replicate asyncmongo's whole test suite?
 # TODO: don't use the 'test' database, use something that will play nice w/
 #     Jenkins environment

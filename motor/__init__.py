@@ -54,7 +54,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 #   timeouts as efficiently as possible, test performance hit with timeouts
 #   from registering and cancelling timeouts
 # TODO: examine & document what connection and network timeouts mean here
-# TODO: verify cursors are closed ASAP
 # TODO: document use of MotorConnection.delegate, MotorDatabase.delegate, etc.
 # TODO: document that with a callback passed in, Motor's default is
 #   to do SAFE writes, unlike PyMongo.
@@ -62,7 +61,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 #   as w, wtimeout, and j? how do they affect control? test that.
 # TODO: check handling of safe and get_last_error_options() and kwargs,
 #   make sure we respect them
-# TODO: test tailable cursor a little more
 # TODO: SSL, IPv6
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?

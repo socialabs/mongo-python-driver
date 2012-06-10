@@ -109,8 +109,6 @@ class SynchroNosePlugin(Plugin):
 
     def configure(self, options, conf):
         super(SynchroNosePlugin, self).configure(options, conf)
-        # TODO: Figure out less hacky way to enable this plugin
-        # programmatically with Nose
         self.enabled = True
 
     def wantModule(self, module):
