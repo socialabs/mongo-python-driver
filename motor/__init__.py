@@ -80,6 +80,9 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 #   optimization
 # TODO: perhaps remove versionchanged Sphinx annotations from proxied methods,
 #   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
+# TODO: review open_sync(), does it need to disconnect after success to ensure
+#   all IOStreams with old IOLoop are gone?
+# TODO: note state of gridfs
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -557,6 +560,7 @@ class MotorConnectionBasePlus(MotorConnectionBase):
                 self.delegate.pool_class = functools.partial(
                     MotorPool, self.io_loop)
 
+                # TODO: get proper arguments for Pool
                 self.delegate.pool = self.delegate.pool_class(None, 17, None, None, False)
 
                 for pool in self._get_pools():

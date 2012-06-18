@@ -45,6 +45,8 @@ excluded_modules = [
     # TODO:
     'test.test_ssl',
     'test.test_master_slave_connection',
+    'test.test_grid_file',
+    'test.test_gridfs',
 ]
 
 # TODO: document these variations and omissions b/w PyMongo and the Motor API
