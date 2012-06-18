@@ -37,6 +37,11 @@
       .. automotorattribute:: document_class
       .. automotorattribute:: tz_aware
       .. automotorattribute:: safe
+      .. method:: sync_connection
+
+         Get a :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+         with the same configuration as this :class:`MotorReplicaSetConnection`
+
       .. automotormethod:: get_lasterror_options
       .. automotormethod:: set_lasterror_options
       .. automotormethod:: unset_lasterror_options

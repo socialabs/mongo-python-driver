@@ -26,8 +26,9 @@ if not motor.requirements_satisfied:
 from tornado import ioloop, iostream
 
 from motor.motortest import (
-    MotorTest, async_test_engine, AssertRaises)
+    MotorTest, async_test_engine, AssertRaises, host, port)
 import pymongo.errors
+import pymongo.replica_set_connection
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
 
 
@@ -36,6 +37,32 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         # TODO: Make TestConnectionReplicaSetBase cooperative
         TestConnectionReplicaSetBase.setUp(self)
         MotorTest.setUp(self)
+
+    @async_test_engine()
+    def test_sync_connection(self):
+        class DictSubclass(dict):
+            pass
+
+        args = ['localhost:27017']
+        kwargs = dict(
+            connectTimeoutMS=1000, socketTimeoutMS=1500, max_pool_size=23,
+            document_class=DictSubclass, tz_aware=True, replicaSet='repl0')
+
+        cx = yield motor.Op(motor.MotorReplicaSetConnection(
+            *args, **kwargs).open)
+        sync_cx = cx.sync_connection()
+        self.assertTrue(isinstance(
+            sync_cx, pymongo.replica_set_connection.ReplicaSetConnection))
+        self.assertEqual(1000, sync_cx._ReplicaSetConnection__conn_timeout * 1000.0)
+        self.assertEqual(1500, sync_cx._ReplicaSetConnection__net_timeout * 1000.0)
+        self.assertEqual(23, sync_cx.max_pool_size)
+        self.assertEqual(True, sync_cx._ReplicaSetConnection__tz_aware)
+        self.assertEqual(DictSubclass, sync_cx._ReplicaSetConnection__document_class)
+
+        # Make sure sync connection works
+        self.assertEqual(
+                {'_id': 5, 's': hex(5)},
+            sync_cx.test.test_collection.find_one({'_id': 5}))
 
     @async_test_engine()
     def test_auto_reconnect_exception_when_read_preference_is_secondary(self):

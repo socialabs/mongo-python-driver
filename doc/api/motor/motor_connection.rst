@@ -37,6 +37,11 @@
       .. automotorattribute:: slave_okay
       .. automotorattribute:: safe
       .. automotorattribute:: is_locked
+      .. method:: sync_connection
+
+         Get a :class:`~pymongo.connection.Connection` with the same
+         configuration as this :class:`MotorConnection`
+
       .. automotormethod:: get_lasterror_options
       .. automotormethod:: set_lasterror_options
       .. automotormethod:: unset_lasterror_options

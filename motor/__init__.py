@@ -511,13 +511,8 @@ class MotorConnectionBasePlus(MotorConnectionBase):
             # Run on child greenlet
             error = None
             try:
-                kw = self._init_kwargs
-                kw['auto_start_request'] = False
-                kw['_pool_class'] = functools.partial(MotorPool, self.io_loop)
-                self.delegate = self.__delegate_class__(*self._init_args, **kw)
-
-                del self._init_args
-                del self._init_kwargs
+                args, kwargs = self._delegate_init_args()
+                self.delegate = self.__delegate_class__(*args, **kwargs)
             except Exception, e:
                 error = e
 
@@ -575,6 +570,17 @@ class MotorConnectionBasePlus(MotorConnectionBase):
             raise outcome['error']
 
         return self
+
+    def sync_connection(self):
+        return self.__delegate_class__(
+            *self._init_args, **self._init_kwargs)
+
+    def _delegate_init_args(self):
+        """Return args, kwargs to create a delegate object"""
+        kwargs = self._init_kwargs.copy()
+        kwargs['auto_start_request'] = False
+        kwargs['_pool_class'] = functools.partial(MotorPool, self.io_loop)
+        return self._init_args, kwargs
 
 
 class MotorConnection(MotorConnectionBasePlus):
@@ -654,10 +660,14 @@ class MotorReplicaSetConnection(MotorConnectionBasePlus):
         """
         super(MotorReplicaSetConnection, self).__init__(*args, **kwargs)
 
+    def _delegate_init_args(self):
         # This _monitor_class will be passed to PyMongo's
         # ReplicaSetConnection when we create it.
-        self._init_kwargs['_monitor_class'] = functools.partial(
+        args, kwargs = \
+            super(MotorReplicaSetConnection, self)._delegate_init_args()
+        kwargs['_monitor_class'] = functools.partial(
             MotorReplicaSetMonitor, self.io_loop)
+        return args, kwargs
 
     def _get_pools(self):
         # TODO: expose the PyMongo pools, or otherwise avoid this

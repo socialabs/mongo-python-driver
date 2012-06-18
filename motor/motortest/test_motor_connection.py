@@ -60,6 +60,32 @@ class MotorConnectionTest(MotorTest):
         self.check_optional_callback(cx.open)
 
     @async_test_engine()
+    def test_sync_connection(self):
+        class DictSubclass(dict):
+            pass
+
+        args = host, port
+        kwargs = dict(
+            connectTimeoutMS=1000, socketTimeoutMS=1500, max_pool_size=23,
+            document_class=DictSubclass, tz_aware=True)
+
+        cx = yield motor.Op(motor.MotorConnection(*args, **kwargs).open)
+        sync_cx = cx.sync_connection()
+        self.assertTrue(isinstance(sync_cx, pymongo.connection.Connection))
+        self.assertEqual(host, sync_cx.host)
+        self.assertEqual(port, sync_cx.port)
+        self.assertEqual(1000, sync_cx._Connection__conn_timeout * 1000.0)
+        self.assertEqual(1500, sync_cx._Connection__net_timeout * 1000.0)
+        self.assertEqual(23, sync_cx._Connection__max_pool_size)
+        self.assertEqual(True, sync_cx._Connection__tz_aware)
+        self.assertEqual(DictSubclass, sync_cx._Connection__document_class)
+
+        # Make sure sync connection works
+        self.assertEqual(
+            {'_id': 5, 's': hex(5)},
+            sync_cx.test.test_collection.find_one({'_id': 5}))
+
+    @async_test_engine()
     def test_open_sync(self):
         loop = ioloop.IOLoop.instance()
         cx = motor.MotorConnection(host, port)

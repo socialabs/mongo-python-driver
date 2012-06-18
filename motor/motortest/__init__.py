@@ -174,7 +174,7 @@ class MotorTest(
         # testing. Low timeouts so we don't hang a test because, say, Mongo
         # isn't up or is hung by a long-running $where clause.
         self.sync_cx = pymongo.Connection(
-            host, port, connectTimeoutMS=200, socketTimeoutMS=200
+            host, port, connectTimeoutMS=2000, socketTimeoutMS=2000
         )
         self.sync_db = self.sync_cx.test
         self.sync_coll = self.sync_db.test_collection
