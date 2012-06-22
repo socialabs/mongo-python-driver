@@ -82,7 +82,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 #   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
 # TODO: review open_sync(), does it need to disconnect after success to ensure
 #   all IOStreams with old IOLoop are gone?
-# TODO: note state of gridfs
+# TODO: note state of gridfs, pypy
+
 
 def check_callable(kallable, required=False):
     if required and not kallable:
@@ -1322,9 +1323,13 @@ class MotorCursor(MotorBase):
         self.started = False
         return self
 
-    def tail(self, callback, await_data=None):
+    def tail(self, callback, await_data=True):
         # TODO: doc, prominently =)
-        # TODO: doc that tailing an empty collection is expensive
+        # TODO: doc that tailing an empty collection is expensive,
+        #   consider a failsafe, e.g. timing the interval between getmore
+        #   and return, and if it's short and no doc, pause before next
+        #   getmore
+        # TODO: doc and test that await_data is defaulted True
         # TODO: test dropping a collection while tailing it
         # TODO: test tailing collection that isn't empty at first
         check_callable(callback, True)
@@ -1343,10 +1348,8 @@ class MotorCursor(MotorBase):
 
         # If await_data parameter is set, then override whatever await_data
         # value was passed to find() (default False)
-        # TODO: reconsider or at least test this crazy logic, doc
-        if await_data is not None:
-            # TODO: HACK!
-            cursor.delegate._Cursor__await_data = await_data
+        # TODO: test this
+        cursor.delegate._Cursor__await_data = await_data
 
         def inner_callback(result, error):
             if error:
@@ -1442,7 +1445,7 @@ class MotorCursor(MotorBase):
             self.close()
 
 
-# TODO: move to 'motorgen' submodule, test, doc all these three gen tasks, and
+# doc all these three gen tasks, and
 #   consider if there are additional convenience methods possible. Lots of
 #   examples. Link to tornado gen docs.
 # TODO: some way to generate docs even without Tornado installed?
