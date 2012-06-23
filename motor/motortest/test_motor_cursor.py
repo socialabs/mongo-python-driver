@@ -136,6 +136,49 @@ class MotorCursorTest(MotorTest):
         loop.start()
         self.assertEqual(self.open_cursors, self.get_open_cursors())
 
+    def test_each_cancel(self):
+        loop = ioloop.IOLoop.instance()
+        cx = self.motor_connection(host, port)
+        collection = cx.test.test_collection
+        results = []
+
+        def cancel(result, error):
+            if error:
+                loop.stop()
+                raise error
+
+            results.append(result)
+            loop.add_callback(canceled)
+            return False # Cancel iteration
+
+        def canceled():
+            try:
+                self.assertFalse(cursor.delegate._Cursor__killed)
+                self.assertTrue(cursor.alive)
+
+                # Resume iteration
+                cursor.each(each)
+            except Exception:
+                loop.stop()
+                raise
+
+        def each(result, error):
+            if error:
+                loop.stop()
+                raise error
+
+            if result:
+                results.append(result)
+            else:
+                # Complete
+                loop.stop()
+
+        cursor = collection.find()
+        cursor.each(cancel)
+        loop.start()
+
+        self.assertEqual(self.sync_coll.count(), len(results))
+
     def test_cursor_slice_argument_checking(self):
         cx = self.motor_connection(host, port)
         collection = cx.test.test_collection

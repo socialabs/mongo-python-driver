@@ -231,7 +231,8 @@ class MotorCollectionTest(MotorTest):
                 # cancel iteration
                 return False
 
-        cx.test.test_collection.find(sort=[('s', 1)]).each(callback)
+        cursor = cx.test.test_collection.find(sort=[('s', 1)])
+        cursor.each(callback)
         self.assertEventuallyEqual(
             [
                 {'_id': 0, 's': hex(0)},
@@ -244,6 +245,9 @@ class MotorCollectionTest(MotorTest):
 
         # There are 200 docs, but we canceled after 2
         self.assertEqual(2, len(results))
+
+        cursor.close()
+        self.wait_for_cursors()
 
     @async_test_engine()
     def test_find_to_list(self):

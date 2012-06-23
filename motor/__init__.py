@@ -1260,9 +1260,9 @@ class MotorCursor(MotorBase):
                     self.close()
                     return
 
-                # Quit if callback returns exactly False (not None)
+                # Quit if callback returns exactly False (not None). Note we
+                # don't close the cursor: user may want to resume iteration.
                 if callback(doc, None) is False:
-                    self.close()
                     return
 
             if self.alive and (self.cursor_id or not self.started):

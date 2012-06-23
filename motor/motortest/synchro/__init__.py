@@ -72,10 +72,6 @@ def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
             traceback.print_exc(sys.stderr)
             raise
 
-        # Special case: return False to stop iteration in case this callback is
-        # being used in Motor's find().each()
-        return False
-
     kallable(callback=callback)
     try:
         loop.start()
@@ -480,7 +476,7 @@ class Cursor(Synchro):
         return self
 
     def next(self):
-        sync_next = synchronize(self, self.delegate.each, has_safe_arg=False)
+        sync_next = synchronize(self, self.delegate.next, has_safe_arg=False)
         rv = sync_next()
         if rv is not None:
             return rv
