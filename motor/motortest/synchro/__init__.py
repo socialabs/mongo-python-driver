@@ -29,7 +29,9 @@ from tornado.ioloop import IOLoop
 
 import motor
 from pymongo import son_manipulator
-from pymongo.errors import ConnectionFailure, TimeoutError, OperationFailure
+from pymongo.errors import (
+    ConnectionFailure, TimeoutError, OperationFailure, InvalidOperation)
+from pymongo.common import SAFE_OPTIONS
 
 
 # So that synchronous unittests can import these names from Synchro,
@@ -102,43 +104,32 @@ def synchronize(self, async_method, has_safe_arg):
     @param has_safe_arg:        Whether the method takes a 'safe' argument
     @return:                    A synchronous wrapper around the method
     """
-    assert isinstance(self, Synchro)
+    assert isinstance(self, Synchro), (
+        "First argument to synchronize must be Synchro, not %s" % repr(self))
 
     @functools.wraps(async_method)
     def synchronized_method(*args, **kwargs):
-        assert 'callback' not in kwargs
+        assert 'callback' not in kwargs, (
+            "Cannot pass callback to synchronized method")
 
         try:
-            base_object_safe = self.delegate.safe
-        except Exception:
+            safe = self.delegate.safe
+        except (AttributeError, InvalidOperation):
             # delegate not set yet, or no 'safe' attribute
-            base_object_safe = False
+            safe = False
 
-        # TODO: is this right? Maybe use get_last_error_options()
-        safe_arg_passed = (
-            'safe' in kwargs or 'w' in kwargs or 'j' in kwargs
-            or 'wtimeout' in kwargs or base_object_safe
-        )
+        safe = (safe or kwargs.get('safe')
+            or any(opt in kwargs for opt in SAFE_OPTIONS))
 
-        if not safe_arg_passed and has_safe_arg:
+        if not safe and has_safe_arg:
             # By default, Motor passes safe=True if there's a callback, but
             # we're emulating PyMongo, which defaults safe to False, so we
             # explicitly override.
             kwargs['safe'] = False
 
-        rv = None
-        try:
-            rv = loop_timeout(
-                functools.partial(async_method, *args, **kwargs),
-                name=async_method.func_name
-            )
-        except OperationFailure:
-            # Ignore OperationFailure for unsafe writes; synchronous pymongo
-            # wouldn't have known the operation failed.
-            if safe_arg_passed or not has_safe_arg:
-                raise
-
-        return rv
+        return loop_timeout(
+            functools.partial(async_method, *args, **kwargs),
+            name=async_method.func_name)
 
     return synchronized_method
 
@@ -404,7 +395,9 @@ class Database(Synchro):
         self.connection = connection
 
         self.delegate = connection.delegate[name]
-        assert isinstance(self.delegate, motor.MotorDatabase)
+        assert isinstance(self.delegate, motor.MotorDatabase), (
+            "synchro.Database delegate must be MotorDatabase, not "
+            " %s" % repr(self.delegate))
 
     def add_son_manipulator(self, manipulator):
         if isinstance(manipulator, son_manipulator.AutoReference):
@@ -443,11 +436,15 @@ class Collection(Synchro):
     __delegate_class__ = motor.MotorCollection
 
     def __init__(self, database, name):
-        assert isinstance(database, Database)
+        assert isinstance(database, Database), (
+            "First argument to synchro Collection must be synchro Database,"
+            " not %s" % repr(database))
         self.database = database
 
         self.delegate = database.delegate[name]
-        assert isinstance(self.delegate, motor.MotorCollection)
+        assert isinstance(self.delegate, motor.MotorCollection), (
+            "Expected to get synchro Collection from Database,"
+            " got %s" % repr(self.delegate))
 
     find       = WrapOutgoing()
     map_reduce = SynchronizeAndWrapOutgoing(has_safe_arg=False)

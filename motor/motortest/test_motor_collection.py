@@ -348,6 +348,8 @@ class MotorCollectionTest(MotorTest):
             )
         except DuplicateKeyError:
             pass
+        except Exception, e:
+            self.fail("Expected DuplicateKeyError, got %s" % repr(e))
         else:
             self.fail("DuplicateKeyError not raised")
 

@@ -287,7 +287,8 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
      - `has_safe_arg`:      Whether the method takes a 'safe' argument
      - `callback_required`: If True, raise TypeError if no callback is passed
     """
-    assert isinstance(io_loop, ioloop.IOLoop)
+    assert isinstance(io_loop, ioloop.IOLoop), (
+        "First argument to asynchronize must be IOLoop, not %s" % repr(io_loop))
 
     # TODO doc
     # TODO: staticmethod of base class for Motor objects, add some custom
@@ -687,9 +688,13 @@ class MotorReplicaSetConnection(MotorConnectionBasePlus):
 # monitor the set.
 class MotorReplicaSetMonitor(object):
     def __init__(self, io_loop, obj, interval=5):
+        assert isinstance(io_loop, ioloop.IOLoop), (
+            "First argument to MotorReplicaSetMonitor must be"
+            " IOLoop, not %s" % repr(io_loop))
         assert isinstance(
-            obj, pymongo.replica_set_connection.ReplicaSetConnection)
-        assert isinstance(io_loop, ioloop.IOLoop)
+            obj, pymongo.replica_set_connection.ReplicaSetConnection), (
+            "Second argument to MotorReplicaSetMonitor must be"
+            " ReplicaSetConnection, not %s" % repr(obj))
 
         self.ref = weakref.ref(obj)
         self.io_loop = io_loop
