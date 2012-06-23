@@ -136,7 +136,6 @@ if __name__ == '__main__':
 
     # Monkey-patch all pymongo's unittests so they think Synchro is the
     # real PyMongo
-    # TODO: try using 'from imp import new_module' instead of this?
     sys.modules['pymongo'] = synchro
 
     for submod in [
