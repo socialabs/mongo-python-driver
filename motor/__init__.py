@@ -900,24 +900,29 @@ class MotorDatabase(MotorBase):
     # test creating capped coll
     def create_collection(self, name, *args, **kwargs):
         """Create a new collection in this database. Takes same arguments as
-        :meth:`~pymongo.database.Database.create_collection`, plus:
+        :meth:`~pymongo.database.Database.create_collection`, plus callback,
+        which receives a MotorCollection.
 
         :Parameters:
-          - `callback`: Optional function taking parameters (result, error)
+          - `callback`: Optional function taking parameters (collection, error)
         """
         # We override create_collection to wrap the Collection it returns in a
         # MotorCollection.
-        sync_method = self.delegate.create_collection
-        async_method = asynchronize(
-            self.get_io_loop(), sync_method, False, False)
+        kwargs_cp = kwargs.copy()
+        callback = kwargs_cp.pop('callback', None)
 
-        def cb(collection, error):
+        def create_collection_callback(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
                 collection = MotorCollection(self, name)
 
             callback(collection, error)
 
-        async_method(name, *args, **kwargs)
+        kwargs_cp['callback'] = create_collection_callback
+        sync_method = self.delegate.create_collection
+        async_method = asynchronize(
+            self.get_io_loop(), sync_method, False, False)
+
+        async_method(name, *args, **kwargs_cp)
 
     def add_son_manipulator(self, manipulator):
         """Add a new son manipulator to this database.
