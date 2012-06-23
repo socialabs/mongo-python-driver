@@ -17,12 +17,13 @@
 import time
 import unittest
 
+from tornado import gen, ioloop
+
+import pymongo
 import motor
 if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
-
-from tornado import gen, ioloop
 
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
@@ -628,6 +629,44 @@ class MotorCollectionTest(MotorTest):
 
         result.sort(key=lambda doc: doc['_id'])
         self.assertEqual(expected_result, result)
+
+    @async_test_engine()
+    def test_get_last_error_options(self):
+        cx = motor.MotorConnection(host, port)
+
+        # An implementation quirk of Motor, can't access properties until
+        # connected
+        self.assertRaises(pymongo.errors.InvalidOperation, getattr, cx, 'safe')
+
+        yield motor.Op(cx.open)
+        self.assertFalse(cx.safe)
+        self.assertEqual({}, cx.get_lasterror_options())
+
+        # TODO: once PyMongo 'safe' behavior is fixed, test that
+        # MotorConnection's 'safe' is True with a GLE option and safe=False
+        for safe, gle_options in [
+            (True,  {}),
+            (True, {'w': 2}),
+            (True, {'wtimeout': 1000}),
+            (True, {'j': True}),
+        ]:
+            cx = motor.MotorConnection(host, port, safe=safe, **gle_options)
+            yield motor.Op(cx.open)
+            expected_safe = bool(safe or gle_options)
+            self.assertEqual(expected_safe, cx.safe,
+                "Expected safe %s with safe=%s and options %s" % (
+                    expected_safe, safe, gle_options
+                ))
+            self.assertEqual(gle_options, cx.get_lasterror_options())
+
+            db = cx.test
+            self.assertEqual(expected_safe, db.safe)
+            self.assertEqual(gle_options, db.get_lasterror_options())
+
+            test_collection = db.test_collection
+            self.assertEqual(expected_safe, test_collection.safe)
+            self.assertEqual(
+                gle_options, test_collection.get_lasterror_options())
 
 
 if __name__ == '__main__':

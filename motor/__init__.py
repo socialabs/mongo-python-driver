@@ -48,19 +48,17 @@ import pymongo.son_manipulator
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
            'MotorMasterSlaveConnection']
 
+# TODO: note you can't access properties like 'safe' on MotorConnection
+#   until connected
 # TODO: note you can't use from multithreaded app, can't fork, consider special
 #   checks to prevent it?
 # TODO: document that default timeout is None, ensure we're doing
 #   timeouts as efficiently as possible, test performance hit with timeouts
 #   from registering and cancelling timeouts
 # TODO: examine & document what connection and network timeouts mean here
-# TODO: document use of MotorConnection.delegate, MotorDatabase.delegate, etc.
+# TODO: discourage use of MotorConnection.delegate, MotorDatabase.delegate, etc.
 # TODO: document that with a callback passed in, Motor's default is
 #   to do SAFE writes, unlike PyMongo.
-# TODO: what about PyMongo BaseObject's underlying safeness, as well
-#   as w, wtimeout, and j? how do they affect control? test that.
-# TODO: check handling of safe and get_last_error_options() and kwargs,
-#   make sure we respect them
 # TODO: SSL, IPv6
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
@@ -423,9 +421,9 @@ class MotorConnectionBase(MotorBase):
 
     def __getattr__(self, name):
         if not self.connected:
-            msg = "Can't access database on %s before calling open()" \
+            msg = "Can't access attribute '%s' on %s before calling open()" \
                   " or open_sync()" % (
-                self.__class__.__name__
+                name, self.__class__.__name__
             )
             raise pymongo.errors.InvalidOperation(msg)
 
