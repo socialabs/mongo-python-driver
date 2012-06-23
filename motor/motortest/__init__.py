@@ -191,7 +191,7 @@ class MotorTest(
         # TODO: we've found this unreliable in PyMongo testing; find instead a
         # way to track cursors Motor creates and assert they're all closed
         output = self.sync_cx.admin.command('serverStatus')
-        return output.get('cursors', {}).get('totalOpen')
+        return output.get('cursors', {}).get('totalOpen', 0)
 
     def motor_connection(self, host, port, *args, **kwargs):
         return motor.MotorConnection(host, port, *args, **kwargs).open_sync()
