@@ -385,14 +385,14 @@ class MotorBase(object):
             return cmp(self.delegate, other.delegate)
         return NotImplemented
 
+    get_lasterror_options       = ReadOnlyDelegateProperty()
+    set_lasterror_options       = ReadOnlyDelegateProperty()
+    unset_lasterror_options     = ReadOnlyDelegateProperty()
+    name                        = ReadOnlyDelegateProperty()
     document_class              = ReadWriteDelegateProperty()
     slave_okay                  = ReadWriteDelegateProperty()
     safe                        = ReadWriteDelegateProperty()
-    get_lasterror_options       = ReadWriteDelegateProperty()
-    set_lasterror_options       = ReadWriteDelegateProperty()
-    unset_lasterror_options     = ReadWriteDelegateProperty()
     read_preference             = ReadWriteDelegateProperty()
-    name                        = ReadOnlyDelegateProperty()
 
     def __repr__(self):
         return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
@@ -471,7 +471,6 @@ class MotorConnectionBasePlus(MotorConnectionBase):
     close                       = ReadOnlyDelegateProperty()
     max_bson_size               = ReadOnlyDelegateProperty()
     max_pool_size               = ReadOnlyDelegateProperty()
-    _cache_credentials          = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         if 'auto_start_request' in kwargs:
