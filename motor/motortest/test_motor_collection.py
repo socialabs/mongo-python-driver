@@ -674,6 +674,31 @@ class MotorCollectionTest(MotorTest):
             self.assertEqual(
                 gle_options, test_collection.get_lasterror_options())
 
+    @async_test_engine()
+    def test_indexes(self):
+        cx = self.motor_connection(host, port)
+        test_collection = cx.test.test_collection
+
+        # Create an index
+        idx_name = yield motor.Op(test_collection.create_index, [('foo', 1)])
+        index_info = yield motor.Op(test_collection.index_information)
+        self.assertEqual([('foo', 1)], index_info[idx_name]['key'])
+
+        # Ensure the same index, test that callback is executed
+        result = yield motor.Op(test_collection.ensure_index, [('foo', 1)])
+        self.assertEqual(None, result)
+        result2 = yield motor.Op(test_collection.ensure_index, [('foo', 1)])
+        self.assertEqual(None, result2)
+
+        # Ensure an index that doesn't exist, test it's created
+        yield motor.Op(test_collection.ensure_index, [('bar', 1)])
+        index_info = yield motor.Op(test_collection.index_information)
+        self.assertTrue(any([
+            info['key'] == [('bar', 1)] for info in index_info.values()
+        ]))
+
+        # Don't test drop_index or drop_indexes -- Synchro tests them
+
 
 if __name__ == '__main__':
     unittest.main()

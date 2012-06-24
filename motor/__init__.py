@@ -73,9 +73,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 # TODO: document that Motor can do unsafe writes, AsyncMongo can't
 # TODO: since Tornado uses logging, so can we
 # TODO: test cross-host copydb
-# TODO: test that ensure_index calls the callback even if the index
-#   is already created and in the index cache - might be a special-case
-#   optimization
 # TODO: perhaps remove versionchanged Sphinx annotations from proxied methods,
 #   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
 # TODO: review open_sync(), does it need to disconnect after success to ensure
