@@ -20,6 +20,7 @@ import sys
 sys.path[0:0] = [""]
 
 import pymongo
+from test.utils import empty
 
 
 class TestPyMongo(unittest.TestCase):
@@ -33,6 +34,7 @@ class TestPyMongo(unittest.TestCase):
         self.assertTrue(c)
         self.assertEqual(c.host, self.host)
         self.assertEqual(c.port, self.port)
+        empty(c)
 
 if __name__ == "__main__":
     unittest.main()

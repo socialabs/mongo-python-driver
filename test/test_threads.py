@@ -20,7 +20,7 @@ import traceback
 
 from nose.plugins.skip import SkipTest
 
-from test.utils import server_started_with_auth, joinall
+from test.utils import server_started_with_auth, joinall, empty
 from test.test_connection import get_connection
 from pymongo.connection import Connection
 from pymongo.replica_set_connection import ReplicaSetConnection
@@ -232,7 +232,7 @@ class BaseTestThreads(object):
         self.db = self._get_connection().pymongo_test
 
     def tearDown(self):
-        pass
+        empty(self.db.connection)
 
     def _get_connection(self):
         """
@@ -313,6 +313,7 @@ class BaseTestThreads(object):
             threads.append(t)
 
         joinall(threads)
+        empty(db.connection)
 
     def test_server_disconnect(self):
         # PYTHON-345, we need to make sure that threads' request sockets are
@@ -383,6 +384,8 @@ class BaseTestThreads(object):
         for t in threads:
             self.assertTrue(t.passed, "%s threw exception" % t)
 
+        empty(cx)
+
 
 class BaseTestThreadsAuth(object):
     """
@@ -415,6 +418,7 @@ class BaseTestThreadsAuth(object):
         self.conn.admin.authenticate("admin-user", "password")
         self.conn.admin.system.users.remove({})
         self.conn.auth_test.system.users.remove({})
+        empty(self.conn)
 
     def test_auto_auth_login(self):
         conn = self._get_connection()
@@ -450,6 +454,8 @@ class BaseTestThreadsAuth(object):
 
         for t in threads:
             self.assertTrue(t.success)
+
+        empty(conn)
 
 class TestThreads(BaseTestThreads, unittest.TestCase):
     pass

@@ -26,6 +26,7 @@ from nose.plugins.skip import SkipTest
 from test.test_connection import host, port
 from test.test_pooling_base import (
     _TestPooling, _TestMaxPoolSize, _TestPoolSocketSharing, one)
+from test.utils import empty
 
 
 class TestPoolingThreads(_TestPooling, unittest.TestCase):
@@ -157,6 +158,7 @@ class TestPoolingThreads(_TestPooling, unittest.TestCase):
         d_sock = a._Connection__pool.get_socket((a.host, a.port))
         self.assertEqual(a_sock, d_sock)
         d_sock.close()
+        empty(a)
 
 
 class TestMaxPoolSizeThreads(_TestMaxPoolSize, unittest.TestCase):

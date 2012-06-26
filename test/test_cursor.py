@@ -30,6 +30,7 @@ from pymongo.database import Database
 from pymongo.errors import (InvalidOperation,
                             OperationFailure)
 from test.test_connection import get_connection
+from test.utils import empty
 from test import version
 
 
@@ -37,6 +38,9 @@ class TestCursor(unittest.TestCase):
 
     def setUp(self):
         self.db = Database(get_connection(), "pymongo_test")
+
+    def tearDown(self):
+        empty(self.db.connection)
 
     def test_explain(self):
         a = self.db.test.find()

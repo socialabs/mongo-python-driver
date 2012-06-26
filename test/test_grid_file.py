@@ -41,6 +41,7 @@ from gridfs.errors import (NoFile,
                            UnsupportedAPI)
 from test.test_connection import get_connection
 from test import qcheck
+from test.utils import empty
 
 
 class TestGridFile(unittest.TestCase):
@@ -49,6 +50,9 @@ class TestGridFile(unittest.TestCase):
         self.db = get_connection().pymongo_test
         self.db.fs.files.remove({})
         self.db.fs.chunks.remove({})
+
+    def tearDown(self):
+        empty(self.db.connection)
 
     def test_basic(self):
         f = GridIn(self.db.fs, filename="test")

@@ -33,6 +33,7 @@ from pymongo.database import Database
 from pymongo.connection import Connection
 from pymongo.collection import Collection
 from pymongo.master_slave_connection import MasterSlaveConnection
+from test.utils import empty
 
 
 class TestMasterSlaveConnection(unittest.TestCase):
@@ -61,6 +62,11 @@ class TestMasterSlaveConnection(unittest.TestCase):
 
         self.connection = MasterSlaveConnection(self.master, self.slaves)
         self.db = self.connection.pymongo_test
+
+    def tearDown(self):
+        empty(self.master)
+        for slave in self.slaves:
+            empty(slave)
 
     def test_types(self):
         self.assertRaises(TypeError, MasterSlaveConnection, 1)

@@ -20,7 +20,7 @@ import warnings
 
 from pymongo.connection import Connection
 from pymongo.errors import ConfigurationError, OperationFailure
-from test.utils import drop_collections
+from test.utils import drop_collections, empty
 
 
 host = os.environ.get("DB_IP", 'localhost')
@@ -51,6 +51,7 @@ class TestCommon(unittest.TestCase):
         cursor = coll.find(slave_okay=True)
         self.assertTrue(cursor._Cursor__slave_okay)
 
+        empty(c)
         c = Connection(pair, slaveok=True, w='majority',
                                      wtimeout=300, fsync=True, j=True)
         self.assertTrue(c.slave_okay)
@@ -70,6 +71,7 @@ class TestCommon(unittest.TestCase):
         cursor = coll.find(slave_okay=False)
         self.assertFalse(cursor._Cursor__slave_okay)
 
+        empty(c)
         c = Connection('mongodb://%s/?'
                        'w=2;wtimeoutMS=300;fsync=true;'
                        'journal=true' % (pair,))
@@ -77,6 +79,7 @@ class TestCommon(unittest.TestCase):
         d = {'w': 2, 'wtimeout': 300, 'fsync': True, 'j': True}
         self.assertEqual(d, c.get_lasterror_options())
 
+        empty(c)
         c = Connection('mongodb://%s/?'
                        'slaveok=true;w=1;wtimeout=300;'
                        'fsync=true;j=true' % (pair,))
@@ -155,6 +158,7 @@ class TestCommon(unittest.TestCase):
         self.assertTrue(coll.insert({'foo': 'bar'}, fsync=True))
         drop_collections(db)
         warnings.resetwarnings()
+        empty(c)
 
 
 if __name__ == "__main__":

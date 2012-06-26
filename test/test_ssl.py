@@ -22,6 +22,7 @@ from nose.plugins.skip import SkipTest
 
 from pymongo import Connection, ReplicaSetConnection
 from pymongo.errors import ConfigurationError, ConnectionFailure
+from test.utils import empty
 
 have_ssl = True
 try:
@@ -74,6 +75,7 @@ class TestSSL(unittest.TestCase):
         db.test.drop()
         self.assertTrue(db.test.insert({'ssl': True}, safe=True))
         self.assertTrue(db.test.find_one()['ssl'])
+        empty(conn)
 
 
 if __name__ == "__main__":

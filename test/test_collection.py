@@ -44,7 +44,7 @@ from pymongo.errors import (ConfigurationError,
                             OperationFailure,
                             TimeoutError)
 from test.test_connection import get_connection
-from test.utils import joinall
+from test.utils import joinall, empty
 from test import (qcheck,
                   version)
 
@@ -64,11 +64,12 @@ class TestCollection(unittest.TestCase):
     def tearDown(self):
         self.db.drop_collection("test_large_limit")
         self.db = None
-        self.connection = None
+        empty(self.connection)
 
         # Try to diagnose intermittent failure in tests on Jenkins
         cx = get_connection()
         self.assertEqual(0, cx.test.test_unique_threaded.count())
+        empty(cx)
 
     def test_collection(self):
         self.assertRaises(TypeError, Collection, self.db, 5)

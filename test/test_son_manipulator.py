@@ -27,6 +27,7 @@ from pymongo.son_manipulator import (NamespaceInjector,
                                      ObjectIdShuffler,
                                      SONManipulator)
 from test.test_connection import get_connection
+from test.utils import empty
 from test import qcheck
 
 
@@ -34,6 +35,9 @@ class TestSONManipulator(unittest.TestCase):
 
     def setUp(self):
         self.db = Database(get_connection(), "pymongo_test")
+
+    def tearDown(self):
+        empty(self.db.connection)
 
     def test_basic(self):
         manip = SONManipulator()

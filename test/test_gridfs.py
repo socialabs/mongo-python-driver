@@ -34,7 +34,7 @@ from bson.py3compat import b
 from gridfs.errors import (FileExists,
                            NoFile)
 from test.test_connection import get_connection
-from test.utils import joinall
+from test.utils import joinall, empty
 
 
 class JustWrite(threading.Thread):
@@ -79,6 +79,9 @@ class TestGridfs(unittest.TestCase):
         self.db.drop_collection("alt.chunks")
         self.fs = gridfs.GridFS(self.db)
         self.alt = gridfs.GridFS(self.db, "alt")
+
+    def tearDown(self):
+        empty(self.db.connection)
 
     def test_gridfs(self):
         self.assertRaises(TypeError, gridfs.GridFS, "foo")

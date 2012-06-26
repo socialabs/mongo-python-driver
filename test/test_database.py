@@ -40,7 +40,7 @@ from pymongo.son_manipulator import (AutoReference,
                                      NamespaceInjector,
                                      ObjectIdShuffler)
 from test import version
-from test.utils import server_started_with_auth
+from test.utils import server_started_with_auth, empty
 from test.test_connection import get_connection
 
 
@@ -48,6 +48,9 @@ class TestDatabase(unittest.TestCase):
 
     def setUp(self):
         self.connection = get_connection()
+
+    def tearDown(self):
+        empty(self.connection)
 
     def test_name(self):
         self.assertRaises(TypeError, Database, self.connection, 4)
@@ -334,6 +337,7 @@ class TestDatabase(unittest.TestCase):
         # just make sure there are no exceptions here
         db.logout()
         no_request_db.logout()
+        empty(no_request_cx)
 
     def test_id_ordering(self):
         # PyMongo attempts to have _id show up first

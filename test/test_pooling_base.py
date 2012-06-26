@@ -34,7 +34,7 @@ from pymongo.pool import (
 from pymongo.errors import ConfigurationError
 from test import version
 from test.test_connection import get_connection, host, port
-from test.utils import delay
+from test.utils import delay, empty
 
 N = 50
 DB = "pymongo-pooling-tests"
@@ -255,7 +255,7 @@ class _TestPoolingBase(object):
         db.test.insert([{} for i in range(10)])
 
     def tearDown(self):
-        self.c.close()
+        empty(self.c)
         if self.use_greenlets:
             # Undo patch
             reload(socket)
@@ -309,6 +309,7 @@ class _TestPooling(_TestPoolingBase):
 
         c = Connection(host=host, port=port, max_pool_size=100)
         self.assertEqual(c.max_pool_size, 100)
+        empty(c)
 
     def test_no_disconnect(self):
         run_cases(self, [NoRequest, NonUnique, Unique, SaveAndFind])
@@ -410,6 +411,8 @@ class _TestPooling(_TestPoolingBase):
 
         a_sock.close()
         b_sock.close()
+        empty(a)
+        empty(b)
 
     def test_request(self):
         # Check that Pool gives two different sockets in two calls to
@@ -694,6 +697,8 @@ class _TestMaxPoolSize(_TestPoolingBase):
 
             self.assertEqual(4, len(cx_pool.sockets))
 
+        empty(c)
+
     def test_max_pool_size(self):
         self._test_max_pool_size(0, 0)
 
@@ -800,6 +805,8 @@ class _TestPoolSocketSharing(_TestPoolingBase):
             'find_fast done',
             'find_slow done',
         ], history)
+
+        empty(cx)
 
     def test_pool(self):
         self._test_pool(use_request=False)

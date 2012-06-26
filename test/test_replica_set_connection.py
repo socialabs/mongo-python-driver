@@ -40,7 +40,7 @@ from pymongo.errors import (AutoReconnect,
                             InvalidName,
                             OperationFailure)
 from test import version
-from test.utils import delay
+from test.utils import delay, empty
 
 
 host = os.environ.get("DB_IP", 'localhost')
@@ -54,6 +54,7 @@ class TestReplicaSetConnectionAgainstStandalone(unittest.TestCase):
     def setUp(self):
         conn = Connection(pair)
         response = conn.admin.command('ismaster')
+        empty(conn)
         if 'setName' in response:
             raise SkipTest()
 
@@ -67,6 +68,7 @@ class TestConnectionReplicaSetBase(unittest.TestCase):
     def setUp(self):
         conn = Connection(pair)
         response = conn.admin.command('ismaster')
+        empty(conn)
         if 'setName' in response:
             self.name = str(response['setName'])
             self.w = len(response['hosts'])
@@ -98,7 +100,7 @@ class TestConnection(TestConnectionReplicaSetBase):
                           connectTimeoutMS=600)
         self.assertRaises(ConfigurationError, ReplicaSetConnection,
                           pair, replicaSet='fdlksjfdslkjfd')
-        self.assertTrue(ReplicaSetConnection(pair, replicaSet=self.name))
+        empty(ReplicaSetConnection(pair, replicaSet=self.name))
 
     def test_repr(self):
         connection = self._get_connection()
@@ -313,7 +315,7 @@ class TestConnection(TestConnectionReplicaSetBase):
             [a for a in connection]
 
         self.assertRaises(TypeError, iterate)
-        connection.close()
+        empty(connection)
 
     # TODO this test is probably very dependent on the machine it's running on
     # due to timing issues, but I want to get something in here.
@@ -338,7 +340,7 @@ class TestConnection(TestConnectionReplicaSetBase):
                 pass
             except AssertionError:
                 self.fail()
-        c.close()
+        empty(c)
 
     def test_close(self):
         c = self._get_connection()
@@ -353,6 +355,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         c.close()
 
         coll.count()
+        empty(c)
 
     def test_fork(self):
         """Test using a connection before and after a fork.
@@ -415,7 +418,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         except EOFError:
             pass
 
-        db.connection.close()
+        empty(db.connection)
 
     def test_document_class(self):
         c = self._get_connection()
@@ -445,7 +448,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual(dict, c.document_class)
         self.assertTrue(isinstance(db.test.find_one(), dict))
         self.assertFalse(isinstance(db.test.find_one(), SON))
-        c.close()
+        empty(c)
 
     def test_network_timeout(self):
         no_timeout = self._get_connection()
@@ -470,8 +473,8 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual(1, get_x_timeout(timeout.pymongo_test, None))
         self.assertRaises(ConnectionFailure, get_x_timeout,
                           no_timeout.pymongo_test, 0.1)
-        no_timeout.close()
-        timeout.close()
+        empty(no_timeout)
+        empty(timeout)
 
     def test_tz_aware(self):
         self.assertRaises(ConfigurationError, ReplicaSetConnection,
@@ -490,6 +493,8 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual(
                 aware.pymongo_test.test.find_one()["x"].replace(tzinfo=None),
                 naive.pymongo_test.test.find_one()["x"])
+        empty(aware)
+        empty(naive)
 
     def test_ipv6(self):
         try:
@@ -501,13 +506,12 @@ class TestConnection(TestConnectionReplicaSetBase):
             raise SkipTest()
 
         # Try a few simple things
-        connection = ReplicaSetConnection("mongodb://[::1]:%d" % (port,),
-                                          replicaSet=self.name)
-        connection = ReplicaSetConnection("mongodb://[::1]:%d/?safe=true;"
-                                          "replicaSet=%s" % (port, self.name))
-        connection = ReplicaSetConnection("[::1]:%d,localhost:"
-                                          "%d" % (port, port),
-                                          replicaSet=self.name)
+        empty(ReplicaSetConnection(
+            "mongodb://[::1]:%d" % (port,), replicaSet=self.name))
+        empty(ReplicaSetConnection(
+            "mongodb://[::1]:%d/?safe=true;replicaSet=%s" % (port, self.name)))
+        empty(ReplicaSetConnection(
+            "[::1]:%d,localhost:%d" % (port, port), replicaSet=self.name))
         connection = ReplicaSetConnection("localhost:%d,[::1]:"
                                           "%d" % (port, port),
                                           replicaSet=self.name)
@@ -517,7 +521,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         dbs = connection.database_names()
         self.assertTrue("pymongo_test" in dbs)
         self.assertTrue("pymongo_test_bernie" in dbs)
-        connection.close()
+        empty(connection)
 
     def _test_kill_cursor_explicit(self, read_pref):
         c = self._get_connection(read_preference=read_pref)
@@ -559,6 +563,7 @@ class TestConnection(TestConnectionReplicaSetBase):
             del cursor
 
         self.assertRaises(OperationFailure, lambda: list(cursor2))
+        empty(c)
 
     def test_kill_cursor_explicit_primary(self):
         self._test_kill_cursor_explicit(ReadPreference.PRIMARY)
@@ -630,6 +635,8 @@ class TestConnection(TestConnectionReplicaSetBase):
             if old_signal_handler:
                 signal.signal(signal.SIGALRM, old_signal_handler)
 
+        empty(c)
+
     def test_auto_start_request(self):
         for bad_horrible_value in (None, 5, 'hi!'):
             self.assertRaises(
@@ -662,6 +669,7 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertTrue(conn.in_request())
         conn.end_request()
         self.assertFalse(conn.in_request())
+        empty(conn)
 
 
 if __name__ == "__main__":
