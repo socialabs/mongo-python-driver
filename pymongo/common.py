@@ -17,7 +17,6 @@
 import warnings
 
 from pymongo import ReadPreference
-from pymongo.pool import BasePool
 from pymongo.errors import ConfigurationError
 
 

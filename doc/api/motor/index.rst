@@ -61,11 +61,3 @@ Classes:
    motor_database
    motor_collection
    motor_cursor
-
-Sub-modules:
-
-.. toctree::
-   :maxdepth: 2
-
-   motortest
-   motorgen

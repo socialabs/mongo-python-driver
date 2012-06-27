@@ -65,7 +65,8 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 #   CPython 2.5-2.7, and 3.2
 # TODO: document that Motor doesn't do requests at all, use callbacks to
 #   ensure consistency
-# TODO: document that Motor doesn't do auto_start_request
+# TODO: document that Motor doesn't do auto_start_request, although if you
+#   pass it in, it'll be sent to sync_connection()
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
 # TODO: document, smugly, that Motor has configurable IOLoops
@@ -137,9 +138,8 @@ def motor_sock_method(check_closed=False):
                 self.stream.set_close_callback(closed)
 
             try:
-                kwargs_cp = kwargs.copy()
-                kwargs_cp['callback'] = callback
-                method(self, *args, **kwargs_cp)
+                kwargs['callback'] = callback
+                method(self, *args, **kwargs)
                 return main.switch()
             except socket.error:
                 raise
@@ -248,7 +248,7 @@ class MotorPool(pymongo.pool.GreenletPool):
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 motor_sock = MotorSocket(sock, self.io_loop, use_ssl=self.use_ssl)
-                motor_sock.settimeout(self.conn_timeout)
+                motor_sock.settimeout(self.conn_timeout or 20.0)
 
                 # MotorSocket will pause the current greenlet and resume it
                 # when connection has completed
@@ -298,11 +298,10 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
         callback = kwargs.get('callback')
         check_callable(callback, required=callback_required)
 
-        if 'callback' in kwargs:
-            # Don't pass callback to sync_method
-            kwargs = kwargs.copy()
-            del kwargs['callback']
+        # Don't pass callback to sync_method
+        kwargs.pop('callback', None)
 
+        # Safe writes if callback is passed and safe=False not passed explicitly
         if 'safe' not in kwargs and has_safe_arg:
             kwargs['safe'] = bool(callback)
 
@@ -383,29 +382,30 @@ class MotorMeta(type):
 
 class MotorBase(object):
     __metaclass__ = MotorMeta
-    def __cmp__(self, other):
+
+    def __eq__(self, other):
         if isinstance(other, self.__class__):
-            return cmp(self.delegate, other.delegate)
+            return self.delegate == other.delegate
         return NotImplemented
 
-    get_lasterror_options       = ReadOnlyDelegateProperty()
-    set_lasterror_options       = ReadOnlyDelegateProperty()
-    unset_lasterror_options     = ReadOnlyDelegateProperty()
-    name                        = ReadOnlyDelegateProperty()
-    document_class              = ReadWriteDelegateProperty()
-    slave_okay                  = ReadWriteDelegateProperty()
-    safe                        = ReadWriteDelegateProperty()
-    read_preference             = ReadWriteDelegateProperty()
+    get_lasterror_options   = ReadOnlyDelegateProperty()
+    set_lasterror_options   = ReadOnlyDelegateProperty()
+    unset_lasterror_options = ReadOnlyDelegateProperty()
+    name                    = ReadOnlyDelegateProperty()
+    document_class          = ReadWriteDelegateProperty()
+    slave_okay              = ReadWriteDelegateProperty()
+    safe                    = ReadWriteDelegateProperty()
+    read_preference         = ReadWriteDelegateProperty()
 
     def __repr__(self):
         return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
 
 
 class MotorConnectionBase(MotorBase):
-    database_names              = Async(has_safe_arg=False, cb_required=True)
-    close_cursor                = Async(has_safe_arg=False, cb_required=False)
-    disconnect                  = ReadOnlyDelegateProperty()
-    tz_aware                    = ReadOnlyDelegateProperty()
+    database_names          = Async(has_safe_arg=False, cb_required=True)
+    close_cursor            = Async(has_safe_arg=False, cb_required=False)
+    disconnect              = ReadOnlyDelegateProperty()
+    tz_aware                = ReadOnlyDelegateProperty()
 
     def __init__(self, io_loop=None):
         if io_loop:
@@ -422,10 +422,9 @@ class MotorConnectionBase(MotorBase):
 
     def __getattr__(self, name):
         if not self.connected:
-            msg = "Can't access attribute '%s' on %s before calling open()" \
+            msg = ("Can't access attribute '%s' on %s before calling open()"
                   " or open_sync()" % (
-                name, self.__class__.__name__
-            )
+                name, self.__class__.__name__))
             raise pymongo.errors.InvalidOperation(msg)
 
         return MotorDatabase(self, name)
@@ -469,23 +468,14 @@ class MotorConnectionBasePlus(MotorConnectionBase):
     (MotorMasterSlaveConnection is more primitive, so it inherits from
     MotorConnectionBase.)
     """
-    server_info                 = Async(has_safe_arg=False, cb_required=False)
-    copy_database               = Async(has_safe_arg=False, cb_required=False)
-    close                       = ReadOnlyDelegateProperty()
-    max_bson_size               = ReadOnlyDelegateProperty()
-    max_pool_size               = ReadOnlyDelegateProperty()
+    server_info   = Async(has_safe_arg=False, cb_required=False)
+    copy_database = Async(has_safe_arg=False, cb_required=False)
+    close         = ReadOnlyDelegateProperty()
+    max_bson_size = ReadOnlyDelegateProperty()
+    max_pool_size = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
-        if 'auto_start_request' in kwargs:
-            raise pymongo.errors.ConfigurationError(
-                "Motor doesn't support auto_start_request")
-
-        if 'io_loop' in kwargs:
-            kwargs = kwargs.copy()
-            io_loop = kwargs.pop('io_loop')
-        else:
-            io_loop = None
-
+        io_loop = kwargs.pop('io_loop', None)
         super(MotorConnectionBasePlus, self).__init__(io_loop)
 
         # Store args and kwargs for when open() is called
@@ -586,12 +576,12 @@ class MotorConnectionBasePlus(MotorConnectionBase):
 class MotorConnection(MotorConnectionBasePlus):
     __delegate_class__ = pymongo.connection.Connection
 
-    kill_cursors                = Async(has_safe_arg=False, cb_required=True)
-    fsync                       = Async(has_safe_arg=False, cb_required=False)
-    unlock                      = Async(has_safe_arg=False, cb_required=False)
-    nodes                       = ReadOnlyDelegateProperty()
-    host                        = ReadOnlyDelegateProperty()
-    port                        = ReadOnlyDelegateProperty()
+    kill_cursors = Async(has_safe_arg=False, cb_required=True)
+    fsync        = Async(has_safe_arg=False, cb_required=False)
+    unlock       = Async(has_safe_arg=False, cb_required=False)
+    nodes        = ReadOnlyDelegateProperty()
+    host         = ReadOnlyDelegateProperty()
+    port         = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         """Create a new connection to a single MongoDB instance at *host:port*.
@@ -638,11 +628,11 @@ class MotorConnection(MotorConnectionBasePlus):
 class MotorReplicaSetConnection(MotorConnectionBasePlus):
     __delegate_class__ = pymongo.replica_set_connection.ReplicaSetConnection
 
-    primary                       = ReadOnlyDelegateProperty()
-    secondaries                   = ReadOnlyDelegateProperty()
-    arbiters                      = ReadOnlyDelegateProperty()
-    hosts                         = ReadOnlyDelegateProperty()
-    seeds                         = ReadOnlyDelegateProperty()
+    primary     = ReadOnlyDelegateProperty()
+    secondaries = ReadOnlyDelegateProperty()
+    arbiters    = ReadOnlyDelegateProperty()
+    hosts       = ReadOnlyDelegateProperty()
+    seeds       = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         """Create a new connection to a MongoDB replica set.
@@ -663,8 +653,8 @@ class MotorReplicaSetConnection(MotorConnectionBasePlus):
     def _delegate_init_args(self):
         # This _monitor_class will be passed to PyMongo's
         # ReplicaSetConnection when we create it.
-        args, kwargs = \
-            super(MotorReplicaSetConnection, self)._delegate_init_args()
+        args, kwargs = super(
+            MotorReplicaSetConnection, self)._delegate_init_args()
         kwargs['_monitor_class'] = functools.partial(
             MotorReplicaSetMonitor, self.io_loop)
         return args, kwargs
@@ -815,23 +805,22 @@ class MotorDatabase(MotorBase):
     __delegate_class__ = pymongo.database.Database
 
     # list of overridden async operations on a MotorDatabase instance
-    set_profiling_level           = Async(has_safe_arg=False, cb_required=False)
-    reset_error_history           = Async(has_safe_arg=False, cb_required=False)
-    add_user                      = Async(has_safe_arg=False, cb_required=False)
-    remove_user                   = Async(has_safe_arg=False, cb_required=False)
-    logout                        = Async(has_safe_arg=False, cb_required=False)
-    command                       = Async(has_safe_arg=False, cb_required=False)
-
-    authenticate                  = Async(has_safe_arg=False, cb_required=True)
-    collection_names              = Async(has_safe_arg=False, cb_required=True)
-    current_op                    = Async(has_safe_arg=False, cb_required=True)
-    profiling_level               = Async(has_safe_arg=False, cb_required=True)
-    profiling_info                = Async(has_safe_arg=False, cb_required=True)
-    error                         = Async(has_safe_arg=False, cb_required=True)
-    last_status                   = Async(has_safe_arg=False, cb_required=True)
-    previous_error                = Async(has_safe_arg=False, cb_required=True)
-    dereference                   = Async(has_safe_arg=False, cb_required=True)
-    eval                          = Async(has_safe_arg=False, cb_required=True)
+    set_profiling_level = Async(has_safe_arg=False, cb_required=False)
+    reset_error_history = Async(has_safe_arg=False, cb_required=False)
+    add_user            = Async(has_safe_arg=False, cb_required=False)
+    remove_user         = Async(has_safe_arg=False, cb_required=False)
+    logout              = Async(has_safe_arg=False, cb_required=False)
+    command             = Async(has_safe_arg=False, cb_required=False)
+    authenticate        = Async(has_safe_arg=False, cb_required=True)
+    collection_names    = Async(has_safe_arg=False, cb_required=True)
+    current_op          = Async(has_safe_arg=False, cb_required=True)
+    profiling_level     = Async(has_safe_arg=False, cb_required=True)
+    profiling_info      = Async(has_safe_arg=False, cb_required=True)
+    error               = Async(has_safe_arg=False, cb_required=True)
+    last_status         = Async(has_safe_arg=False, cb_required=True)
+    previous_error      = Async(has_safe_arg=False, cb_required=True)
+    dereference         = Async(has_safe_arg=False, cb_required=True)
+    eval                = Async(has_safe_arg=False, cb_required=True)
 
     # TODO: remove system_js?
     system_js                     = ReadOnlyDelegateProperty()
@@ -909,8 +898,7 @@ class MotorDatabase(MotorBase):
         """
         # We override create_collection to wrap the Collection it returns in a
         # MotorCollection.
-        kwargs_cp = kwargs.copy()
-        callback = kwargs_cp.pop('callback', None)
+        callback = kwargs.pop('callback', None)
         check_callable(callback)
 
         def create_collection_callback(collection, error):
@@ -919,12 +907,12 @@ class MotorDatabase(MotorBase):
 
             callback(collection, error)
 
-        kwargs_cp['callback'] = create_collection_callback
+        kwargs['callback'] = create_collection_callback
         sync_method = self.delegate.create_collection
         async_method = asynchronize(
             self.get_io_loop(), sync_method, False, False)
 
-        async_method(name, *args, **kwargs_cp)
+        async_method(name, *args, **kwargs)
 
     def add_son_manipulator(self, manipulator):
         """Add a new son manipulator to this database.
@@ -950,31 +938,27 @@ class MotorDatabase(MotorBase):
 class MotorCollection(MotorBase):
     __delegate_class__ = pymongo.collection.Collection
 
-    create_index            = Async(has_safe_arg=False, cb_required=False)
-    drop_indexes            = Async(has_safe_arg=False, cb_required=False)
-    drop_index              = Async(has_safe_arg=False, cb_required=False)
-    drop                    = Async(has_safe_arg=False, cb_required=False)
-    ensure_index            = Async(has_safe_arg=False, cb_required=False)
-    reindex                 = Async(has_safe_arg=False, cb_required=False)
-    rename                  = Async(has_safe_arg=False, cb_required=False)
-    find_and_modify         = Async(has_safe_arg=False, cb_required=False)
-
-    update                  = Async(has_safe_arg=True, cb_required=False)
-    insert                  = Async(has_safe_arg=True, cb_required=False)
-    remove                  = Async(has_safe_arg=True, cb_required=False)
-    save                    = Async(has_safe_arg=True, cb_required=False)
-
-    index_information       = Async(has_safe_arg=False, cb_required=True)
-    count                   = Async(has_safe_arg=False, cb_required=True)
-    options                 = Async(has_safe_arg=False, cb_required=True)
-    group                   = Async(has_safe_arg=False, cb_required=True)
-    distinct                = Async(has_safe_arg=False, cb_required=True)
-    inline_map_reduce       = Async(has_safe_arg=False, cb_required=True)
-    find_one                = Async(has_safe_arg=False, cb_required=True)
-
-    uuid_subtype            = ReadWriteDelegateProperty()
-
-    full_name               = ReadOnlyDelegateProperty()
+    create_index      = Async(has_safe_arg=False, cb_required=False)
+    drop_indexes      = Async(has_safe_arg=False, cb_required=False)
+    drop_index        = Async(has_safe_arg=False, cb_required=False)
+    drop              = Async(has_safe_arg=False, cb_required=False)
+    ensure_index      = Async(has_safe_arg=False, cb_required=False)
+    reindex           = Async(has_safe_arg=False, cb_required=False)
+    rename            = Async(has_safe_arg=False, cb_required=False)
+    find_and_modify   = Async(has_safe_arg=False, cb_required=False)
+    update            = Async(has_safe_arg=True, cb_required=False)
+    insert            = Async(has_safe_arg=True, cb_required=False)
+    remove            = Async(has_safe_arg=True, cb_required=False)
+    save              = Async(has_safe_arg=True, cb_required=False)
+    index_information = Async(has_safe_arg=False, cb_required=True)
+    count             = Async(has_safe_arg=False, cb_required=True)
+    options           = Async(has_safe_arg=False, cb_required=True)
+    group             = Async(has_safe_arg=False, cb_required=True)
+    distinct          = Async(has_safe_arg=False, cb_required=True)
+    inline_map_reduce = Async(has_safe_arg=False, cb_required=True)
+    find_one          = Async(has_safe_arg=False, cb_required=True)
+    uuid_subtype      = ReadWriteDelegateProperty()
+    full_name         = ReadOnlyDelegateProperty()
 
     def __init__(self, database, name, *args, **kwargs):
         if not isinstance(database, MotorDatabase):
@@ -1027,18 +1011,17 @@ class MotorCollection(MotorBase):
 
         .. _map reduce command: http://www.mongodb.org/display/DOCS/MapReduce
         """
-        kwargs_cp = kwargs.copy()
-        callback = kwargs_cp.pop('callback', None)
+        callback = kwargs.pop('callback', None)
 
         def map_reduce_callback(result, error):
             if isinstance(result, pymongo.collection.Collection):
                 result = self.database[result.name]
             callback(result, error)
 
-        kwargs_cp['callback'] = map_reduce_callback
+        kwargs['callback'] = map_reduce_callback
         sync_method = self.delegate.map_reduce
         async_mr = asynchronize(self.get_io_loop(), sync_method, False, True)
-        async_mr(*args, **kwargs_cp)
+        async_mr(*args, **kwargs)
 
     def get_io_loop(self):
         return self.database.get_io_loop()
@@ -1060,24 +1043,21 @@ class MotorCursorChainingMethod(DelegateProperty):
 class MotorCursor(MotorBase):
     __delegate_class__ = pymongo.cursor.Cursor
     # TODO: test all these in test_motor_cursor.py
-    count                       = Async(has_safe_arg=False, cb_required=True)
-    distinct                    = Async(has_safe_arg=False, cb_required=True)
-    explain                     = Async(has_safe_arg=False, cb_required=True)
-    close                       = Async(has_safe_arg=False, cb_required=False)
-
-    slave_okay                  = ReadOnlyDelegateProperty()
-    alive                       = ReadOnlyDelegateProperty()
-    cursor_id                   = ReadOnlyDelegateProperty()
-
-    batch_size                  = MotorCursorChainingMethod()
-    add_option                  = MotorCursorChainingMethod()
-    remove_option               = MotorCursorChainingMethod()
-    limit                       = MotorCursorChainingMethod()
-    skip                        = MotorCursorChainingMethod()
-    max_scan                    = MotorCursorChainingMethod()
-    sort                        = MotorCursorChainingMethod()
-    hint                        = MotorCursorChainingMethod()
-    where                       = MotorCursorChainingMethod()
+    count         = Async(has_safe_arg=False, cb_required=True)
+    distinct      = Async(has_safe_arg=False, cb_required=True)
+    explain       = Async(has_safe_arg=False, cb_required=True)
+    close         = Async(has_safe_arg=False, cb_required=False)
+    alive         = ReadOnlyDelegateProperty()
+    cursor_id     = ReadOnlyDelegateProperty()
+    batch_size    = MotorCursorChainingMethod()
+    add_option    = MotorCursorChainingMethod()
+    remove_option = MotorCursorChainingMethod()
+    limit         = MotorCursorChainingMethod()
+    skip          = MotorCursorChainingMethod()
+    max_scan      = MotorCursorChainingMethod()
+    sort          = MotorCursorChainingMethod()
+    hint          = MotorCursorChainingMethod()
+    where         = MotorCursorChainingMethod()
 
     def __init__(self, cursor, collection):
         """You will not usually construct a MotorCursor yourself, but acquire
@@ -1450,7 +1430,7 @@ class MotorCursor(MotorBase):
             self.close()
 
 
-# doc all these three gen tasks, and
+# TODO: doc all these three gen tasks, and
 #   consider if there are additional convenience methods possible. Lots of
 #   examples. Link to tornado gen docs.
 # TODO: some way to generate docs even without Tornado installed?
@@ -1467,6 +1447,7 @@ if requirements_satisfied:
             return result
 
 
+    # TODO: test
     class WaitOp(gen.Wait):
         def get_result(self):
             (result, error), _ = super(WaitOp, self).get_result()
@@ -1476,6 +1457,7 @@ if requirements_satisfied:
             return result
 
 
+    # TODO: test
     class WaitAllOps(gen.WaitAll):
         def get_result(self):
             super_results = super(WaitAllOps, self).get_result()

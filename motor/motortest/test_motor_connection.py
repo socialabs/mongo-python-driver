@@ -31,7 +31,7 @@ from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual,
     puritanical)
 from pymongo.errors import (
-    InvalidOperation, ConfigurationError, ConnectionFailure)
+    InvalidOperation, ConfigurationError, ConnectionFailure, AutoReconnect)
 from test.utils import server_is_master_with_slave, delay
 
 
@@ -286,7 +286,7 @@ class MotorConnectionTest(MotorTest):
         time.sleep(0.5)
 
     @async_test_engine()
-    def test_socket_error(self):
+    def test_connection_failure(self):
         exc = None
         try:
             # Assuming there isn't anything actually running on this port
@@ -303,6 +303,21 @@ class MotorConnectionTest(MotorTest):
             self.assertTrue('Connection refused' in exc.message)
         else:
             self.assertTrue('error' in exc.message)
+
+    @async_test_engine()
+    def test_connection_timeout(self):
+        exc = None
+        start = time.time()
+        try:
+            # Assuming asdf.com isn't running an open mongod on this port
+            yield motor.Op(motor.MotorConnection(
+                'asdf.com', 8765, connectTimeoutMS=1000).open)
+        except Exception, e:
+            exc = e
+
+        self.assertTrue(isinstance(exc, AutoReconnect))
+        connection_duration = time.time() - start
+        self.assertAlmostEqual(1, connection_duration, delta=0.25)
 
     @async_test_engine()
     def test_max_pool_size_validation(self):
