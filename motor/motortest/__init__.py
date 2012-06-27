@@ -18,16 +18,24 @@ import functools
 import os
 import time
 import types
-import pymongo
 
+from nose.plugins.skip import SkipTest
+
+import pymongo
+import pymongo.errors
 import motor
 if not motor.requirements_satisfied:
-    from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
+from motor.motortest import eventually, puritanical
 
 from tornado import gen, ioloop
 
-from motor.motortest import eventually, puritanical
+
+have_ssl = True
+try:
+    import ssl
+except ImportError:
+    have_ssl = False
 
 
 host = os.environ.get("DB_IP", "localhost")
@@ -43,13 +51,16 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 # TODO: replicate asyncmongo's whole test suite?
 # TODO: don't use the 'test' database, use something that will play nice w/
 #     Jenkins environment
-# TODO: test SSL, I don't think my call to ssl.wrap_socket() in MotorSocket is
-#     right
 # TODO: check that sockets are returned to pool, or closed, or something
 # TODO: test unsafe remove
 # TODO: test deeply-nested callbacks
 # TODO: error if a generator function isn't wrapped in async_test_engine -
 #    this can yield false passes because the function never gets to its asserts
+
+
+cx_classes = (
+    motor.MotorConnection,
+    motor.MotorReplicaSetConnection)
 
 
 def async_test_engine(timeout_sec=5, io_loop=None):
@@ -165,7 +176,8 @@ class MotorTest(
     puritanical.PuritanicalTest,
     eventually.AssertEventuallyTest
 ):
-    longMessage = True
+    longMessage = True # Used by unittest.TestCase
+    ssl = False # If True, connect with SSL, skip if mongod isn't SSL
 
     def setUp(self):
         super(MotorTest, self).setUp()
@@ -173,9 +185,23 @@ class MotorTest(
         # Store a regular synchronous pymongo Connection for convenience while
         # testing. Low timeouts so we don't hang a test because, say, Mongo
         # isn't up or is hung by a long-running $where clause.
-        self.sync_cx = pymongo.Connection(
-            host, port, connectTimeoutMS=2000, socketTimeoutMS=2000
-        )
+        connectTimeoutMS = socketTimeoutMS = 2000
+        if self.ssl:
+            if not have_ssl:
+                raise SkipTest("Python compiled without SSL")
+            try:
+                self.sync_cx = pymongo.Connection(
+                    host, port, connectTimeoutMS=connectTimeoutMS,
+                    socketTimeoutMS=socketTimeoutMS,
+                    ssl=True)
+            except pymongo.errors.ConnectionFailure:
+                raise SkipTest("mongod doesn't support SSL, or is down")
+        else:
+            self.sync_cx = pymongo.Connection(
+                host, port, connectTimeoutMS=connectTimeoutMS,
+                socketTimeoutMS=socketTimeoutMS,
+                ssl=False)
+
         self.sync_db = self.sync_cx.test
         self.sync_coll = self.sync_db.test_collection
         self.sync_coll.drop()
@@ -194,6 +220,9 @@ class MotorTest(
         return output.get('cursors', {}).get('totalOpen', 0)
 
     def motor_connection(self, host, port, *args, **kwargs):
+        """Get an open MotorConnection. Ignores self.ssl, you must pass 'ssl'
+           argument.
+        """
         return motor.MotorConnection(host, port, *args, **kwargs).open_sync()
 
     def wait_for_cursors(self):

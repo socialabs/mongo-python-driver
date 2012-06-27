@@ -565,19 +565,19 @@ class MotorCollectionTest(MotorTest):
             if error:
                 raise error
 
-            cx.pymongo_ssl_test.test.insert({'_id': 201}, callback=inserted)
+            cx.test.test.insert({'_id': 201}, callback=inserted)
 
         def inserted(result, error):
             if error:
                 raise error
 
-            cx.pymongo_ssl_test.test.find_one({'_id': 201}, callback=found)
+            cx.test.test.find_one({'_id': 201}, callback=found)
 
         def found(result, error):
             if error:
                 raise error
 
-            cx.pymongo_ssl_test.test.remove({'_id': 201}, callback=removed)
+            cx.test.test.remove({'_id': 201}, callback=removed)
 
         def removed(result, error):
             results.append('done')

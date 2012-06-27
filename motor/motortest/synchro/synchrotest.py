@@ -43,7 +43,6 @@ excluded_modules = [
     'test.test_paired',
 
     # TODO:
-    'test.test_ssl',
     'test.test_master_slave_connection',
     'test.test_grid_file',
     'test.test_gridfs',

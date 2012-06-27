@@ -16,25 +16,18 @@
 
 import unittest
 
-have_ssl = True
-try:
-    import ssl
-except ImportError:
-    have_ssl = False
-
 from nose.plugins.skip import SkipTest
 
 import motor
 if not motor.requirements_satisfied:
     raise SkipTest("Tornado or greenlet not installed")
 
-from tornado import ioloop
-
-from motor.motortest import MotorTest, host, port
+from motor.motortest import (
+    MotorTest, host, port, async_test_engine, have_ssl, cx_classes)
 from pymongo.errors import ConfigurationError
 
 
-class MotorSSLTest(MotorTest):
+class MotorNoSSLTest(unittest.TestCase):
     def test_no_ssl(self):
         if have_ssl:
             raise SkipTest(
@@ -42,41 +35,28 @@ class MotorSSLTest(MotorTest):
                 "without SSL"
             )
 
-        self.assertRaises(ConfigurationError,
-                          motor.MotorConnection, host, port, ssl=True)
-        # TODO: test same thing with MotorReplicaSetConnection and MMSC
-    #        self.assertRaises(ConfigurationError,
-    #            ReplicaSetConnection, ssl=True)
+        for cx_class in cx_classes:
+            self.assertRaises(
+                ConfigurationError,
+                cx_class(host, port, ssl=True).open_sync)
 
+
+class MotorSSLTest(MotorTest):
+    ssl = True
+
+    @async_test_engine()
     def test_simple_ops(self):
-        # TODO: this is duplicative of test_nested_callbacks_2
         if not have_ssl:
-            raise SkipTest()
+            raise SkipTest("SSL not compiled into Python")
 
-        loop = ioloop.IOLoop.instance()
-        cx = motor.MotorConnection(host, port, connectTimeoutMS=100, ssl=True)
+        cx = yield motor.Op(motor.MotorConnection(host, port, ssl=True).open)
 
-        def connected(cx, error):
-            if error:
-                raise error
-
-            cx.pymongo_ssl_test.test.insert({'ssl': True}, callback=inserted)
-
-        def inserted(result, error):
-            if error:
-                raise error
-
-            cx.pymongo_ssl_test.test.find_one(callback=found)
-
-        def found(result, error):
-            if error:
-                raise error
-
-            loop.stop()
-            cx.drop_database('pymongo_ssl_test')
-
-        cx.open(connected)
-        loop.start()
+        # Make sure the connection works
+        db = cx.motor_ssl_test
+        yield motor.Op(db.collection.insert, {'hello': 'goodbye'})
+        hello = yield motor.Op(db.collection.find_one, {'hello': 'goodbye'})
+        self.assertEqual('goodbye', hello['hello'])
+        yield motor.Op(cx.drop_database, db)
 
 
 if __name__ == '__main__':

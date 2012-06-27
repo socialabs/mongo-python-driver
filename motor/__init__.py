@@ -59,7 +59,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
 # TODO: discourage use of MotorConnection.delegate, MotorDatabase.delegate, etc.
 # TODO: document that with a callback passed in, Motor's default is
 #   to do SAFE writes, unlike PyMongo.
-# TODO: SSL, IPv6
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
 # TODO: document this supports same Python versions as Tornado (currently
@@ -228,6 +227,11 @@ class MotorPool(pymongo.pool.GreenletPool):
         super(MotorPool, self).__init__(*args, **kwargs)
 
     def create_connection(self, pair):
+        """Copy of BasePool.connect()
+           TODO: refactor, extra hooks in BasePool
+        """
+        # TODO: refactor all this with BasePool, use a new hook to wrap the
+        #   socket with MotorSocket before attempting connect().
         assert greenlet.getcurrent().parent, "Should be on child greenlet"
 
         # Don't try IPv6 if we don't support it.
@@ -235,35 +239,25 @@ class MotorPool(pymongo.pool.GreenletPool):
         if socket.has_ipv6:
             family = socket.AF_UNSPEC
 
-        if not (pair or self.pair):
-            raise pymongo.errors.OperationFailure(
-                "(host, port) pair not configured")
-
         host, port = pair or self.pair
         err = None
         for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
             af, socktype, proto, dummy, sa = res
-
-            # TODO: support IPV6; somehow we're not properly catching the error
-            # right now and trying IPV4 as we intend in this loop, see
-            # MotorSocket.connect()
-            if af == socket.AF_INET6:
-                continue
+            sock = None
             try:
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
                 motor_sock = MotorSocket(sock, self.io_loop, use_ssl=self.use_ssl)
                 motor_sock.settimeout(self.conn_timeout)
 
                 # MotorSocket will pause the current greenlet and resume it
                 # when connection has completed
                 motor_sock.connect(pair or self.pair)
-                motor_sock.settimeout(self.net_timeout) # TODO: necessary? BasePool.connect() handles this
                 return motor_sock
-
             except socket.error, e:
                 err = e
+                if sock is not None:
+                    sock.close()
 
         if err is not None:
             raise err
@@ -274,6 +268,14 @@ class MotorPool(pymongo.pool.GreenletPool):
             # support IPv6 at all.
             raise socket.error('getaddrinfo failed')
 
+    def connect(self, pair):
+        """Copy of BasePool.connect(), avoiding call to ssl.wrap_socket which
+           is inappropriate for Motor.
+           TODO: refactor, extra hooks in BasePool
+        """
+        sock = self.create_connection(pair)
+        sock.settimeout(self.net_timeout)
+        return pymongo.pool.SocketInfo(sock, weakref.ref(self))
 
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     """
