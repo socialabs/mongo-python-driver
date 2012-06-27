@@ -328,7 +328,7 @@ class MotorConnectionTest(MotorTest):
         cx = self.motor_connection(host, port).open_sync()
         collection = cx.test.test_collection
 
-        concurrency = 250
+        concurrency = 150
         ndocs = [0]
         ninserted = [0]
 
