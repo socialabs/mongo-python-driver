@@ -650,6 +650,7 @@ class MotorCollectionTest(MotorTest):
 
         # TODO: once PyMongo 'safe' behavior is fixed, test that
         # MotorConnection's 'safe' is True with a GLE option and safe=False
+        # PYTHON-358
         for safe, gle_options in [
             (True,  {}),
             (True, {'w': 2}),
