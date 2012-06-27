@@ -277,6 +277,7 @@ class MotorPool(pymongo.pool.GreenletPool):
         sock.settimeout(self.net_timeout)
         return pymongo.pool.SocketInfo(sock, weakref.ref(self))
 
+
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     """
     :Parameters:
@@ -557,9 +558,6 @@ class MotorConnectionBasePlus(MotorConnectionBase):
             if self.delegate:
                 self.delegate.pool_class = functools.partial(
                     MotorPool, self.io_loop)
-
-                # TODO: get proper arguments for Pool
-                self.delegate.pool = self.delegate.pool_class(None, 17, None, None, False)
 
                 for pool in self._get_pools():
                     pool.io_loop = self.io_loop
