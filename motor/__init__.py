@@ -911,6 +911,7 @@ class MotorDatabase(MotorBase):
         # MotorCollection.
         kwargs_cp = kwargs.copy()
         callback = kwargs_cp.pop('callback', None)
+        check_callable(callback)
 
         def create_collection_callback(collection, error):
             if isinstance(collection, pymongo.collection.Collection):
