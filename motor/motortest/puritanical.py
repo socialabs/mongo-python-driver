@@ -39,6 +39,7 @@ class PuritanicalTest(unittest.TestCase):
             loop = ioloop.IOLoop.instance()
             if loop:
                 loop.stop()
+                loop.close(all_fds=True)
             del ioloop.IOLoop._instance
 
         # So any function that calls IOLoop.instance() gets the
