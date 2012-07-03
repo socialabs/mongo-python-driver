@@ -47,21 +47,14 @@ import pymongo.son_manipulator
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection',
            'MotorMasterSlaveConnection']
 
-# TODO: note you can't access properties like 'safe' on MotorConnection
-#   until connected
-# TODO: note you can't use from multithreaded app, can't fork, consider special
-#   checks to prevent it?
 # TODO: document that default timeout is None, ensure we're doing
 #   timeouts as efficiently as possible, test performance hit with timeouts
 #   from registering and cancelling timeouts
 # TODO: examine & document what connection and network timeouts mean here
-# TODO: discourage use of MotorConnection.delegate, MotorDatabase.delegate, etc.
 # TODO: document that with a callback passed in, Motor's default is
 #   to do SAFE writes, unlike PyMongo.
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
-# TODO: document this supports same Python versions as Tornado (currently
-#   CPython 2.5-2.7, and 3.2
 # TODO: document that Motor doesn't do requests at all, use callbacks to
 #   ensure consistency
 # TODO: document that Motor doesn't do auto_start_request, although if you
@@ -290,8 +283,6 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
         "First argument to asynchronize must be IOLoop, not %s" % repr(io_loop))
 
     # TODO doc
-    # TODO: staticmethod of base class for Motor objects, add some custom
-    #   stuff, like Connection can't do anything before open()
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
         callback = kwargs.get('callback')
@@ -578,7 +569,8 @@ class MotorConnection(MotorConnectionBase):
         """Create a new connection to a single MongoDB instance at *host:port*.
 
         :meth:`open` or :meth:`open_sync` must be called before using a new
-        MotorConnection.
+        MotorConnection. No property access is allowed before the connection
+        is opened.
 
         MotorConnection takes the same constructor arguments as
         :class:`~pymongo.connection.Connection`, as well as:
@@ -629,7 +621,8 @@ class MotorReplicaSetConnection(MotorConnectionBase):
         """Create a new connection to a MongoDB replica set.
 
         :meth:`open` or :meth:`open_sync` must be called before using a new
-        MotorReplicaSetConnection.
+        MotorReplicaSetConnection. No property access is allowed before the
+        connection is opened.
 
         MotorReplicaSetConnection takes the same constructor arguments as
         :class:`~pymongo.replica_set_connection.ReplicaSetConnection`,
