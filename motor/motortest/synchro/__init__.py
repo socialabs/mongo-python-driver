@@ -46,7 +46,7 @@ GreenletPool = None
 from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool, _closed
 from pymongo.replica_set_connection import _partition_node
 
-timeout_sec = float(os.environ.get('TIMEOUT_SEC', 5))
+timeout_sec = float(os.environ.get('TIMEOUT_SEC', 10))
 
 
 # TODO: better name or iface, document
