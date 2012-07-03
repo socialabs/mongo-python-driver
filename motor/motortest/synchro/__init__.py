@@ -333,6 +333,13 @@ class Connection(Synchro):
     _Connection__pool = SynchroProperty()
 
 
+class MasterSlaveConnection(object):
+    """Motor doesn't support master-slave connections, this is just here so
+       Synchro can import pymongo.master_slave_connection without error
+    """
+    pass
+
+
 class ReplicaSetConnection(Connection):
     __delegate_class__ = motor.MotorReplicaSetConnection
 
@@ -347,49 +354,11 @@ class ReplicaSetConnection(Connection):
         self.synchro_connect()
 
 
-class MasterSlaveConnection(Synchro):
-    __delegate_class__ = motor.MotorMasterSlaveConnection
-
-    def __init__(self, master, slaves, *args, **kwargs):
-        # MotorMasterSlaveConnection expects MotorConnections or regular
-        # pymongo Connections as arguments, rather than Synchro Connections
-        if isinstance(master, Connection):
-            master = master.delegate
-
-        slaves = [s.delegate if isinstance(s, Connection) else s
-                  for s in slaves]
-
-        self.delegate = self.__delegate_class__(
-            master, slaves, *args, **kwargs
-        )
-
-    @property
-    def master(self):
-        synchro_master = Connection()
-        synchro_master.delegate = self.delegate.master
-        return synchro_master
-
-    @property
-    def slaves(self):
-        synchro_slaves = []
-        for s in self.delegate.slaves:
-            synchro_slave = Connection()
-            synchro_slave.delegate = s
-            synchro_slaves.append(synchro_slave)
-
-        return synchro_slaves
-
-    def __getattr__(self, name):
-        return Database(self, name)
-
-    __getitem__ = __getattr__
-
-
 class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
 
     def __init__(self, connection, name):
-        assert isinstance(connection, (Connection, MasterSlaveConnection)), (
+        assert isinstance(connection, Connection), (
             "Expected Connection, got %s" % repr(connection)
         )
         self.connection = connection

@@ -41,9 +41,9 @@ excluded_modules = [
     'test.test_pooling',
     'test.test_pooling_gevent',
     'test.test_paired',
+    'test.test_master_slave_connection',
 
     # TODO:
-    'test.test_master_slave_connection',
     'test.test_grid_file',
     'test.test_gridfs',
 ]
@@ -53,15 +53,6 @@ excluded_tests = [
     # Synchro can't simulate requests, so test copy_db in Motor directly.
     'TestConnection.test_copy_db',
 
-    # Tested directly against Motor
-    'TestMasterSlaveConnection.test_disconnect',
-
-    # These tests require a lot of PyMongo-specific monkey-patching, we're
-    # not going to test them in Motor because master-slave uses the same logic
-    # under the hood and can be assumed to work.
-    'TestMasterSlaveConnection.test_raise_autoreconnect_if_all_slaves_fail',
-    'TestMasterSlaveConnection.test_continue_until_slave_works',
-
     # Motor's reprs aren't the same as PyMongo's
     '*.test_repr',
 
@@ -69,7 +60,6 @@ excluded_tests = [
     'TestConnection.test_auto_start_request',
     'TestConnection.test_contextlib_auto_start_request',
     'TestConnection.test_with_start_request',
-    'TestMasterSlaveConnection.test_insert_find_one_in_request',
     'TestDatabase.test_authenticate_and_request',
     'TestGridfs.test_request',
 
@@ -140,13 +130,15 @@ if __name__ == '__main__':
     for submod in [
         'connection',
         'collection',
-        'master_slave_connection',
         'replica_set_connection',
+        'master_slave_connection',
         'database',
         'pool',
     ]:
         # So that e.g. 'from pymongo.connection import Connection' gets the
-        # Synchro Connection, not the real one.
+        # Synchro Connection, not the real one. We include
+        # master_slave_connection, even though Motor doesn't support it and
+        # we exclude it from tests, so that the import doesn't fail.
         sys.modules['pymongo.%s' % submod] = synchro
 
     # Find our directory
