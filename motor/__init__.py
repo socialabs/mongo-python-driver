@@ -86,72 +86,75 @@ def check_callable(kallable, required=False):
         raise TypeError("callback must be callable")
 
 
-def motor_sock_method(check_closed=False):
-    def wrap(method):
-        @functools.wraps(method)
-        def _motor_sock_method(self, *args, **kwargs):
-            child_gr = greenlet.getcurrent()
-            main = child_gr.parent
-            assert main, "Should be on child greenlet"
+def motor_sock_method(method):
+    """Wrap a MotorSocket method to pause the current greenlet and arrange
+       for the greenlet to be resumed when non-blocking IO has completed.
+    """
+    @functools.wraps(method)
+    def _motor_sock_method(self, *args, **kwargs):
+        child_gr = greenlet.getcurrent()
+        main = child_gr.parent
+        assert main, "Should be on child greenlet"
 
-            # We need to alter this value in inner functions, hence the list
-            timeout = [None]
-            self_timeout = self.timeout
-            if self_timeout:
-                def timeout_err():
-                    timeout[0] = None
-                    self.stream.set_close_callback(None)
-                    self.stream.close()
-                    child_gr.throw(socket.timeout("timed out"))
+        timeout_object = None
 
-                timeout[0] = self.stream.io_loop.add_timeout(
-                    time.time() + self_timeout, timeout_err
-                )
-
-            # This is run by IOLoop on the main greenlet when socket has
-            # connected; switch back to child to continue processing
-            def callback(result=None, error=None):
+        if self.timeout:
+            def timeout_err():
                 self.stream.set_close_callback(None)
-                if timeout[0] or not self_timeout:
-                    # We didn't time out - clear the timeout if any, and resume
-                    # processing on child greenlet
-                    if timeout[0]:
-                        self.stream.io_loop.remove_timeout(timeout[0])
+                self.stream.close()
+                child_gr.throw(socket.timeout("timed out"))
 
-                    if error:
-                        child_gr.throw(error)
-                    else:
-                        child_gr.switch(result)
+            timeout_object = self.stream.io_loop.add_timeout(
+                time.time() + self.timeout, timeout_err)
 
-            if check_closed:
-                def closed():
-                    # Run on main greenlet
-                    # TODO: test failed connection w/ timeout
-                    if timeout[0]:
-                        self.stream.io_loop.remove_timeout(timeout[0])
+        # This is run by IOLoop on the main greenlet when operation
+        # completes; switch back to child to continue processing
+        def callback(result=None, error=None):
+            self.stream.set_close_callback(None)
+            if timeout_object:
+                self.stream.io_loop.remove_timeout(timeout_object)
 
-                    # IOStream.error is a Tornado 2.3 feature
-                    error = getattr(self.stream, 'error', None)
-                    child_gr.throw(error or socket.error("error"))
+            if error:
+                child_gr.throw(error)
+            else:
+                child_gr.switch(result)
 
-                self.stream.set_close_callback(closed)
+        # Run on main greenlet
+        def closed():
+            if timeout_object:
+                self.stream.io_loop.remove_timeout(timeout_object)
 
-            try:
-                kwargs['callback'] = callback
-                method(self, *args, **kwargs)
-                return main.switch()
-            except socket.error:
-                raise
-            except IOError, e:
-                # If IOStream raises generic IOError (e.g., if operation
-                # attempted on closed IOStream), then substitute socket.error,
-                # since socket.error is what PyMongo's built to handle. For
-                # example, PyMongo will catch socket.error, close the socket,
-                # and raise AutoReconnect.
-                raise socket.error(str(e))
+            # IOStream.error is a Tornado 2.3 feature
+            error = getattr(self.stream, 'error', None)
+            child_gr.throw(error or socket.error("error"))
 
-        return _motor_sock_method
-    return wrap
+        self.stream.set_close_callback(closed)
+
+        try:
+            kwargs['callback'] = callback
+
+            # method is MotorSocket.send(), recv(), etc. method() begins a
+            # non-blocking operation on an IOStream and arranges for
+            # callback() to be executed on the main greenlet once the
+            # operation has completed.
+            method(self, *args, **kwargs)
+
+            # Pause child greenlet until resumed by main greenlet, which
+            # will pass the result of the socket operation (data for recv,
+            # number of bytes written for sendall) to us.
+            socket_result = main.switch()
+            return socket_result
+        except socket.error:
+            raise
+        except IOError, e:
+            # If IOStream raises generic IOError (e.g., if operation
+            # attempted on closed IOStream), then substitute socket.error,
+            # since socket.error is what PyMongo's built to handle. For
+            # example, PyMongo will catch socket.error, close the socket,
+            # and raise AutoReconnect.
+            raise socket.error(str(e))
+
+    return _motor_sock_method
 
 
 class MotorSocket(object):
@@ -180,7 +183,7 @@ class MotorSocket(object):
         # callbacks.
         self.timeout = timeout
 
-    @motor_sock_method(check_closed=True)
+    @motor_sock_method
     def connect(self, pair, callback):
         """
         :Parameters:
@@ -188,11 +191,11 @@ class MotorSocket(object):
         """
         self.stream.connect(pair, callback)
 
-    @motor_sock_method()
+    @motor_sock_method
     def sendall(self, data, callback):
         self.stream.write(data, callback)
 
-    @motor_sock_method()
+    @motor_sock_method
     def recv(self, num_bytes, callback):
         self.stream.read_bytes(num_bytes, callback)
 
@@ -207,9 +210,6 @@ class MotorSocket(object):
 
     def fileno(self):
         return self.stream.socket.fileno()
-
-    def __del__(self):
-        self.close()
 
 
 class MotorPool(pymongo.pool.GreenletPool):
