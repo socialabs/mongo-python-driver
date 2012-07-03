@@ -26,13 +26,13 @@
       .. automotormethod:: get_lasterror_options
       .. automotormethod:: set_lasterror_options
       .. automotormethod:: unset_lasterror_options
-      .. automotormethod:: insert(doc_or_docs[, manipulate=True[, safe=False[, check_keys=True[, continue_on_error=False[, **kwargs]]]])
-      .. automotormethod:: save(to_save[, manipulate=True[, safe=False[, **kwargs]]])
-      .. automotormethod:: update(spec, document[, upsert=False[, manipulate=False[, safe=False[, multi=False[, **kwargs]]]]])
-      .. automotormethod:: remove([spec_or_id=None[, safe=False[, **kwargs]]])
+      .. automotormethod:: insert(doc_or_docs[, manipulate=True[, safe=False[, check_keys=True[, continue_on_error=False[, callback=None [, **kwargs]]]]])
+      .. automotormethod:: save(to_save[, manipulate=True[, safe=False[, callback=None [, **kwargs]]])
+      .. automotormethod:: update(spec, document[, upsert=False[, manipulate=False[, safe=False[, multi=False[, callback=None [, **kwargs]]]]])
+      .. automotormethod:: remove([spec_or_id=None[, safe=False[, callback=None [, **kwargs]]])
       .. automotormethod:: drop
       .. automethod:: find([spec=None[, fields=None[, skip=0[, limit=0[, timeout=True[, snapshot=False[, tailable=False[, sort=None[, max_scan=None[, as_class=None[, slave_okay=False[, await_data=False[, partial=False[, manipulate=True[, read_preference=ReadPreference.PRIMARY[, **kwargs]]]]]]]]]]]]]]]])
-      .. automotormethod:: find_one([spec_or_id=None[, *args[, **kwargs]]])
+      .. automotormethod:: find_one([spec_or_id=None[, *args[, callback=<function> [, **kwargs]]])
       .. automotormethod:: count
       .. automotormethod:: create_index
       .. automotormethod:: ensure_index

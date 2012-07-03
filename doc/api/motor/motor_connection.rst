@@ -47,7 +47,7 @@
       .. automotormethod:: unset_lasterror_options
       .. automotormethod:: database_names
       .. automotormethod:: drop_database
-      .. automotormethod:: copy_database(from_name, to_name[, from_host=None[, username=None[, password=None]]])
+      .. automotormethod:: copy_database(from_name, to_name[, from_host=None[, username=None[, password=None[, callback=None]]]])
       .. automotormethod:: server_info
       .. automotormethod:: start_request
       .. automotormethod:: end_request

@@ -46,8 +46,10 @@ class MotorAttribute(object):
         # Find or create parameter list like:
         # :Parameters:
         #  - `x`: A parameter
+        #  - `**kwargs`: Additional keyword arguments
         #
-        # ... and insert the `callback` parameter's documentation
+        # ... and insert the `callback` parameter's documentation at the end of
+        # the list, above **kwargs. If no kwargs, just put `callback` at the end
 
         indent = ' ' * 10
         if self.requires_callback():
@@ -74,36 +76,41 @@ class MotorAttribute(object):
             if param_match:
                 indent = param_match.groups()[0]
 
+            # See if the final line is '**kwargs':
+            lines = params_doc.split('\n')
+            for kwargs_lineno, line in enumerate(lines):
+                if '**kwargs' in line:
+                    params_doc = '\n'.join(lines[:kwargs_lineno])
+                    kwargs_lines = '\n' + '\n'.join(lines[kwargs_lineno:])
+                    break
+            else:
+                kwargs_lines = ''
+
             doc = (
                 doc[:match.start()] + params_doc.rstrip()
-                + '\n' + indent + callback_doc + doc[match.end():]
+                + '\n' + indent + callback_doc + kwargs_lines + doc[match.end():]
             )
         else:
             # No existing parameters documentation for this method, make one
-            doc = (
-                doc + '\n' + ' ' * 8 + ':Parameters:\n' + indent + callback_doc)
+            doc += '\n' + ' ' * 8 + ':Parameters:\n' + indent + callback_doc
 
         return doc
 
     def getargspec(self):
-        argspec = getargspec(self.pymongo_attr)
+        args, varargs, kwargs, defaults = getargspec(self.pymongo_attr)
 
         # This part is copied from Sphinx's autodoc.py
-        if argspec[0] and argspec[0][0] in ('cls', 'self'):
-            del argspec[0][0]
+        if args and args[0] in ('cls', 'self'):
+            del args[0]
 
-        # Make sure there's list of defaults, and add 'callback' argument
-        argspec = list(argspec)
-        if not argspec[3]:
-            argspec[3] = []
-        defaults = argspec[3]
+        # Add 'callback=None' argument
+        defaults = defaults or []
         prop = self.delegate_property
         if isinstance(prop, motor.Async):
-            argspec[0].append('callback')
-            if not prop.cb_required:
-                defaults.append(None)
+            args.append('callback')
+            defaults.append(None)
 
-        return argspec
+        return (args, varargs, kwargs, defaults)
 
     def format_args(self):
         if self.is_async_method():

@@ -10,8 +10,8 @@
       .. automethod:: to_list
       .. automethod:: tail
       .. automethod:: clone
-      .. automethod:: close
       .. automethod:: rewind
+      .. automotormethod:: close
       .. automotormethod:: count
       .. automotormethod:: distinct
       .. automotormethod:: explain
@@ -25,7 +25,6 @@
       .. automotormethod:: hint
       .. automotormethod:: where
       .. autoattribute:: buffer_size
-      .. automotorattribute:: slave_okay
       .. automotorattribute:: alive
       .. automotorattribute:: cursor_id
 
