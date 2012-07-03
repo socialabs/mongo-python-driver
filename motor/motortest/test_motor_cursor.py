@@ -15,13 +15,14 @@
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import unittest
+import time
 
 import motor
 if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
 
-from tornado import ioloop
+from tornado import ioloop, gen
 
 from motor.motortest import (
     MotorTest, async_test_engine, host, port, AssertEqual)
@@ -56,8 +57,16 @@ class MotorCursorTest(MotorTest):
         coll = self.motor_connection(host, port).test.test_collection
         cursor = coll.find({}, {'_id': 1}).sort([('_id', pymongo.ASCENDING)])
         yield AssertEqual({'_id': 0}, cursor.next)
-        cursor.close()
-        self.wait_for_cursors()
+        self.assertTrue(cursor.alive)
+
+        # Dereferencing the cursor eventually closes it on the server; yielding
+        # clears the engine Runner's reference to the cursor.
+        loop = ioloop.IOLoop.instance()
+        yield gen.Task(loop.add_callback)
+        del cursor
+
+        while self.get_open_cursors() > self.open_cursors:
+            yield gen.Task(loop.add_timeout, time.time() + 0.5)
 
     def test_each(self):
         coll = self.motor_connection(host, port).test.test_collection
@@ -81,8 +90,7 @@ class MotorCursorTest(MotorTest):
         cursor = coll.find({}, {'_id': 1}).sort([('_id', pymongo.ASCENDING)])
         expected = [{'_id': i} for i in range(200)]
         yield AssertEqual(expected, cursor.to_list)
-        cursor.close()
-        self.wait_for_cursors()
+        yield motor.Op(cursor.close)
 
     @async_test_engine()
     def test_limit_zero(self):

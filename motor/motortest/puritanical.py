@@ -33,15 +33,19 @@ class PuritanicalIOLoop(ioloop.IOLoop):
 class PuritanicalTest(unittest.TestCase):
     def setUp(self):
         super(PuritanicalTest, self).setUp()
+        # So any function that calls IOLoop.instance() gets the
+        # PuritanicalIOLoop instead of the default loop.
+        self.stop()
+        PuritanicalIOLoop().install()
 
+    def stop(self):
         # Clear previous loop
         if ioloop.IOLoop.initialized():
             loop = ioloop.IOLoop.instance()
             if loop:
-                loop.stop()
-                loop.close(all_fds=True)
+                assert not loop.running()
+                loop.close()
             del ioloop.IOLoop._instance
 
-        # So any function that calls IOLoop.instance() gets the
-        # PuritanicalIOLoop instead of the default loop.
-        PuritanicalIOLoop().install()
+    def tearDown(self):
+        self.stop()

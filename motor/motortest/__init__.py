@@ -227,8 +227,10 @@ class MotorTest(
 
     def wait_for_cursors(self):
         """
-        Useful if you need to ensure some operation completes, e.g. an each(),
-        so that all cursors are closed.
+        Useful if you need to ensure some operation completes, e.g. each() or
+        cursor.close(), before asserting there are no open cursors.
+
+        Don't use from @async_test_engine! Do `yield motor.Op(cursor.close)`.
         """
         if self.get_open_cursors() > self.open_cursors:
             loop = ioloop.IOLoop.instance()

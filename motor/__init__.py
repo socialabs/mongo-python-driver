@@ -1161,11 +1161,12 @@ class MotorCursor(MotorBase):
                 doc = self.delegate.next()
             except StopIteration:
                 # Special case: limit is 0.
-                add_callback(functools.partial(callback, None, None))
+                doc = None
                 self.close()
-                return
 
-            callback(doc, None)
+            # Schedule callback on IOLoop. Calling this callback directly
+            # seems to lead to circular references to MotorCursor.
+            add_callback(functools.partial(callback, doc, None))
         elif self.alive and (self.cursor_id or not self.started):
             def got_more(batch_size, error):
                 if error:
@@ -1231,34 +1232,34 @@ class MotorCursor(MotorBase):
          - `callback`: function taking (document, error)
         """
         check_callable(callback, required=True)
-        add_callback = self.get_io_loop().add_callback
+        self._each_got_more(callback, None, None)
 
-        def got_more(batch_size, error):
-            if error:
-                callback(None, error)
+    def _each_got_more(self, callback, batch_size, error):
+        add_callback = self.get_io_loop().add_callback
+        if error:
+            callback(None, error)
+            return
+
+        while self.buffer_size > 0:
+            try:
+                doc = self.delegate.next() # decrements self.buffer_size
+            except StopIteration:
+                # Special case: limit of 0
+                add_callback(functools.partial(callback, None, None))
+                self.close()
                 return
 
-            while self.buffer_size > 0:
-                try:
-                    doc = self.delegate.next() # decrements self.buffer_size
-                except StopIteration:
-                    # Special case: limit of 0
-                    add_callback(functools.partial(callback, None, None))
-                    self.close()
-                    return
+            # Quit if callback returns exactly False (not None). Note we
+            # don't close the cursor: user may want to resume iteration.
+            if callback(doc, None) is False:
+                return
 
-                # Quit if callback returns exactly False (not None). Note we
-                # don't close the cursor: user may want to resume iteration.
-                if callback(doc, None) is False:
-                    return
+        if self.alive and (self.cursor_id or not self.started):
+            self._get_more(functools.partial(self._each_got_more, callback))
+        else:
+            # Complete
+            add_callback(functools.partial(callback, None, None))
 
-            if self.alive and (self.cursor_id or not self.started):
-                self._get_more(got_more)
-            else:
-                # Complete
-                add_callback(functools.partial(callback, None, None))
-
-        got_more(None, None)
 
     def to_list(self, callback):
         """Get a list of documents.
@@ -1283,6 +1284,7 @@ class MotorCursor(MotorBase):
             callback([], None)
             return
 
+        # TODO: circular reference, and look for others too
         def got_more(batch_size, error):
             if error:
                 callback(None, error)
@@ -1308,15 +1310,13 @@ class MotorCursor(MotorBase):
         self.started = False
         return self
 
-    def tail(self, callback, await_data=True):
-        # TODO: doc, prominently =)
+    def tail(self, callback):
+        # TODO: doc, prominently. await_data is always true.
         # TODO: doc that tailing an empty collection is expensive,
         #   consider a failsafe, e.g. timing the interval between getmore
         #   and return, and if it's short and no doc, pause before next
         #   getmore
-        # TODO: doc and test that await_data is defaulted True
-        # TODO: test dropping a collection while tailing it
-        # TODO: test tailing collection that isn't empty at first
+        # TODO: doc that cursor is closed if iteration cancelled
         check_callable(callback, True)
 
         loop = self.get_io_loop()
@@ -1325,16 +1325,11 @@ class MotorCursor(MotorBase):
 
         cursor = self.clone()
 
+        cursor.delegate._Cursor__tailable = True
+        cursor.delegate._Cursor__await_data = True
+
         # This is a list so we can modify it from the inner callback
         started = [False]
-
-        # TODO: HACK!
-        cursor.delegate._Cursor__tailable = True
-
-        # If await_data parameter is set, then override whatever await_data
-        # value was passed to find() (default False)
-        # TODO: test this
-        cursor.delegate._Cursor__await_data = await_data
 
         def inner_callback(result, error):
             if error:
@@ -1348,17 +1343,15 @@ class MotorCursor(MotorBase):
             elif cursor.alive:
                 # result and error are both none, meaning no new data in
                 # this batch; keep on truckin'
-                add_callback(
-                    functools.partial(cursor.each, inner_callback)
-                )
+                # TODO: circular ref
+                add_callback(functools.partial(cursor.each, inner_callback))
             else:
                 # cursor died, start over soon, but only if it's because this
                 # collection was empty when we began.
                 if not started[0]:
                     add_timeout(
                         time.time() + 0.5,
-                        functools.partial(cursor.tail, callback, await_data)
-                    )
+                        functools.partial(cursor.tail, callback))
                 else:
                     # TODO: why exactly would this happen?
                     exc = pymongo.errors.OperationFailure("cursor died")
@@ -1428,7 +1421,6 @@ class MotorCursor(MotorBase):
     def __del__(self):
         if self.alive and self.cursor_id:
             self.close()
-
 
 # TODO: doc all these three gen tasks, and
 #   consider if there are additional convenience methods possible. Lots of

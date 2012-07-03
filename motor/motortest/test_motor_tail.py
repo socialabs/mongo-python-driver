@@ -60,6 +60,7 @@ class MotorTailTest(MotorTest):
         t.start()
         return t
 
+    # Used by test_tail, test_tail_drop_collection, etc.
     def each(self, results, n_expected, result, error):
         if error:
             results.append(type(error))
@@ -71,7 +72,7 @@ class MotorTailTest(MotorTest):
             results.append('cancelled')
             return False
 
-    def _test_tail(self, await_data):
+    def test_tail(self):
         pauses = (1, 0, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0.1, 0.1, 0, 0)
 
         t = self.start_insertion_thread('capped', pauses)
@@ -81,7 +82,7 @@ class MotorTailTest(MotorTest):
 
         # Note we do *not* pass tailable or await_data to find(), the
         # convenience method handles it for us.
-        self.capped.find().tail(each, await_data=await_data)
+        self.capped.find().tail(each)
 
         self.assertEventuallyEqual(
             results,
@@ -93,25 +94,22 @@ class MotorTailTest(MotorTest):
         t.join()
         self.wait_for_cursors()
 
-    def test_tail_await(self):
-        self._test_tail(True)
-
-    def test_tail_no_await(self):
-        self._test_tail(False)
-
-    def _test_tail_drop_collection(self, await_data):
+    def test_tail_drop_collection(self):
         # Ensure tail() throws error when its collection is dropped
         pauses = (0, 0, 1, 'drop', 1, 0, 0)
         t = self.start_insertion_thread('capped', pauses)
 
         results = []
         each = functools.partial(self.each, results, len(pauses) - 1)
-        self.capped.find().tail(each, await_data=await_data)
+        self.capped.find().tail(each)
 
+        # Don't assume that the first 3 results before the drop will be
+        # recorded -- dropping a collection kills the cursor even if not
+        # fully iterated.
         self.assertEventuallyEqual(
             True,
             lambda: (
-                results[-1] is OperationFailure and len(results) <= 4
+                OperationFailure in results
                 and 'cancelled' not in results),
             timeout_sec=10
         )
@@ -120,21 +118,11 @@ class MotorTailTest(MotorTest):
         t.join()
         self.wait_for_cursors()
 
-    def test_tail_drop_collection_await(self):
-        self._test_tail_drop_collection(True)
-
-    def test_tail_drop_collection_no_await(self):
-        self._test_tail_drop_collection(False)
-
     @async_test_engine()
     def test_tail_uncapped_collection(self):
         yield AssertRaises(
             OperationFailure,
-            self.uncapped.find().tail, await_data=True)
-
-        yield AssertRaises(
-            OperationFailure,
-            self.uncapped.find().tail, await_data=False)
+            self.uncapped.find().tail)
 
     def test_tail_nonempty_collection(self):
         self.sync_db.capped.insert([{'_id': -2}, {'_id': -1}], safe=True)
@@ -144,7 +132,7 @@ class MotorTailTest(MotorTest):
 
         results = []
         each = functools.partial(self.each, results, len(pauses) + 2)
-        self.capped.find().tail(each, await_data=False)
+        self.capped.find().tail(each)
 
         self.assertEventuallyEqual(
             [{'_id': i} for i in range(-2, len(pauses))] + ['cancelled'],
@@ -163,7 +151,7 @@ class MotorTailTest(MotorTest):
 
         loop = ioloop.IOLoop.instance()
         results = []
-        cursor = self.capped.find(tailable=True, await_data=False)
+        cursor = self.capped.find(tailable=True, await_data=True)
         while len(results) < len(pauses):
             if not cursor.alive:
                 # While collection is empty, tailable cursor dies immediately
@@ -176,7 +164,6 @@ class MotorTailTest(MotorTest):
             else:
                 yield gen.Task(loop.add_timeout, time.time() + 0.1)
 
-        cursor.close()
         t.join()
         self.assertEqual([{'_id': i} for i in range(len(pauses))], results)
-        self.wait_for_cursors()
+        yield motor.Op(cursor.close)
