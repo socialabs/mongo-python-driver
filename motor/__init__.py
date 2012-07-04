@@ -81,7 +81,7 @@ def check_callable(kallable, required=False):
 
 def motor_sock_method(method):
     """Wrap a MotorSocket method to pause the current greenlet and arrange
-       for the greenlet to be resumed when non-blocking IO has completed.
+       for the greenlet to be resumed when non-blocking I/O has completed.
     """
     @functools.wraps(method)
     def _motor_sock_method(self, *args, **kwargs):
@@ -93,6 +93,10 @@ def motor_sock_method(method):
 
         if self.timeout:
             def timeout_err():
+                # Running on the main greenlet. If a timeout error is thrown,
+                # we raise the exception on the child greenlet. Closing the
+                # IOStream removes callback() from the IOLoop so it isn't
+                # called.
                 self.stream.set_close_callback(None)
                 self.stream.close()
                 child_gr.throw(socket.timeout("timed out"))
@@ -220,26 +224,29 @@ class MotorPool(pymongo.pool.GreenletPool):
 
     def create_connection(self, pair):
         """Copy of BasePool.connect()
-           TODO: refactor, extra hooks in BasePool
         """
         # TODO: refactor all this with BasePool, use a new hook to wrap the
         #   socket with MotorSocket before attempting connect().
         assert greenlet.getcurrent().parent, "Should be on child greenlet"
 
-        # Don't try IPv6 if we don't support it.
+        host, port = pair or self.pair
+
+        # Don't try IPv6 if we don't support it. Also skip it if host
+        # is 'localhost' (::1 is fine). Avoids slow connect issues
+        # like PYTHON-356.
         family = socket.AF_INET
-        if socket.has_ipv6:
+        if socket.has_ipv6 and host != 'localhost':
             family = socket.AF_UNSPEC
 
-        host, port = pair or self.pair
         err = None
         for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
             af, socktype, proto, dummy, sa = res
-            sock = None
+            motor_sock = None
             try:
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                motor_sock = MotorSocket(sock, self.io_loop, use_ssl=self.use_ssl)
+                motor_sock = MotorSocket(
+                    sock, self.io_loop, use_ssl=self.use_ssl)
                 motor_sock.settimeout(self.conn_timeout or 20.0)
 
                 # MotorSocket will pause the current greenlet and resume it
@@ -248,8 +255,8 @@ class MotorPool(pymongo.pool.GreenletPool):
                 return motor_sock
             except socket.error, e:
                 err = e
-                if sock is not None:
-                    sock.close()
+                if motor_sock is not None:
+                    motor_sock.close()
 
         if err is not None:
             raise err
@@ -265,9 +272,9 @@ class MotorPool(pymongo.pool.GreenletPool):
            is inappropriate for Motor.
            TODO: refactor, extra hooks in BasePool
         """
-        sock = self.create_connection(pair)
-        sock.settimeout(self.net_timeout)
-        return pymongo.pool.SocketInfo(sock, weakref.ref(self))
+        motor_sock = self.create_connection(pair)
+        motor_sock.settimeout(self.net_timeout)
+        return pymongo.pool.SocketInfo(motor_sock, weakref.ref(self))
 
 
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
