@@ -62,6 +62,7 @@ class TestCollection(unittest.TestCase):
         self.db = self.connection.pymongo_test
 
     def tearDown(self):
+        self.db.drop_collection("test_large_limit")
         self.db = None
         self.connection = None
 
@@ -638,17 +639,17 @@ class TestCollection(unittest.TestCase):
 
     def test_invalid_key_names(self):
         db = self.db
-        db.test.remove({})
+        db.test.drop()
 
-        db.test.insert({"hello": "world"})
-        db.test.insert({"hello": {"hello": "world"}})
+        db.test.insert({"hello": "world"}, safe=True)
+        db.test.insert({"hello": {"hello": "world"}}, safe=True)
 
         self.assertRaises(InvalidDocument, db.test.insert, {"$hello": "world"})
         self.assertRaises(InvalidDocument, db.test.insert,
                           {"hello": {"$hello": "world"}})
 
-        db.test.insert({"he$llo": "world"})
-        db.test.insert({"hello": {"hello$": "world"}})
+        db.test.insert({"he$llo": "world"}, safe=True)
+        db.test.insert({"hello": {"hello$": "world"}}, safe=True)
 
         self.assertRaises(InvalidDocument, db.test.insert,
                           {".hello": "world"})
@@ -671,7 +672,7 @@ class TestCollection(unittest.TestCase):
         doc1 = {"hello": u"world"}
         doc2 = {"hello": u"mike"}
         self.assertEqual(db.test.find().count(), 0)
-        ids = db.test.insert([doc1, doc2])
+        ids = db.test.insert([doc1, doc2], safe=True)
         self.assertEqual(db.test.find().count(), 2)
         self.assertEqual(doc1, db.test.find_one({"hello": u"world"}))
         self.assertEqual(doc2, db.test.find_one({"hello": u"mike"}))
@@ -696,7 +697,7 @@ class TestCollection(unittest.TestCase):
         db.test.remove()
 
         # No error
-        db.test.insert([{'i': 1}] * 2)
+        db.test.insert([{'i': 1}] * 2, safe=False)
         self.assertEqual(1, db.test.count())
 
         self.assertRaises(
@@ -1159,22 +1160,26 @@ class TestCollection(unittest.TestCase):
 
     def test_large_limit(self):
         db = self.db
-        db.drop_collection("test")
-        db.test.create_index([('x', 1)])
+        db.drop_collection("test_large_limit")
+        db.test_large_limit.create_index([('x', 1)])
 
         for i in range(2000):
-            db.test.insert({"x": i, "y": "mongomongo" * 1000}, safe=True)
+            doc = {"x": i, "y": "mongomongo" * 1000}
+            db.test_large_limit.insert(doc, safe=True)
 
         # Wait for insert to complete; often mysteriously failing in Jenkins
         st = time.time()
-        while len(list(db.test.find())) < 2000 and time.time() - st < 30:
+        while (
+            len(list(db.test_large_limit.find())) < 2000
+            and time.time() - st < 30
+        ):
             time.sleep(1)
 
-        self.assertEqual(2000, len(list(db.test.find())))
+        self.assertEqual(2000, len(list(db.test_large_limit.find())))
 
         i = 0
         y = 0
-        for doc in db.test.find(limit=1900).sort([('x', 1)]):
+        for doc in db.test_large_limit.find(limit=1900).sort([('x', 1)]):
             i += 1
             y += doc["x"]
 
@@ -1564,8 +1569,15 @@ class TestCollection(unittest.TestCase):
 
         self.assertEqual(None,
                          c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}}))
-        self.assertEqual({}, c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
-                                               upsert=True))
+        # The return value changed in 2.1.2. See SERVER-6226.
+        if version.at_least(self.db.connection, (2, 1, 2)):
+            self.assertEqual(None, c.find_and_modify({'_id': 1},
+                                                     {'$inc': {'i': 1}},
+                                                     upsert=True))
+        else:
+            self.assertEqual({}, c.find_and_modify({'_id': 1},
+                                                   {'$inc': {'i': 1}},
+                                                   upsert=True))
         self.assertEqual({'_id': 1, 'i': 2},
                          c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
                                            upsert=True, new=True))

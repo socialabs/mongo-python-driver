@@ -215,30 +215,6 @@ class TestConnection(unittest.TestCase):
 
         self.assertRaises(TypeError, iterate)
 
-    # TODO this test is probably very dependent on the machine its running on
-    # due to timing issues, but I want to get something in here.
-    def test_low_network_timeout(self):
-        c = None
-        i = 0
-        n = 10
-        while c is None and i < n:
-            try:
-                c = Connection(self.host, self.port, network_timeout=0.0001)
-            except AutoReconnect:
-                i += 1
-        if i == n:
-            raise SkipTest()
-
-        coll = c.pymongo_test.test
-
-        for _ in range(1000):
-            try:
-                coll.find_one()
-            except AutoReconnect:
-                pass
-            except AssertionError:
-                self.fail()
-
     def test_disconnect(self):
         c = Connection(self.host, self.port)
         coll = c.foo.bar
@@ -379,10 +355,10 @@ class TestConnection(unittest.TestCase):
         self.assertFalse(isinstance(db.test.find_one(), SON))
 
     def test_timeouts(self):
-        conn = Connection(self.host, self.port, connectTimeoutMS=300)
-        self.assertEqual(0.3, conn._Connection__pool.conn_timeout)
-        conn = Connection(self.host, self.port, socketTimeoutMS=300)
-        self.assertEqual(0.3, conn._Connection__pool.net_timeout)
+        conn = Connection(self.host, self.port, connectTimeoutMS=10500)
+        self.assertEqual(10.5, conn._Connection__pool.conn_timeout)
+        conn = Connection(self.host, self.port, socketTimeoutMS=10500)
+        self.assertEqual(10.5, conn._Connection__pool.net_timeout)
 
     def test_network_timeout(self):
         no_timeout = Connection(self.host, self.port)
@@ -511,6 +487,8 @@ with get_connection(auto_start_request=True) as connection:
         sock_info0 = self.get_sock(pool)
         sock_info1 = self.get_sock(pool)
         self.assertEqual(sock_info0, sock_info1)
+        pool.maybe_return_socket(sock_info0)
+        pool.maybe_return_socket(sock_info1)
 
     def assertDifferentSock(self, pool):
         # We have to hold both SocketInfos at the same time, otherwise the
@@ -520,6 +498,8 @@ with get_connection(auto_start_request=True) as connection:
         sock_info0 = self.get_sock(pool)
         sock_info1 = self.get_sock(pool)
         self.assertNotEqual(sock_info0, sock_info1)
+        pool.maybe_return_socket(sock_info0)
+        pool.maybe_return_socket(sock_info1)
 
     def assertNoRequest(self, pool):
         self.assertEqual(NO_REQUEST, pool._get_request_state())
