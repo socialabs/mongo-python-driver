@@ -33,7 +33,7 @@ try:
     import greenlet
 except ImportError:
     requirements_satisfied = False
-    warnings.warn("Greenlet not installed", ImportWarning)
+    warnings.warn("greenlet module not installed", ImportWarning)
 
 import pymongo
 import pymongo.collection
@@ -44,25 +44,19 @@ import pymongo.pool
 import pymongo.son_manipulator
 
 
-__all__ = ['MotorConnection', 'MotorReplicaSetConnection',
-           'MotorMasterSlaveConnection']
+__all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 
 # TODO: document that default timeout is None, ensure we're doing
 #   timeouts as efficiently as possible, test performance hit with timeouts
 #   from registering and cancelling timeouts
 # TODO: examine & document what connection and network timeouts mean here
-# TODO: document that with a callback passed in, Motor's default is
-#   to do SAFE writes, unlike PyMongo.
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
-# TODO: document that Motor doesn't do requests at all, use callbacks to
-#   ensure consistency
 # TODO: document that Motor doesn't do auto_start_request, although if you
 #   pass it in, it'll be sent to sync_connection()
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
 # TODO: document, smugly, that Motor has configurable IOLoops
-# TODO: document that Motor can do unsafe writes, AsyncMongo can't
 # TODO: since Tornado uses logging, so can we
 # TODO: test cross-host copydb
 # TODO: perhaps remove versionchanged Sphinx annotations from proxied methods,
@@ -263,8 +257,7 @@ class MotorPool(pymongo.pool.GreenletPool):
         else:
             # This likely means we tried to connect to an IPv6 only
             # host with an OS/kernel or Python interpeter that doesn't
-            # support IPv6. The test case is Jython2.5.1 which doesn't
-            # support IPv6 at all.
+            # support IPv6.
             raise socket.error('getaddrinfo failed')
 
     def connect(self, pair):
