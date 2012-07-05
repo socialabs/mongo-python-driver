@@ -75,3 +75,9 @@ order by the MongoDB server; in Motor, ordering can be guaranteed by
 registering a callback for each operation and performing the next operation in
 the callback.
 
+Motor ignores the ``auto_start_request`` parameter to
+:class:`~motor.MotorConnection` or :class:`~motor.MotorReplicaSetConnection`.
+However, the parameter is passed to the
+:class:`~pymongo.replica_set_connection.ReplicaSetConnection` or
+:class:`~pymongo.connection.Connection` created by
+:meth:`~motor.MotorConnection.sync_connection`.

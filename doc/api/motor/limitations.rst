@@ -7,3 +7,4 @@ Limitations
   is not supported.
 * Only Python 2.7 has been tested. We plan to support the same Python versions
   as Tornado does.
+* GridFS is not yet supported.
