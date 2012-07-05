@@ -241,6 +241,53 @@ class MotorCursorTest(MotorTest):
         result = yield motor.Op(coll.find()[:5].to_list)
         self.assertEqual(5, len(result))
 
+    @async_test_engine()
+    def test_cursor_index(self):
+        cx = self.motor_connection(host, port)
+
+        # test_collection was filled out in setUp() with 200 docs
+        coll = cx.test.test_collection
+        yield AssertEqual(
+            {'_id': 0, 's': hex(0)},
+            coll.find().sort([('_id', 1)])[0].next)
+
+        yield AssertEqual(
+            [{'_id': 5, 's': hex(5)}],
+            coll.find().sort([('_id', 1)])[5].to_list)
+
+        # Only 200 documents, so 1000th doc doesn't exist. PyMongo raises
+        # IndexError here, but Motor simply returns None.
+        yield AssertEqual(None, coll.find()[1000].next)
+        yield AssertEqual([], coll.find()[1000].to_list)
+
+    def test_cursor_index_each(self):
+        cx = self.motor_connection(host, port)
+
+        # test_collection was filled out in setUp() with 200 docs
+        coll = cx.test.test_collection
+
+        results = []
+
+        def each(result, error):
+            if error:
+                raise error
+
+            if result:
+                results.append(result)
+
+        coll.find({}, {'_id': 1}).sort([('_id', 1)])[0].each(each)
+        coll.find({}, {'_id': 1}).sort([('_id', 1)])[5].each(each)
+
+        # Only 200 documents, so 1000th doc doesn't exist. PyMongo raises
+        # IndexError here, but Motor simply returns None, which won't show up
+        # in results.
+        coll.find()[1000].each(each)
+
+        self.assertEventuallyEqual(
+            [{'_id': 0}, {'_id': 5}],
+            lambda: sorted(results))
+
+        ioloop.IOLoop.instance().start()
 
 if __name__ == '__main__':
     unittest.main()

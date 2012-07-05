@@ -75,7 +75,7 @@ excluded_tests = [
     'TestGridfs.test_threaded_writes',
     'TestGridfs.test_threaded_reads',
 
-    # Motor doesn't support PyMongo's syntax, db.system.js['my_func'] = "code",
+    # Motor doesn't support PyMongo's syntax, db.system_js['my_func'] = "code",
     # users should just use system.js as a regular collection
     'TestDatabase.test_system_js',
     'TestDatabase.test_system_js_list',

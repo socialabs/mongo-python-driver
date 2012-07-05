@@ -52,8 +52,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 # TODO: examine & document what connection and network timeouts mean here
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
-# TODO: document that Motor doesn't do auto_start_request, although if you
-#   pass it in, it'll be sent to sync_connection()
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next()?
 # TODO: document, smugly, that Motor has configurable IOLoops
@@ -593,7 +591,7 @@ class MotorConnection(MotorConnectionBase):
         .. note:: PyMongo's :attr:`~pymongo.connection.Connection.is_locked` is
            a property that synchronously executes the `currentOp` command on the
            server before returning. In Motor, `is_locked` must take a callback
-           and execute asynchronously.
+           and executes asynchronously.
         """
         def is_locked(result, error):
             if error:
@@ -715,8 +713,6 @@ class MotorDatabase(MotorBase):
     dereference         = Async(has_safe_arg=False, cb_required=True)
     eval                = Async(has_safe_arg=False, cb_required=True)
 
-    # TODO: remove system_js?
-    system_js                     = ReadOnlyDelegateProperty()
     incoming_manipulators         = ReadOnlyDelegateProperty()
     incoming_copying_manipulators = ReadOnlyDelegateProperty()
     outgoing_manipulators         = ReadOnlyDelegateProperty()
@@ -1294,7 +1290,6 @@ class MotorCursor(MotorBase):
         :Parameters:
           - `index`: An integer or slice index to be applied to this cursor
         """
-        # TODO doc that this does not raise IndexError if index > len results
         # TODO test that this raises IndexError if index < 0
         # TODO: doctest
         # TODO: test this is an error if tailable

@@ -1,11 +1,14 @@
 Differences between Motor and PyMongo
 =====================================
 
+Major differences
+=================
+
 Callbacks
 ---------
 
-Motor supports nearly every method PyMongo does, but every Motor method that
-does network I/O takes a callback function like:
+Motor supports nearly every method PyMongo does, but Motor methods that
+do network I/O take a callback function defined like:
 
 .. code-block:: python
 
@@ -81,3 +84,47 @@ However, the parameter is passed to the
 :class:`~pymongo.replica_set_connection.ReplicaSetConnection` or
 :class:`~pymongo.connection.Connection` created by
 :meth:`~motor.MotorConnection.sync_connection`.
+
+Minor differences
+=================
+
+is_locked
+---------
+
+:meth:`~motor.MotorConnection.is_locked` in Motor is a method requiring a
+callback, whereas in PyMongo it is a property of
+:class:`~pymongo.connection.Connection`.
+
+system_js
+---------
+
+PyMongo supports syntax like:
+
+.. code-block:: python
+
+    db.system_js.my_func = "code"
+
+Motor does not. One should use ``system.js`` as a regular collection with Motor.
+
+.. seealso:: `Server-side code execution <http://www.mongodb.org/display/DOCS/Server-side+Code+Execution>`_
+
+Cursor slicing
+--------------
+
+In Pymongo, the following raises an ``IndexError`` if the collection has fewer
+than 101 documents:
+
+.. code-block:: python
+
+    db.collection.find()[100]
+
+In Motor, however, no exception is raised. The query simply has no results:
+
+.. code-block:: python
+
+    def callback(result, error):
+        # Iteration ends immediately, so callback is called once with 'result'
+        # and 'error' both None
+        pass
+
+    db.collection.find()[100].each(callback)
