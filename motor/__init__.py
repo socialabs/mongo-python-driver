@@ -212,7 +212,7 @@ class MotorPool(pymongo.pool.GreenletPool):
     """
     def __init__(self, io_loop, *args, **kwargs):
         self.io_loop = io_loop
-        super(MotorPool, self).__init__(*args, **kwargs)
+        pymongo.pool.GreenletPool.__init__(self, *args, **kwargs)
 
     def create_connection(self, pair):
         """Copy of BasePool.connect()
@@ -265,7 +265,7 @@ class MotorPool(pymongo.pool.GreenletPool):
         """
         motor_sock = self.create_connection(pair)
         motor_sock.settimeout(self.net_timeout)
-        return pymongo.pool.SocketInfo(motor_sock, weakref.ref(self))
+        return pymongo.pool.SocketInfo(motor_sock, self.pool_id)
 
 
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
