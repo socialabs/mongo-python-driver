@@ -129,15 +129,13 @@ use async methods without explicit callbacks:
         db = self.settings['db']
 
         # motor.Op raises an exception on error, otherwise returns result
-        result = yield motor.Op(db.messages.insert,
-            {'msg': msg},
-            callback=self._on_response)
+        result = yield motor.Op(db.messages.insert, {'msg': msg})
 
         # Success
         self.redirect('/')
 
-One could also do scatter-gather concurrent operations. To query for two
-messages at once and wait for both:
+One can also parallelize operations and wait for all to complete. To query for
+two messages at once and wait for both:
 
 .. code-block:: python
 
