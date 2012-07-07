@@ -22,8 +22,7 @@ import motor
 if not motor.requirements_satisfied:
     raise SkipTest("Tornado or greenlet not installed")
 
-from motor.motortest import (
-    MotorTest, host, port, async_test_engine, have_ssl, cx_classes)
+from motor.motortest import MotorTest, host, port, async_test_engine, have_ssl
 from pymongo.errors import ConfigurationError
 
 
@@ -35,8 +34,12 @@ class MotorNoSSLTest(unittest.TestCase):
                 "without SSL"
             )
 
-        for cx_class in cx_classes:
-            self.assertRaises(
+        for cx_class in (
+            motor.MotorConnection,
+            motor.MotorReplicaSetConnection
+        ):
+
+        self.assertRaises(
                 ConfigurationError,
                 cx_class(host, port, ssl=True).open_sync)
 

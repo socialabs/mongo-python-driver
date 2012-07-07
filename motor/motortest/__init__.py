@@ -58,11 +58,6 @@ port3 = int(os.environ.get("DB_PORT3", 27019))
 #    this can yield false passes because the function never gets to its asserts
 
 
-cx_classes = (
-    motor.MotorConnection,
-    motor.MotorReplicaSetConnection)
-
-
 def async_test_engine(timeout_sec=5, io_loop=None):
     if not isinstance(timeout_sec, int) and not isinstance(timeout_sec, float):
         raise TypeError(
