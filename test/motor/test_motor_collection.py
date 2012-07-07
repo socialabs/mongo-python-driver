@@ -25,7 +25,7 @@ if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
 
-from motor.motortest import (
+from test.motor import (
     MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
 import bson
 from bson.objectid import ObjectId

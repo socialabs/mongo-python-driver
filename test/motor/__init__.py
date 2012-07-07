@@ -24,9 +24,10 @@ from nose.plugins.skip import SkipTest
 import pymongo
 import pymongo.errors
 import motor
+from test.motor import puritanical, eventually
+
 if not motor.requirements_satisfied:
     raise SkipTest("Tornado or greenlet not installed")
-from motor.motortest import eventually, puritanical
 
 from tornado import gen, ioloop
 

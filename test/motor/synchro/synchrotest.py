@@ -23,6 +23,8 @@ Motor operation to complete, default 5 seconds.
 """
 
 import sys
+from test.motor import synchro
+
 sys.path[0:0] = [""]
 from os import path
 
@@ -32,8 +34,7 @@ from nose.plugins import Plugin
 from nose.plugins.manager import PluginManager
 from nose.selector import Selector
 
-from motor.motortest import synchro
-from motor.motortest.puritanical import PuritanicalIOLoop
+from test.motor.puritanical import PuritanicalIOLoop
 
 excluded_modules = [
     'test.test_threads',

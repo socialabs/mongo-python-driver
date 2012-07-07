@@ -18,6 +18,8 @@ import time
 import unittest
 
 import motor
+from test.motor import puritanical
+
 if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
@@ -27,9 +29,8 @@ from tornado import ioloop, gen
 
 import pymongo
 
-from motor.motortest import (
-    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual,
-    puritanical)
+from test.motor import (
+    MotorTest, async_test_engine, host, port, AssertRaises, AssertEqual )
 from pymongo.errors import (
     InvalidOperation, ConfigurationError, ConnectionFailure, AutoReconnect)
 from test.utils import server_is_master_with_slave, delay

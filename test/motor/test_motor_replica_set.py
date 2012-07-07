@@ -19,15 +19,16 @@ import socket
 import unittest
 
 import motor
+from test.motor import puritanical
+
 if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
 
 from tornado import ioloop, iostream
 
-from motor.motortest import (
-    MotorTest, async_test_engine, AssertEqual, AssertRaises, host, port,
-    puritanical)
+from test.motor import (
+    MotorTest, async_test_engine, AssertEqual, AssertRaises, host, port )
 import pymongo.errors
 import pymongo.replica_set_connection
 from test.test_replica_set_connection import TestConnectionReplicaSetBase

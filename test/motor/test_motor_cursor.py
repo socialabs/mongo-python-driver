@@ -24,7 +24,7 @@ if not motor.requirements_satisfied:
 
 from tornado import ioloop, gen
 
-from motor.motortest import (
+from test.motor import (
     MotorTest, async_test_engine, host, port, AssertEqual)
 import pymongo
 

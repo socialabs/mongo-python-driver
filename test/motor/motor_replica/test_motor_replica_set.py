@@ -21,6 +21,7 @@ import unittest
 from tornado import gen
 
 from tornado.ioloop import IOLoop
+from test.motor import puritanical, eventually
 
 from test.replica import replset_tools
 
@@ -29,8 +30,8 @@ from pymongo.connection import _partition_node
 from pymongo.errors import AutoReconnect, ConnectionFailure
 
 import motor
-from motor.motortest import (
-    async_test_engine, AssertRaises, AssertEqual, eventually, puritanical)
+from test.motor import (
+    async_test_engine, AssertRaises, AssertEqual  )
 
 
 class MotorTestReadPreference(

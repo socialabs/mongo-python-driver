@@ -23,7 +23,7 @@ if not motor.requirements_satisfied:
 
 from tornado import gen
 
-from motor.motortest import MotorTest, async_test_engine, host, port
+from test.motor import MotorTest, async_test_engine, host, port
 import pymongo.database
 from pymongo.son_manipulator import AutoReference, NamespaceInjector
 

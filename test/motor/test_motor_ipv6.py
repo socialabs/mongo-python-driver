@@ -23,7 +23,7 @@ import motor
 if not motor.requirements_satisfied:
     raise SkipTest("Tornado or greenlet not installed")
 
-from motor.motortest import MotorTest, host, port, async_test_engine
+from test.motor import MotorTest, host, port, async_test_engine
 
 
 class MotorIPv6Test(MotorTest):
