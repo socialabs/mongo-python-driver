@@ -74,63 +74,71 @@ def _partition_node(node):
     return host, port
 
 
-class Monitor(threading.Thread):
-    """Thread based replica set monitor.
+class Monitor(object):
+    """Base class for replica set monitors.
     """
-    def __init__(self, rsc, interval=5):
-        super(Monitor, self).__init__()
-        self.event = threading.Event()
-        def shutdown(dummy):
-            """Weakref callback to kill the thread.
-            """
-            self.event.set()
-        self.rsc = weakref.proxy(rsc, shutdown)
+    def __init__(self, rsc, interval, event_class):
+        self.rsc = weakref.proxy(rsc, self.shutdown)
         self.interval = interval
+        self.event = event_class()
 
-    def run(self):
+    def shutdown(self, dummy):
+        """Signal the monitor to shutdown.
+        """
+        self.event.set()
+
+    def monitor(self):
         """Run until the RSC is collected or an
         unexpected error occurs.
         """
         while not self.event.isSet():
+            self.event.wait(self.interval)
+            if self.event.isSet():
+                break
             try:
                 self.rsc.refresh()
             except AutoReconnect:
                 pass
+            # RSC has been collected or there
+            # was an unexpected error.
             except:
                 break
-            self.event.wait(self.interval)
+
+
+class MonitorThread(Monitor, threading.Thread):
+    """Thread based replica set monitor.
+    """
+    def __init__(self, rsc, interval=5):
+        Monitor.__init__(self, rsc, interval, threading.Event)
+        threading.Thread.__init__(self)
+        self.setName("ReplicaSetMonitorThread")
+
+    def run(self):
+        """Override Thread's run method.
+        """
+        self.monitor()
 
 
 have_gevent = False
 try:
-    import gevent
     from gevent import Greenlet
+    from gevent.event import Event
     have_gevent = True
 
-    class GreenletMonitor(Greenlet):
+    class MonitorGreenlet(Monitor, Greenlet):
         """Greenlet based replica set monitor.
         """
-        def __init__(self, obj, interval=5):
+        def __init__(self, rsc, interval=5):
+            Monitor.__init__(self, rsc, interval, Event)
             Greenlet.__init__(self)
-            self.obj = weakref.proxy(obj)
-            self.interval = interval
 
+        # Don't override `run` in a Greenlet. Add _run instead.
+        # Refer to gevent's Greenlet docs and source for more
+        # information.
         def _run(self):
-            """Run until RSC is collected.
-
-            Note this method is called _run following
-            the gevent docs.
+            """Define Greenlet's _run method.
             """
-            while True:
-                try:
-                    self.obj.refresh()
-                # The connection object has been
-                # collected so we should die.
-                except ReferenceError:
-                    break
-                except:
-                    pass
-                gevent.sleep(self.interval)
+            self.monitor()
 
 except ImportError:
     pass
@@ -161,6 +169,13 @@ class ReplicaSetConnection(common.BaseObject):
         <http://dochub.mongodb.org/core/connections>`_, in addition to
         a string of `host:port` pairs (e.g. 'host1:port1,host2:port2').
         If `hosts_or_uri` is None 'localhost:27017' will be used.
+
+        .. note:: Instances of :class:`~ReplicaSetConnection` start a
+           background task to monitor the state of the replica set. This allows
+           it to quickly respond to changes in replica set configuration.
+           Before discarding an instance of :class:`~ReplicaSetConnection` make
+           sure you call :meth:`~close` to ensure that the monitor task is
+           cleanly shut down.
 
         :Parameters:
           - `hosts_or_uri` (optional): A MongoDB URI or string of `host:port`
@@ -333,22 +348,21 @@ class ReplicaSetConnection(common.BaseObject):
 
         # Start the monitor after we know the configuration is correct.
         if monitor_class:
-            monitor = monitor_class(self)
+            self.__monitor = monitor_class(self)
         elif self.__opts.get('use_greenlets', False):
-            monitor = GreenletMonitor(self)
+            self.__monitor = MonitorGreenlet(self)
         else:
             # NOTE: Don't ever make this a daemon thread in CPython. Daemon
             # threads in CPython cause serious issues when the interpreter is
             # torn down. Symptoms range from random exceptions to the
             # interpreter dumping core.
-            monitor = Monitor(self)
-            monitor.setName("ReplicaSetMonitorThread")
+            self.__monitor = MonitorThread(self)
             # Sadly, weakrefs aren't totally reliable in PyPy and Jython
             # so use a daemon thread there.
             if (sys.platform.startswith('java') or
                 'PyPy' in sys.version):
-                monitor.setDaemon(True)
-        monitor.start()
+                self.__monitor.setDaemon(True)
+        self.__monitor.start()
 
 
     def _cached(self, dbname, coll, index):
@@ -734,8 +748,20 @@ class ReplicaSetConnection(common.BaseObject):
         self.__writer = None
 
     def close(self):
-        """Disconnect from all set members.
+        """Close this ReplicaSetConnection.
+
+        This method first terminates the replica set monitor, then disconnects
+        from all members of the replica set. Once called this instance of
+        ReplicaSetConnection should not be reused.
+
+        .. versionchanged:: 2.2.1
+           The :meth:`~close` method now terminates the replica set monitor.
         """
+        if self.__monitor:
+            self.__monitor.shutdown(None)
+            # Use a reasonable timeout.
+            self.__monitor.join(1.0)
+            self.__monitor = None
         self.__writer = None
         self.__pools = {}
 
