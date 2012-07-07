@@ -177,7 +177,7 @@ class MotorConnectionTest(MotorTest):
         # 3. Create a username and password
         # 4. Copy a database using name and password
         is_ms = server_is_master_with_slave(self.sync_cx)
-        ncopies = 20
+        ncopies = 10
         nrange = list(range(ncopies))
         test_db_names = ['pymongo_test%s' % i for i in nrange]
         cx = self.motor_connection(host, port)
@@ -343,7 +343,7 @@ class MotorConnectionTest(MotorTest):
         cx = self.motor_connection(host, port).open_sync()
         collection = cx.test.test_collection
 
-        concurrency = 150
+        concurrency = 100
         ndocs = [0]
         ninserted = [0]
 
