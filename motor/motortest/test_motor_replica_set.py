@@ -26,7 +26,8 @@ if not motor.requirements_satisfied:
 from tornado import ioloop, iostream
 
 from motor.motortest import (
-    MotorTest, async_test_engine, AssertRaises, host, port)
+    MotorTest, async_test_engine, AssertEqual, AssertRaises, host, port,
+    puritanical)
 import pymongo.errors
 import pymongo.replica_set_connection
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
@@ -37,6 +38,119 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         # TODO: Make TestConnectionReplicaSetBase cooperative
         TestConnectionReplicaSetBase.setUp(self)
         MotorTest.setUp(self)
+
+    @async_test_engine()
+    def test_replica_set_connection(self):
+        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+
+        # Can't access databases before connecting
+        self.assertRaises(
+            pymongo.errors.InvalidOperation,
+            lambda: cx.some_database_name
+        )
+
+        self.assertRaises(
+            pymongo.errors.InvalidOperation,
+            lambda: cx['some_database_name']
+        )
+
+        result = yield motor.Op(cx.open)
+        self.assertEqual(result, cx)
+        self.assertTrue(cx.connected)
+        self.assertTrue(isinstance(cx.delegate._ReplicaSetConnection__monitor,
+            motor.MotorReplicaSetMonitor))
+        self.assertEqual(ioloop.IOLoop.instance(),
+            cx.delegate._ReplicaSetConnection__monitor.io_loop)
+
+    def test_connection_callback(self):
+        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+        self.check_optional_callback(cx.open)
+
+    @async_test_engine()
+    def test_open_sync(self):
+        loop = ioloop.IOLoop.instance()
+        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+        self.assertFalse(cx.connected)
+
+        # open_sync() creates a special IOLoop just to run the connection
+        # code to completion
+        self.assertEqual(cx, cx.open_sync())
+        self.assertTrue(cx.connected)
+
+        # IOLoop was restored?
+        self.assertEqual(loop, cx.io_loop)
+        self.assertTrue(isinstance(cx.delegate._ReplicaSetConnection__monitor,
+            motor.MotorReplicaSetMonitor))
+        self.assertEqual(loop,
+            cx.delegate._ReplicaSetConnection__monitor.io_loop)
+
+        # Really connected?
+        result = yield motor.Op(cx.admin.command, "buildinfo")
+        self.assertEqual(int, type(result['bits']))
+
+        yield motor.Op(cx.test.test_collection.insert,
+            {'_id': 'test_open_sync'})
+        doc = yield motor.Op(
+            cx.test.test_collection.find({'_id': 'test_open_sync'}).next)
+        self.assertEqual('test_open_sync', doc['_id'])
+
+    def test_open_sync_custom_io_loop(self):
+        # Check that we can create a MotorReplicaSetConnection with a custom
+        # IOLoop, then call open_sync(), which uses a new loop, and the custom
+        # loop is restored.
+        loop = puritanical.PuritanicalIOLoop()
+        cx = motor.MotorReplicaSetConnection(
+            host, port, replicaSet='repl0', io_loop=loop)
+        self.assertEqual(cx, cx.open_sync())
+        self.assertTrue(cx.connected)
+
+        # Custom loop restored?
+        self.assertEqual(loop, cx.io_loop)
+        self.assertTrue(isinstance(cx.delegate._ReplicaSetConnection__monitor,
+            motor.MotorReplicaSetMonitor))
+        self.assertEqual(loop,
+            cx.delegate._ReplicaSetConnection__monitor.io_loop)
+
+        @async_test_engine(io_loop=loop)
+        def test(self):
+            # Custom loop works?
+            yield AssertEqual(
+                {'_id': 17, 's': hex(17)},
+                cx.test.test_collection.find({'_id': 17}).next)
+
+            yield AssertEqual(
+                {'_id': 37, 's': hex(37)},
+                cx.test.test_collection.find({'_id': 37}).next)
+
+        test(self)
+
+    def test_custom_io_loop(self):
+        self.assertRaises(
+            TypeError,
+            lambda: motor.MotorReplicaSetConnection(
+                host, port, replicaSet='repl0', io_loop='foo')
+        )
+
+        loop = puritanical.PuritanicalIOLoop()
+
+        @async_test_engine(io_loop=loop)
+        def test(self):
+            # Make sure we can do async things with the custom loop
+            cx = motor.MotorReplicaSetConnection(
+                host, port, replicaSet='repl0', io_loop=loop)
+            yield AssertEqual(cx, cx.open)
+            self.assertTrue(cx.connected)
+            self.assertTrue(isinstance(
+                cx.delegate._ReplicaSetConnection__monitor,
+                motor.MotorReplicaSetMonitor))
+            self.assertEqual(loop,
+                cx.delegate._ReplicaSetConnection__monitor.io_loop)
+
+            doc = yield motor.Op(
+                cx.test.test_collection.find({'_id': 17}).next)
+            self.assertEqual({'_id': 17, 's': hex(17)}, doc)
+
+        test(self)
 
     @async_test_engine()
     def test_sync_connection(self):
@@ -53,15 +167,20 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         sync_cx = cx.sync_connection()
         self.assertTrue(isinstance(
             sync_cx, pymongo.replica_set_connection.ReplicaSetConnection))
-        self.assertEqual(1000, sync_cx._ReplicaSetConnection__conn_timeout * 1000.0)
-        self.assertEqual(1500, sync_cx._ReplicaSetConnection__net_timeout * 1000.0)
+        self.assertFalse(isinstance(sync_cx._ReplicaSetConnection__monitor,
+            motor.MotorReplicaSetMonitor))
+        self.assertEqual(1000,
+            sync_cx._ReplicaSetConnection__conn_timeout * 1000.0)
+        self.assertEqual(1500,
+            sync_cx._ReplicaSetConnection__net_timeout * 1000.0)
         self.assertEqual(23, sync_cx.max_pool_size)
         self.assertEqual(True, sync_cx._ReplicaSetConnection__tz_aware)
-        self.assertEqual(DictSubclass, sync_cx._ReplicaSetConnection__document_class)
+        self.assertEqual(DictSubclass,
+            sync_cx._ReplicaSetConnection__document_class)
 
         # Make sure sync connection works
         self.assertEqual(
-                {'_id': 5, 's': hex(5)},
+            {'_id': 5, 's': hex(5)},
             sync_cx.test.test_collection.find_one({'_id': 5}))
 
     @async_test_engine()

@@ -428,6 +428,9 @@ class MotorConnectionBase(MotorBase):
         :Parameters:
          - `callback`: Optional function taking parameters (connection, error)
         """
+        self._open(callback)
+
+    def _open(self, callback):
         check_callable(callback)
 
         if self.connected:
@@ -476,7 +479,7 @@ class MotorConnectionBase(MotorBase):
                 outcome['error'] = error
                 self.io_loop.stop()
 
-            self.open(callback)
+            self._open(callback)
 
             # Returns once callback has been executed and loop stopped.
             self.io_loop.start()
@@ -614,6 +617,7 @@ class MotorReplicaSetConnection(MotorConnectionBase):
     arbiters    = ReadOnlyDelegateProperty()
     hosts       = ReadOnlyDelegateProperty()
     seeds       = ReadOnlyDelegateProperty()
+    close       = ReadOnlyDelegateProperty()
 
     def __init__(self, *args, **kwargs):
         """Create a new connection to a MongoDB replica set.
@@ -630,15 +634,48 @@ class MotorReplicaSetConnection(MotorConnectionBase):
           - `io_loop` (optional): Special :class:`tornado.ioloop.IOLoop`
             instance to use instead of default
         """
+        # We only override __init__ to replace its docstring
         super(MotorReplicaSetConnection, self).__init__(*args, **kwargs)
+
+    def open_sync(self):
+        """Synchronous open(), returning self.
+
+        Under the hood, this method creates a new Tornado IOLoop, runs
+        :meth:`open` on the loop, and deletes the loop when :meth:`open`
+        completes.
+        """
+        # TODO: revisit and refactor open, open_sync(), custom-loop handling,
+        #   and the monitor
+        super(MotorReplicaSetConnection, self).open_sync()
+
+        # We need to wait for open_sync() to complete and restore the
+        # original IOLoop before starting the monitor. This is a hack.
+        self.delegate._ReplicaSetConnection__monitor.start_motor(self.io_loop)
+        return self
+
+    def open(self, callback):
+        check_callable(callback)
+        def opened(result, error):
+            if error:
+                callback(None, error)
+            else:
+                try:
+                    monitor = self.delegate._ReplicaSetConnection__monitor
+                    monitor.start_motor(self.io_loop)
+                except Exception, e:
+                    callback(None, e)
+                else:
+                    # No errors
+                    callback(self, None)
+
+        super(MotorReplicaSetConnection, self)._open(callback=opened)
 
     def _delegate_init_args(self):
         # This _monitor_class will be passed to PyMongo's
         # ReplicaSetConnection when we create it.
         args, kwargs = super(
             MotorReplicaSetConnection, self)._delegate_init_args()
-        kwargs['_monitor_class'] = functools.partial(
-            MotorReplicaSetMonitor, self.io_loop)
+        kwargs['_monitor_class'] = MotorReplicaSetMonitor
         return args, kwargs
 
     def _get_pools(self):
@@ -654,42 +691,56 @@ class MotorReplicaSetConnection(MotorConnectionBase):
 # PyMongo uses a background thread to regularly inspect the replica set and
 # monitor it for changes. In Motor, use a periodic callback on the IOLoop to
 # monitor the set.
-class MotorReplicaSetMonitor(object):
-    def __init__(self, io_loop, obj, interval=5):
-        assert isinstance(io_loop, ioloop.IOLoop), (
-            "First argument to MotorReplicaSetMonitor must be"
-            " IOLoop, not %s" % repr(io_loop))
+class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
+    def __init__(self, rsc, interval=5):
         assert isinstance(
-            obj, pymongo.replica_set_connection.ReplicaSetConnection), (
-            "Second argument to MotorReplicaSetMonitor must be"
-            " ReplicaSetConnection, not %s" % repr(obj))
+            rsc, pymongo.replica_set_connection.ReplicaSetConnection), (
+            "First argument to MotorReplicaSetMonitor must be"
+            " ReplicaSetConnection, not %s" % repr(rsc))
 
-        self.ref = weakref.ref(obj)
+        # Fake the event_class: we won't use it
+        pymongo.replica_set_connection.Monitor.__init__(
+            self, rsc, interval, event_class=object)
+
+        self.timeout_obj = None
+
+    def shutdown(self, dummy):
+        if self.timeout_obj:
+            self.io_loop.remove_timeout(self.timeout_obj)
+
+    def refresh(self):
+        assert greenlet.getcurrent().parent, "Should be on child greenlet"
+        try:
+            self.rsc.refresh()
+        except pymongo.errors.AutoReconnect:
+            pass
+        # RSC has been collected or there
+        # was an unexpected error.
+        except:
+            return
+
+        self.timeout_obj = self.io_loop.add_timeout(
+            time.time() + self.interval, self.async_refresh)
+
+    def start(self):
+        """No-op: PyMongo thinks this starts the monitor, but Motor starts
+           the monitor separately to ensure it uses the right IOLoop"""
+        pass
+
+    def start_motor(self, io_loop):
         self.io_loop = io_loop
-        self.interval = interval
         self.async_refresh = asynchronize(
             self.io_loop,
             self.refresh,
             has_safe_arg=False,
             callback_required=False)
+        self.timeout_obj = self.io_loop.add_timeout(
+            time.time() + self.interval, self.async_refresh)
 
-    def refresh(self):
-        # Dereference the weakref to a ReplicaSetConnection. If it's no longer
-        # valid, quit.
-        rsc = self.ref()
-        if rsc:
-            try:
-                rsc.refresh()
-            except Exception:
-                logging.exception("Refreshing replica set configuration")
-
-            self.io_loop.add_timeout(
-                time.time() + self.interval, self.async_refresh)
-
-    def start(self):
-        """Refresh loop to notice changes in replica set configuration
-        """
-        self.io_loop.add_callback(self.async_refresh)
+    def join(self, timeout):
+        # PyMongo calls join() after shutdown() -- this is not a thread, so
+        # shutdown works immediately and join is unnecessary
+        pass
 
 
 class MotorDatabase(MotorBase):

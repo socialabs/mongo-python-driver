@@ -353,6 +353,7 @@ class ReplicaSetConnection(Connection):
 
         self.synchro_connect()
 
+    _ReplicaSetConnection__writer = SynchroProperty()
 
 class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
