@@ -986,6 +986,7 @@ class MotorCursor(MotorBase):
     count         = Async(has_safe_arg=False, cb_required=True)
     distinct      = Async(has_safe_arg=False, cb_required=True)
     explain       = Async(has_safe_arg=False, cb_required=True)
+    _refresh      = Async(has_safe_arg=False, cb_required=True)
     close         = Async(has_safe_arg=False, cb_required=False)
     alive         = ReadOnlyDelegateProperty()
     cursor_id     = ReadOnlyDelegateProperty()
@@ -1035,9 +1036,7 @@ class MotorCursor(MotorBase):
             )
 
         self.started = True
-        async_refresh = asynchronize(
-            self.get_io_loop(), self.delegate._refresh, False, True)
-        async_refresh(callback=callback)
+        self._refresh(callback=callback)
 
     def next(self, callback):
         """Asynchronously retrieve the next document in the result set,
@@ -1215,7 +1214,10 @@ class MotorCursor(MotorBase):
         :Parameters:
          - `callback`: function taking (documents, error)
         """
-        # TODO: error if tailable
+        if self.delegate._Cursor__tailable:
+            raise pymongo.errors.InvalidOperation(
+                "Can't call to_list on tailable cursor")
+
         check_callable(callback, required=True)
         the_list = []
 
@@ -1224,22 +1226,22 @@ class MotorCursor(MotorBase):
             callback([], None)
             return
 
-        # TODO: circular reference, and look for others too
-        def got_more(batch_size, error):
-            if error:
-                callback(None, error)
-                return
+        self._to_list_got_more(callback, the_list, None, None)
 
-            if self.buffer_size > 0:
-                the_list.extend(self.delegate._Cursor__data)
-                self.delegate._Cursor__data[:] = []
+    def _to_list_got_more(self, callback, the_list, batch_size, error):
+        if error:
+            callback(None, error)
+            return
 
-            if self.alive and (self.cursor_id or not self.started):
-                self._get_more(got_more)
-            else:
-                callback(the_list, None)
+        if self.buffer_size > 0:
+            the_list.extend(self.delegate._Cursor__data)
+            self.delegate._Cursor__data[:] = []
 
-        got_more(None, None)
+        if self.alive and (self.cursor_id or not self.started):
+            self._get_more(callback=functools.partial(
+                self._to_list_got_more, callback, the_list))
+        else:
+            callback(the_list, None)
 
     def clone(self):
         return MotorCursor(self.delegate.clone(), self.collection)
@@ -1259,46 +1261,29 @@ class MotorCursor(MotorBase):
         # TODO: doc that cursor is closed if iteration cancelled
         check_callable(callback, True)
 
-        loop = self.get_io_loop()
-        add_callback = loop.add_callback
-        add_timeout = loop.add_timeout
-
         cursor = self.clone()
 
         cursor.delegate._Cursor__tailable = True
         cursor.delegate._Cursor__await_data = True
 
-        # This is a list so we can modify it from the inner callback
-        started = [False]
-
-        def inner_callback(result, error):
-            if error:
-                cursor.close()
-                callback(None, error)
-            elif result is not None:
-                started[0] = True
-                if callback(result, None) is False:
-                    cursor.close()
-                    return False
-            elif cursor.alive:
-                # result and error are both none, meaning no new data in
-                # this batch; keep on truckin'
-                # TODO: circular ref
-                add_callback(functools.partial(cursor.each, inner_callback))
-            else:
-                # cursor died, start over soon, but only if it's because this
-                # collection was empty when we began.
-                if not started[0]:
-                    add_timeout(
-                        time.time() + 0.5,
-                        functools.partial(cursor.tail, callback))
-                else:
-                    # TODO: why exactly would this happen?
-                    exc = pymongo.errors.OperationFailure("cursor died")
-                    add_callback(functools.partial(callback, None, exc))
-
         # Start tailing
-        cursor.each(inner_callback)
+        cursor.each(functools.partial(self._tail_got_more, cursor, callback))
+
+    def _tail_got_more(self, cursor, callback, result, error):
+        if error:
+            cursor.close()
+            callback(None, error)
+        elif result is not None:
+            if callback(result, None) is False:
+                # Callee cancelled tailing
+                cursor.close()
+                return False
+
+        if not cursor.alive:
+            # cursor died, start over soon
+            self.get_io_loop().add_timeout(
+                time.time() + 0.5,
+                functools.partial(cursor.tail, callback))
 
     def get_io_loop(self):
         return self.collection.get_io_loop()
