@@ -27,6 +27,7 @@ from tornado import ioloop, gen
 from test.motor import (
     MotorTest, async_test_engine, host, port, AssertEqual)
 import pymongo
+import pymongo.errors
 
 
 class MotorCursorTest(MotorTest):
@@ -91,6 +92,14 @@ class MotorCursorTest(MotorTest):
         expected = [{'_id': i} for i in range(200)]
         yield AssertEqual(expected, cursor.to_list)
         yield motor.Op(cursor.close)
+
+    def test_to_list_tailable(self):
+        coll = self.motor_connection(host, port).test.test_collection
+        cursor = coll.find(tailable=True)
+
+        # Can't call to_list on tailable cursor
+        self.assertRaises(
+            pymongo.errors.InvalidOperation, cursor.to_list, lambda: None)
 
     @async_test_engine()
     def test_limit_zero(self):
