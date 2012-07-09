@@ -37,6 +37,8 @@ from nose.selector import Selector
 from test.motor.puritanical import PuritanicalIOLoop
 
 excluded_modules = [
+    'test.motor',
+
     'test.test_threads',
     'test.test_threads_replica_set_connection',
     'test.test_pooling',
@@ -104,7 +106,11 @@ class SynchroNosePlugin(Plugin):
         self.enabled = True
 
     def wantModule(self, module):
-        return module.__name__ not in excluded_modules
+        for module_name in excluded_modules:
+            if module.__name__.startswith(module_name):
+                return False
+
+        return True
 
     def wantMethod(self, method):
         # Run standard Nose checks on name, like "does it start with test_"?
@@ -141,6 +147,12 @@ if __name__ == '__main__':
         # master_slave_connection, even though Motor doesn't support it and
         # we exclude it from tests, so that the import doesn't fail.
         sys.modules['pymongo.%s' % submod] = synchro
+
+    # Weird special case: because of module-load order, test_connection has
+    # already been imported, so monkey-patch it directly
+    import test.test_connection
+    test.test_connection.Connection = synchro.Connection
+    test.test_connection.Database = synchro.Database
 
     # Find our directory
     this_dir = path.dirname(__file__)
