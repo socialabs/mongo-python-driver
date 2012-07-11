@@ -614,7 +614,8 @@ class TestConnection(TestConnectionReplicaSetBase):
 
         # auto_start_request should default to True
         conn = self._get_connection()
-        pools = [mongo['pool'] for mongo in conn._ReplicaSetConnection__pools.values()]
+        pools = [mongo.pool for mongo in
+                 conn._ReplicaSetConnection__members.values()]
         self.assertTrue(conn.auto_start_request)
         self.assertTrue(conn.in_request())
 

@@ -144,6 +144,16 @@ except ImportError:
     pass
 
 
+class Member(object):
+    """Represent one member of a replica set
+    """
+    def __init__(self, is_primary, max_bson_size, ping_time, pool):
+        self.is_primary = is_primary
+        self.max_bson_size = max_bson_size
+        self.ping_time = ping_time
+        self.pool = pool
+
+
 class ReplicaSetConnection(common.BaseObject):
     """Connection to a MongoDB replica set.
     """
@@ -258,7 +268,7 @@ class ReplicaSetConnection(common.BaseObject):
         self.__arbiters = set()
         self.__writer = None
         self.__readers = []
-        self.__pools = {}
+        self.__members = {}
         self.__index_cache = {}
         self.__auth_credentials = {}
 
@@ -530,7 +540,7 @@ class ReplicaSetConnection(common.BaseObject):
         0 if no primary is available.
         """
         if self.__writer:
-            return self.__pools[self.__writer]['max_bson_size']
+            return self.__members[self.__writer].max_bson_size
         return 0
 
     @property
@@ -539,14 +549,17 @@ class ReplicaSetConnection(common.BaseObject):
 
     def __simple_command(self, sock_info, dbname, spec):
         """Send a command to the server.
+           Returns (response, ping_time in seconds).
         """
         rqst_id, msg, _ = message.query(0, dbname + '.$cmd', 0, -1, spec)
+        start = time.time()
         sock_info.sock.sendall(msg)
         response = self.__recv_msg(1, rqst_id, sock_info)
+        end = time.time()
         response = helpers._unpack_response(response)['data'][0]
         msg = "command %r failed: %%s" % spec
         helpers._check_command_response(response, None, msg)
-        return response
+        return response, end - start
 
     def __auth(self, sock_info, dbname, user, passwd):
         """Authenticate socket against database `dbname`.
@@ -563,20 +576,21 @@ class ReplicaSetConnection(common.BaseObject):
 
     def __is_master(self, host):
         """Directly call ismaster.
+           Returns (response, pool, ping_time in seconds).
         """
-        mpool = self.pool_class(host, self.__max_pool_size,
+        pool = self.pool_class(host, self.__max_pool_size,
                                 self.__net_timeout, self.__conn_timeout,
                                 self.__use_ssl)
-        sock_info = mpool.get_socket()
+        sock_info = pool.get_socket()
         try:
-            response = self.__simple_command(
+            response, ping_time = self.__simple_command(
                 sock_info, 'admin', {'ismaster': 1}
             )
 
-            mpool.maybe_return_socket(sock_info)
-            return response, mpool
+            pool.maybe_return_socket(sock_info)
+            return response, pool, ping_time
         except (ConnectionFailure, socket.error):
-            mpool.discard_socket(sock_info)
+            pool.discard_socket(sock_info)
             raise
 
     def __update_pools(self):
@@ -586,20 +600,24 @@ class ReplicaSetConnection(common.BaseObject):
         for host in self.__hosts:
             mongo, sock_info = None, None
             try:
-                if host in self.__pools:
-                    mongo = self.__pools[host]
+                if host in self.__members:
+                    mongo = self.__members[host]
                     sock_info = self.__socket(mongo)
-                    res = self.__simple_command(sock_info, 'admin', {'ismaster': 1})
-                    mongo['pool'].maybe_return_socket(sock_info)
+                    res, ping_time = self.__simple_command(
+                        sock_info, 'admin', {'ismaster': 1})
+                    mongo.ping_time = ping_time
+                    mongo.pool.maybe_return_socket(sock_info)
                 else:
-                    res, conn = self.__is_master(host)
+                    res, conn, ping_time = self.__is_master(host)
                     bson_max = res.get('maxBsonObjectSize', MAX_BSON_SIZE)
-                    self.__pools[host] = {'pool': conn,
-                                          'last_checkout': time.time(),
-                                          'max_bson_size': bson_max}
+                    self.__members[host] = Member(
+                        is_primary=res['ismaster'],
+                        max_bson_size=bson_max,
+                        ping_time=ping_time,
+                        pool=conn)
             except (ConnectionFailure, socket.error):
                 if mongo:
-                    mongo['pool'].discard_socket(sock_info)
+                    mongo.pool.discard_socket(sock_info)
                 continue
             # Only use hosts that are currently in 'secondary' state
             # as readers.
@@ -621,14 +639,14 @@ class ReplicaSetConnection(common.BaseObject):
         for node in nodes:
             mongo, sock_info = None, None
             try:
-                if node in self.__pools:
-                    mongo = self.__pools[node]
+                if node in self.__members:
+                    mongo = self.__members[node]
                     sock_info = self.__socket(mongo)
-                    response = self.__simple_command(sock_info, 'admin',
+                    response, _ = self.__simple_command(sock_info, 'admin',
                                                      {'ismaster': 1})
-                    mongo['pool'].maybe_return_socket(sock_info)
+                    mongo.pool.maybe_return_socket(sock_info)
                 else:
-                    response, _ = self.__is_master(node)
+                    response, _, _ = self.__is_master(node)
 
                 # Check that this host is part of the given replica set.
                 set_name = response.get('setName')
@@ -651,7 +669,7 @@ class ReplicaSetConnection(common.BaseObject):
                                   for h in response["passives"]])
             except (ConnectionFailure, socket.error), why:
                 if mongo:
-                    mongo['pool'].discard_socket(sock_info)
+                    mongo.pool.discard_socket(sock_info)
                 errors.append("%s:%d: %s" % (node[0], node[1], str(why)))
             if hosts:
                 self.__hosts = hosts
@@ -668,25 +686,27 @@ class ReplicaSetConnection(common.BaseObject):
         """
         mongo, sock_info = None, None
         try:
-            if host in self.__pools:
-                mongo = self.__pools[host]
+            if host in self.__members:
+                mongo = self.__members[host]
                 sock_info = self.__socket(mongo)
-                res = self.__simple_command(
+                res, ping_time = self.__simple_command(
                     sock_info, 'admin', {'ismaster': 1}
                 )
             else:
-                res, conn = self.__is_master(host)
+                res, conn, ping_time = self.__is_master(host)
                 bson_max = res.get('maxBsonObjectSize', MAX_BSON_SIZE)
-                self.__pools[host] = {'pool': conn,
-                                      'last_checkout': time.time(),
-                                      'max_bson_size': bson_max}
+                self.__members[host] = Member(
+                    is_primary=res["ismaster"],
+                    max_bson_size=bson_max,
+                    ping_time=ping_time,
+                    pool=conn)
         except (ConnectionFailure, socket.error), why:
             if mongo:
-                mongo['pool'].discard_socket(sock_info)
+                mongo.pool.discard_socket(sock_info)
             raise ConnectionFailure("%s:%d: %s" % (host[0], host[1], str(why)))
         
         if mongo and sock_info:
-            mongo['pool'].maybe_return_socket(sock_info)
+            mongo.pool.maybe_return_socket(sock_info)
 
         if res["ismaster"]:
             return host
@@ -704,7 +724,7 @@ class ReplicaSetConnection(common.BaseObject):
         if one exists.
         """
         if self.__writer:
-            return self.__pools[self.__writer]
+            return self.__members[self.__writer]
 
         # This is either the first connection or we had a failover.
         self.refresh()
@@ -713,7 +733,7 @@ class ReplicaSetConnection(common.BaseObject):
         for candidate in self.__hosts:
             try:
                 self.__writer = self.__check_is_primary(candidate)
-                return self.__pools[self.__writer]
+                return self.__members[self.__writer]
             except (ConnectionFailure, socket.error), why:
                 errors.append(str(why))
         # Couldn't find the primary.
@@ -722,12 +742,11 @@ class ReplicaSetConnection(common.BaseObject):
     def __socket(self, mongo):
         """Get a SocketInfo from the pool.
         """
-        mpool = mongo['pool']
         if self.__auto_start_request:
             # No effect if a request already started
             self.start_request()
 
-        sock_info = mpool.get_socket()
+        sock_info = mongo.pool.get_socket()
 
         if self.__auth_credentials:
             self.__check_auth(sock_info)
@@ -736,9 +755,9 @@ class ReplicaSetConnection(common.BaseObject):
     def disconnect(self):
         """Disconnect from the replica set primary.
         """
-        mongo = self.__pools.get(self.__writer)
-        if mongo and 'pool' in mongo:
-            mongo['pool'].reset()
+        mongo = self.__members.get(self.__writer)
+        if mongo:
+            mongo.pool.reset()
         self.__writer = None
 
     def close(self):
@@ -757,7 +776,7 @@ class ReplicaSetConnection(common.BaseObject):
             self.__monitor.join(1.0)
             self.__monitor = None
         self.__writer = None
-        self.__pools = {}
+        self.__members = {}
 
     def __check_response_to_last_error(self, response):
         """Check a response to a lastError message for errors.
@@ -853,13 +872,12 @@ class ReplicaSetConnection(common.BaseObject):
         if _connection_to_use in (None, -1):
             mongo = self.__find_primary()
         else:
-            mongo = self.__pools[_connection_to_use]
+            mongo = self.__members[_connection_to_use]
 
         sock_info = None
         try:
             sock_info = self.__socket(mongo)
-            rqst_id, data = self.__check_bson_size(msg,
-                                                   mongo['max_bson_size'])
+            rqst_id, data = self.__check_bson_size(msg, mongo.max_bson_size)
             sock_info.sock.sendall(data)
             # Safe mode. We pack the message together with a lastError
             # message and send both. We then get the response (to the
@@ -869,15 +887,15 @@ class ReplicaSetConnection(common.BaseObject):
             if safe:
                 response = self.__recv_msg(1, rqst_id, sock_info)
                 rv = self.__check_response_to_last_error(response)
-            mongo['pool'].maybe_return_socket(sock_info)
+            mongo.pool.maybe_return_socket(sock_info)
             return rv
         except(ConnectionFailure, socket.error), why:
-            mongo['pool'].discard_socket(sock_info)
+            mongo.pool.discard_socket(sock_info)
             if _connection_to_use in (None, -1):
                 self.disconnect()
             raise AutoReconnect(str(why))
         except:
-            mongo['pool'].discard_socket(sock_info)
+            mongo.pool.discard_socket(sock_info)
             raise
 
     def __send_and_receive(self, mongo, msg, **kwargs):
@@ -890,22 +908,21 @@ class ReplicaSetConnection(common.BaseObject):
             if "network_timeout" in kwargs:
                 sock_info.sock.settimeout(kwargs['network_timeout'])
 
-            rqst_id, data = self.__check_bson_size(msg,
-                                                   mongo['max_bson_size'])
+            rqst_id, data = self.__check_bson_size(msg, mongo.max_bson_size)
             sock_info.sock.sendall(data)
             response = self.__recv_msg(1, rqst_id, sock_info)
 
             if "network_timeout" in kwargs:
                 sock_info.sock.settimeout(self.__net_timeout)
-            mongo['pool'].maybe_return_socket(sock_info)
+            mongo.pool.maybe_return_socket(sock_info)
 
             return response
         except (ConnectionFailure, socket.error), why:
-            host, port = mongo['pool'].pair
-            mongo['pool'].discard_socket(sock_info)
+            host, port = mongo.pool.pair
+            mongo.pool.discard_socket(sock_info)
             raise AutoReconnect("%s:%d: %s" % (host, port, str(why)))
         except:
-            mongo['pool'].discard_socket(sock_info)
+            mongo.pool.discard_socket(sock_info)
             raise
 
     def _send_message_with_response(self, msg, _connection_to_use=None,
@@ -924,24 +941,24 @@ class ReplicaSetConnection(common.BaseObject):
                 if _connection_to_use == -1:
                     mongo = self.__find_primary()
                 else:
-                    mongo = self.__pools[_connection_to_use]
-                return mongo['pool'].pair, self.__send_and_receive(mongo,
+                    mongo = self.__members[_connection_to_use]
+                return mongo.pool.pair, self.__send_and_receive(mongo,
                                                                    msg,
                                                                    **kwargs)
             elif _must_use_master or not read_pref:
                 mongo = self.__find_primary()
-                return mongo['pool'].pair, self.__send_and_receive(mongo,
+                return mongo.pool.pair, self.__send_and_receive(mongo,
                                                                    msg,
                                                                    **kwargs)
         except AutoReconnect:
-            if mongo == self.__pools.get(self.__writer):
+            if mongo == self.__members.get(self.__writer):
                 self.disconnect()
             raise
 
         errors = []
         for host in helpers.shuffled(self.__readers):
             try:
-                mongo = self.__pools[host]
+                mongo = self.__members[host]
                 return host, self.__send_and_receive(mongo, msg, **kwargs)
             except AutoReconnect, why:
                 errors.append(str(why))
@@ -949,7 +966,7 @@ class ReplicaSetConnection(common.BaseObject):
         if read_pref == ReadPreference.SECONDARY:
             try:
                 mongo = self.__find_primary()
-                return mongo['pool'].pair, self.__send_and_receive(mongo,
+                return mongo.pool.pair, self.__send_and_receive(mongo,
                                                                    msg,
                                                                    **kwargs)
             except AutoReconnect, why:
@@ -983,9 +1000,8 @@ class ReplicaSetConnection(common.BaseObject):
            The :class:`~pymongo.pool.Request` return value.
            :meth:`start_request` previously returned None
         """
-        for mongo in self.__pools.values():
-            if 'pool' in mongo:
-                mongo['pool'].start_request()
+        for mongo in self.__members.values():
+            mongo.pool.start_request()
 
         self.__in_request = True
         return pool.Request(self)
@@ -1011,9 +1027,8 @@ class ReplicaSetConnection(common.BaseObject):
         in the middle of a sequence of operations in which ordering is
         important. This could lead to unexpected results.
         """
-        for mongo in self.__pools.values():
-            if 'pool' in mongo:
-                mongo['pool'].end_request()
+        for mongo in self.__members.values():
+            mongo.pool.end_request()
 
         self.__in_request = False
 
