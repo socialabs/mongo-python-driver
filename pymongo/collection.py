@@ -74,11 +74,13 @@ class Collection(common.BaseObject):
 
         .. mongodoc:: collections
         """
-        super(Collection,
-              self).__init__(slave_okay=database.slave_okay,
-                             read_preference=database.read_preference,
-                             safe=database.safe,
-                             **(database.get_lasterror_options()))
+        super(Collection, self).__init__(
+            slave_okay=database.slave_okay,
+            read_preference=database.read_preference,
+            tag_sets=database.tag_sets,
+            secondary_acceptable_latency_ms=database.secondary_acceptable_latency_ms,
+            safe=database.safe,
+            **(database.get_lasterror_options()))
 
         if not isinstance(name, basestring):
             raise TypeError("name must be an instance "
@@ -590,13 +592,17 @@ class Collection(common.BaseObject):
             :class:`~pymongo.connection.Connection`-level default
           - `read_preference` (optional): The read preference for
             this query.
+          - `tag_sets` (optional): The tag sets for this query.
 
         .. note:: The `manipulate` parameter may default to False in
            a future release.
 
         .. note:: The `max_scan` parameter requires server
            version **>= 1.5.1**
-
+           
+        .. versionadded:: 2.2.1+
+           The `tag_sets` parameter.
+           
         .. versionadded:: 1.11+
            The `await_data`, `partial`, and `manipulate` parameters.
 
@@ -619,6 +625,11 @@ class Collection(common.BaseObject):
             kwargs['slave_okay'] = self.slave_okay
         if not 'read_preference' in kwargs:
             kwargs['read_preference'] = self.read_preference
+        if not 'tag_sets' in kwargs:
+            kwargs['tag_sets'] = self.tag_sets
+        if not 'secondary_acceptable_latency_ms' in kwargs:
+            kwargs['secondary_acceptable_latency_ms'] = (
+                self.secondary_acceptable_latency_ms)
         return Cursor(self, *args, **kwargs)
 
     def count(self):

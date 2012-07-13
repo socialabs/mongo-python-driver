@@ -39,6 +39,11 @@ class AutoReconnect(ConnectionFailure):
     will continue to raise this exception until the first successful
     connection is made).
     """
+    def __init__(self, msg, errors=None):
+        self.errors = errors or []
+        ConnectionFailure.__init__(self, msg)
+
+    # TODO: include errors in __str__, not just msg?
 
 
 class ConfigurationError(PyMongoError):

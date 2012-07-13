@@ -130,7 +130,7 @@ class Connection(common.BaseObject):
           Other optional parameters can be passed as keyword arguments:
 
           - `safe`: Use getlasterror for each write operation?
-          - `j` or `journal`: Block until write operations have been commited
+          - `j` or `journal`: Block until write operations have been committed
             to the journal. Ignored if the server is running without journaling.
             Implies safe=True.
           - `w`: (integer or string) If this is a replica set write operations

@@ -29,8 +29,8 @@ from nose.plugins.skip import SkipTest
 
 from bson.son import SON
 from bson.tz_util import utc
-from pymongo import ReadPreference
 from pymongo.connection import Connection
+from pymongo.read_preferences import ReadPreference
 from pymongo.replica_set_connection import ReplicaSetConnection
 from pymongo.replica_set_connection import _partition_node
 from pymongo.database import Database
@@ -40,7 +40,7 @@ from pymongo.errors import (AutoReconnect,
                             InvalidName,
                             OperationFailure)
 from test import version
-from test.utils import delay
+from test.utils import delay, assertReadFrom, assertReadFromAll, read_from_which_host
 
 
 host = os.environ.get("DB_IP", 'localhost')
@@ -82,6 +82,10 @@ class TestConnectionReplicaSetBase(unittest.TestCase):
             ][0]
 
             self.primary = _partition_node(primary_info['name'])
+            self.secondaries = [
+                _partition_node(m['name']) for m in repl_set_status['members']
+                if m['stateStr'] == 'SECONDARY'
+            ]
         else:
             raise SkipTest()
 
@@ -315,17 +319,17 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertRaises(TypeError, iterate)
         connection.close()
 
-    def test_close(self):
+    def test_disconnect(self):
         c = self._get_connection()
         coll = c.foo.bar
 
-        c.close()
-        c.close()
+        c.disconnect()
+        c.disconnect()
 
         coll.count()
 
-        c.close()
-        c.close()
+        c.disconnect()
+        c.disconnect()
 
         coll.count()
 
@@ -638,6 +642,69 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertTrue(conn.in_request())
         conn.end_request()
         self.assertFalse(conn.in_request())
+
+    def test_schedule_refresh(self):
+        # Monitor thread starts waiting for _refresh_interval, 30 seconds
+        conn = self._get_connection()
+
+        for _ in range(2):
+            # Reconnect if necessary
+            conn.pymongo_test.test.find_one()
+
+            secondaries = conn.secondaries
+            for secondary in secondaries:
+                conn._ReplicaSetConnection__members[secondary].up = False
+
+            conn._ReplicaSetConnection__members[conn.primary].up = False
+
+            # Wake up monitor thread
+            conn._ReplicaSetConnection__schedule_refresh()
+            time.sleep(5)
+            for secondary in secondaries:
+                self.assertTrue(conn._ReplicaSetConnection__members[secondary].up,
+                    "ReplicaSetConnection didn't detect secondary is up")
+
+            self.assertTrue(conn._ReplicaSetConnection__members[conn.primary].up,
+                "ReplicaSetConnection didn't detect primary is up")
+
+            # Try it again, make sure monitor is restarted
+            conn.close()
+
+    def test_pinned_member(self):
+        conn = self._get_connection(
+            auto_start_request=False, secondary_acceptable_latency_ms=1000*1000)
+
+        host = read_from_which_host(conn, ReadPreference.SECONDARY)
+        self.assertTrue(host in conn.secondaries)
+
+        # No pinning since we're not in a request
+        assertReadFromAll(
+            self, conn, conn.secondaries, ReadPreference.SECONDARY)
+
+        assertReadFromAll(
+            self, conn, list(conn.secondaries) + [conn.primary],
+            ReadPreference.NEAREST)
+
+        conn.start_request()
+        host = read_from_which_host(conn, ReadPreference.SECONDARY)
+        self.assertTrue(host in conn.secondaries)
+        assertReadFrom(self, conn, host, ReadPreference.SECONDARY)
+
+        # Repin
+        primary = read_from_which_host(conn, ReadPreference.PRIMARY)
+        self.assertEqual(conn.primary, primary)
+        assertReadFrom(self, conn, primary, ReadPreference.NEAREST)
+
+        # Repin again
+        host = read_from_which_host(conn, ReadPreference.SECONDARY)
+        self.assertTrue(host in conn.secondaries)
+        assertReadFrom(self, conn, host, ReadPreference.SECONDARY)
+
+        # Unpin
+        conn.end_request()
+        assertReadFromAll(
+            self, conn, list(conn.secondaries) + [conn.primary],
+            ReadPreference.NEAREST)
 
 
 if __name__ == "__main__":

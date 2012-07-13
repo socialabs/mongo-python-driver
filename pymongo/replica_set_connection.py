@@ -47,8 +47,9 @@ from pymongo import (common,
                      helpers,
                      message,
                      pool,
-                     uri_parser,
-                     ReadPreference)
+                     uri_parser)
+from pymongo.read_preferences import ReadPreference
+import pymongo.read_preferences as rp
 from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
                             ConnectionFailure,
@@ -58,7 +59,7 @@ from pymongo.errors import (AutoReconnect,
 
 EMPTY = b("")
 MAX_BSON_SIZE = 4 * 1024 * 1024
-
+MAX_RETRY = 3
 
 def _partition_node(node):
     """Split a host:port string returned from mongod/s into
@@ -77,13 +78,19 @@ def _partition_node(node):
 class Monitor(object):
     """Base class for replica set monitors.
     """
-    def __init__(self, rsc, interval, event_class):
+    def __init__(self, rsc, event_class):
         self.rsc = weakref.proxy(rsc, self.shutdown)
-        self.interval = interval
         self.event = event_class()
+        self.stopped = False
 
     def shutdown(self, dummy):
         """Signal the monitor to shutdown.
+        """
+        self.stopped = True
+        self.event.set()
+
+    def schedule_refresh(self):
+        """Refresh immediately
         """
         self.event.set()
 
@@ -91,12 +98,18 @@ class Monitor(object):
         """Run until the RSC is collected or an
         unexpected error occurs.
         """
-        while not self.event.isSet():
-            self.event.wait(self.interval)
-            if self.event.isSet():
+        last_refresh_duration = 0
+        while True:
+            if _refresh_interval > last_refresh_duration:
+                self.event.wait(_refresh_interval - last_refresh_duration)
+            if self.stopped:
                 break
+            self.event.clear()
             try:
+                last_refresh_duration = 0
+                start = time.time()
                 self.rsc.refresh()
+                last_refresh_duration = time.time() - start
             except AutoReconnect:
                 pass
             # RSC has been collected or there
@@ -108,8 +121,8 @@ class Monitor(object):
 class MonitorThread(Monitor, threading.Thread):
     """Thread based replica set monitor.
     """
-    def __init__(self, rsc, interval=5):
-        Monitor.__init__(self, rsc, interval, threading.Event)
+    def __init__(self, rsc):
+        Monitor.__init__(self, rsc, threading.Event)
         threading.Thread.__init__(self)
         self.setName("ReplicaSetMonitorThread")
 
@@ -123,13 +136,16 @@ have_gevent = False
 try:
     from gevent import Greenlet
     from gevent.event import Event
+
+    # Used by ReplicaSetConnection
+    from gevent.local import local as gevent_local
     have_gevent = True
 
     class MonitorGreenlet(Monitor, Greenlet):
         """Greenlet based replica set monitor.
         """
-        def __init__(self, rsc, interval=5):
-            Monitor.__init__(self, rsc, interval, Event)
+        def __init__(self, rsc):
+            Monitor.__init__(self, rsc, Event)
             Greenlet.__init__(self)
 
         # Don't override `run` in a Greenlet. Add _run instead.
@@ -147,11 +163,53 @@ except ImportError:
 class Member(object):
     """Represent one member of a replica set
     """
-    def __init__(self, is_primary, max_bson_size, ping_time, pool):
-        self.is_primary = is_primary
-        self.max_bson_size = max_bson_size
-        self.ping_time = ping_time
+    def __init__(self, host, ismaster_response, ping_time, pool):
+        self.host = host
         self.pool = pool
+        self.update(ismaster_response, ping_time)
+
+    def update(self, ismaster_response, ping_time):
+        self.is_primary = ismaster_response['ismaster']
+        self.max_bson_size = ismaster_response.get(
+            'maxBsonObjectSize', MAX_BSON_SIZE)
+        self.tags = ismaster_response.get('tags', {})
+        self.set_ping_time(ping_time)
+        self.up = True
+
+    def get_ping_time(self):
+        # Simulate ping times for unittesting
+        return _host_to_ping_time.get(self.host, self.__ping_time)
+
+    def set_ping_time(self, ping_time):
+        # TODO: calculate moving average
+        self.__ping_time = ping_time
+
+    ping_time = property(get_ping_time, set_ping_time)
+
+    def matches_mode(self, mode):
+        if mode == ReadPreference.PRIMARY and not self.is_primary:
+            return False
+
+        if mode == ReadPreference.SECONDARY and self.is_primary:
+            return False
+
+        return True
+
+    def matches_tags(self, tags):
+        """Return True if this member's tags are a superset of the passed-in
+           tags. E.g., if this member is tagged {'dc': 'ny', 'rack': '1'},
+           then it matches {'dc': 'ny'}.
+        """
+        for key, value in tags.items():
+            if key not in self.tags or self.tags[key] != value:
+                return False
+
+        return True
+
+
+# For unittesting only. Use these under no circumstances!
+_host_to_ping_time = {}
+_refresh_interval = 30
 
 
 class ReplicaSetConnection(common.BaseObject):
@@ -208,7 +266,7 @@ class ReplicaSetConnection(common.BaseObject):
           Other optional parameters can be passed as keyword arguments:
 
           - `safe`: Use getlasterror for each write operation?
-          - `j` or `journal`: Block until write operations have been commited
+          - `j` or `journal`: Block until write operations have been committed
             to the journal. Ignored if the server is running without
             journaling. Implies safe=True.
           - `w`: (integer or string) If this is a replica set write operations
@@ -234,9 +292,7 @@ class ReplicaSetConnection(common.BaseObject):
             :class:`~pymongo.ReadPreference` PRIMARY, auto_start_request=True
             ensures consistent reads, even if you read after an unsafe
             write. For read preferences other than PRIMARY, there are no
-            consistency guarantees. (The semantics of auto_start_request,
-            :class:`~pymongo.ReadPreference`, and :class:`ReplicaSetConnection`
-            may change in future releases of PyMongo.)
+            consistency guarantees.
           - `use_greenlets` (optional): if ``True``, use a background Greenlet
             instead of a background thread to monitor state of replica set.
             :meth:`start_request()` will ensure that the current greenlet uses
@@ -276,6 +332,7 @@ class ReplicaSetConnection(common.BaseObject):
                                         'max_pool_size', max_pool_size)
         self.__tz_aware = common.validate_boolean('tz_aware', tz_aware)
         self.__document_class = document_class
+        self.__monitor = None
 
         # Compatibility with connection.Connection
         host = kwargs.pop('host', hosts_or_uri)
@@ -321,6 +378,7 @@ class ReplicaSetConnection(common.BaseObject):
 
         self.__auto_start_request = self.__opts.get('auto_start_request', True)
         self.__in_request = self.__auto_start_request
+        self.__reset_pinned_hosts()
         self.__name = self.__opts.get('replicaset')
         if not self.__name:
             raise ConfigurationError("the replicaSet "
@@ -367,7 +425,6 @@ class ReplicaSetConnection(common.BaseObject):
                 'PyPy' in sys.version):
                 self.__monitor.setDaemon(True)
         self.__monitor.start()
-
 
     def _cached(self, dbname, coll, index):
         """Test if `index` is cached.
@@ -596,36 +653,65 @@ class ReplicaSetConnection(common.BaseObject):
     def __update_pools(self):
         """Update the mapping of (host, port) pairs to connection pools.
         """
+        primary = None
         secondaries = []
         for host in self.__hosts:
-            mongo, sock_info = None, None
+            member, sock_info = None, None
             try:
                 if host in self.__members:
-                    mongo = self.__members[host]
-                    sock_info = self.__socket(mongo)
+                    member = self.__members[host]
+                    sock_info = self.__socket(member)
                     res, ping_time = self.__simple_command(
                         sock_info, 'admin', {'ismaster': 1})
-                    mongo.ping_time = ping_time
-                    mongo.pool.maybe_return_socket(sock_info)
+                    member.pool.maybe_return_socket(sock_info)
+                    member.update(res, ping_time)
                 else:
                     res, conn, ping_time = self.__is_master(host)
-                    bson_max = res.get('maxBsonObjectSize', MAX_BSON_SIZE)
                     self.__members[host] = Member(
-                        is_primary=res['ismaster'],
-                        max_bson_size=bson_max,
+                        host=host,
+                        ismaster_response=res,
                         ping_time=ping_time,
                         pool=conn)
             except (ConnectionFailure, socket.error):
-                if mongo:
-                    mongo.pool.discard_socket(sock_info)
+                if member:
+                    member.pool.discard_socket(sock_info)
+                    self.__members.pop(member.host, None)
                 continue
             # Only use hosts that are currently in 'secondary' state
             # as readers.
             if res['secondary']:
                 secondaries.append(host)
             elif res['ismaster']:
-                self.__writer = host
+                primary = host
+
+        # TODO lock from here to end?
+        if primary != self.__writer:
+            self.__reset_pinned_hosts()
+
+        self.__writer = primary
         self.__readers = secondaries
+
+    def __schedule_refresh(self):
+        self.__monitor.schedule_refresh()
+
+    def __pin_host(self, host):
+        # After first successful read in a request, continue reading from same
+        # member until read preferences change, host goes down, or
+        # end_request(). This offers a small assurance that reads won't jump
+        # around in time.
+        self.__threadlocal.host = host
+
+    def __pinned_host(self):
+        return getattr(self.__threadlocal, 'host', None)
+
+    def __unpin_host(self):
+        self.__threadlocal.host = None
+
+    def __reset_pinned_hosts(self):
+        if self.__opts.get('use_greenlets', False):
+            self.__threadlocal = gevent_local()
+        else:
+            self.__threadlocal = threading.local()
 
     def refresh(self):
         """Iterate through the existing host list, or possibly the
@@ -637,14 +723,14 @@ class ReplicaSetConnection(common.BaseObject):
         hosts = set()
 
         for node in nodes:
-            mongo, sock_info = None, None
+            member, sock_info = None, None
             try:
                 if node in self.__members:
-                    mongo = self.__members[node]
-                    sock_info = self.__socket(mongo)
+                    member = self.__members[node]
+                    sock_info = self.__socket(member)
                     response, _ = self.__simple_command(sock_info, 'admin',
                                                      {'ismaster': 1})
-                    mongo.pool.maybe_return_socket(sock_info)
+                    member.pool.maybe_return_socket(sock_info)
                 else:
                     response, _, _ = self.__is_master(node)
 
@@ -668,8 +754,8 @@ class ReplicaSetConnection(common.BaseObject):
                     hosts.update([_partition_node(h)
                                   for h in response["passives"]])
             except (ConnectionFailure, socket.error), why:
-                if mongo:
-                    mongo.pool.discard_socket(sock_info)
+                if member:
+                    member.pool.discard_socket(sock_info)
                 errors.append("%s:%d: %s" % (node[0], node[1], str(why)))
             if hosts:
                 self.__hosts = hosts
@@ -684,29 +770,28 @@ class ReplicaSetConnection(common.BaseObject):
     def __check_is_primary(self, host):
         """Checks if this host is the primary for the replica set.
         """
-        mongo, sock_info = None, None
+        member, sock_info = None, None
         try:
             if host in self.__members:
-                mongo = self.__members[host]
-                sock_info = self.__socket(mongo)
+                member = self.__members[host]
+                sock_info = self.__socket(member)
                 res, ping_time = self.__simple_command(
                     sock_info, 'admin', {'ismaster': 1}
                 )
             else:
                 res, conn, ping_time = self.__is_master(host)
-                bson_max = res.get('maxBsonObjectSize', MAX_BSON_SIZE)
                 self.__members[host] = Member(
-                    is_primary=res["ismaster"],
-                    max_bson_size=bson_max,
+                    host=host,
+                    ismaster_response=res,
                     ping_time=ping_time,
                     pool=conn)
         except (ConnectionFailure, socket.error), why:
-            if mongo:
-                mongo.pool.discard_socket(sock_info)
+            if member:
+                member.pool.discard_socket(sock_info)
             raise ConnectionFailure("%s:%d: %s" % (host[0], host[1], str(why)))
         
-        if mongo and sock_info:
-            mongo.pool.maybe_return_socket(sock_info)
+        if member and sock_info:
+            member.pool.maybe_return_socket(sock_info)
 
         if res["ismaster"]:
             return host
@@ -724,7 +809,9 @@ class ReplicaSetConnection(common.BaseObject):
         if one exists.
         """
         if self.__writer:
-            return self.__members[self.__writer]
+            primary = self.__members[self.__writer]
+            if primary.up:
+                return primary
 
         # This is either the first connection or we had a failover.
         self.refresh()
@@ -739,14 +826,14 @@ class ReplicaSetConnection(common.BaseObject):
         # Couldn't find the primary.
         raise AutoReconnect(', '.join(errors))
 
-    def __socket(self, mongo):
+    def __socket(self, member):
         """Get a SocketInfo from the pool.
         """
         if self.__auto_start_request:
             # No effect if a request already started
             self.start_request()
 
-        sock_info = mongo.pool.get_socket()
+        sock_info = member.pool.get_socket()
 
         if self.__auth_credentials:
             self.__check_auth(sock_info)
@@ -755,9 +842,9 @@ class ReplicaSetConnection(common.BaseObject):
     def disconnect(self):
         """Disconnect from the replica set primary.
         """
-        mongo = self.__members.get(self.__writer)
-        if mongo:
-            mongo.pool.reset()
+        member = self.__members.get(self.__writer)
+        if member:
+            member.pool.reset()
         self.__writer = None
 
     def close(self):
@@ -870,14 +957,14 @@ class ReplicaSetConnection(common.BaseObject):
           - `safe`: check getLastError status after sending the message
         """
         if _connection_to_use in (None, -1):
-            mongo = self.__find_primary()
+            member = self.__find_primary()
         else:
-            mongo = self.__members[_connection_to_use]
+            member = self.__members[_connection_to_use]
 
         sock_info = None
         try:
-            sock_info = self.__socket(mongo)
-            rqst_id, data = self.__check_bson_size(msg, mongo.max_bson_size)
+            sock_info = self.__socket(member)
+            rqst_id, data = self.__check_bson_size(msg, member.max_bson_size)
             sock_info.sock.sendall(data)
             # Safe mode. We pack the message together with a lastError
             # message and send both. We then get the response (to the
@@ -887,92 +974,145 @@ class ReplicaSetConnection(common.BaseObject):
             if safe:
                 response = self.__recv_msg(1, rqst_id, sock_info)
                 rv = self.__check_response_to_last_error(response)
-            mongo.pool.maybe_return_socket(sock_info)
+            member.pool.maybe_return_socket(sock_info)
             return rv
         except(ConnectionFailure, socket.error), why:
-            mongo.pool.discard_socket(sock_info)
+            member.pool.discard_socket(sock_info)
             if _connection_to_use in (None, -1):
                 self.disconnect()
             raise AutoReconnect(str(why))
         except:
-            mongo.pool.discard_socket(sock_info)
+            member.pool.discard_socket(sock_info)
             raise
 
-    def __send_and_receive(self, mongo, msg, **kwargs):
+    def __send_and_receive(self, member, msg, **kwargs):
         """Send a message on the given socket and return the response data.
         """
         sock_info = None
         try:
-            sock_info = self.__socket(mongo)
+            sock_info = self.__socket(member)
 
             if "network_timeout" in kwargs:
                 sock_info.sock.settimeout(kwargs['network_timeout'])
 
-            rqst_id, data = self.__check_bson_size(msg, mongo.max_bson_size)
+            rqst_id, data = self.__check_bson_size(msg, member.max_bson_size)
             sock_info.sock.sendall(data)
             response = self.__recv_msg(1, rqst_id, sock_info)
 
             if "network_timeout" in kwargs:
                 sock_info.sock.settimeout(self.__net_timeout)
-            mongo.pool.maybe_return_socket(sock_info)
+            member.pool.maybe_return_socket(sock_info)
 
             return response
         except (ConnectionFailure, socket.error), why:
-            host, port = mongo.pool.pair
-            mongo.pool.discard_socket(sock_info)
+            host, port = member.pool.pair
+            member.pool.discard_socket(sock_info)
             raise AutoReconnect("%s:%d: %s" % (host, port, str(why)))
         except:
-            mongo.pool.discard_socket(sock_info)
+            member.pool.discard_socket(sock_info)
+            raise
+
+    def __try_read(self, member, msg, **kwargs):
+        """TODO: doc
+        """
+        try:
+            return self.__send_and_receive(member, msg, **kwargs)
+        except AutoReconnect:
+            member.up = False
+            self.__schedule_refresh()
             raise
 
     def _send_message_with_response(self, msg, _connection_to_use=None,
                                     _must_use_master=False, **kwargs):
         """Send a message to Mongo and return the response.
 
-        Sends the given message and returns the response.
+        Sends the given message and returns (host used, response).
 
         :Parameters:
           - `msg`: (request_id, data) pair making up the message to send
         """
-        read_pref = kwargs.get('read_preference', ReadPreference.PRIMARY)
-        mongo = None
+
+        # TODO: wrong? what about db-level or collection-level options?
+        mode = kwargs.get('read_preference', ReadPreference.PRIMARY)
+        if _must_use_master:
+            mode = ReadPreference.PRIMARY
+
+        tag_sets = kwargs.get('tag_sets', [{}])
+        secondary_acceptable_latency_ms = kwargs.get(
+            'secondary_acceptable_latency_ms',
+            self.secondary_acceptable_latency_ms)
+
+        member = None
         try:
             if _connection_to_use is not None:
                 if _connection_to_use == -1:
-                    mongo = self.__find_primary()
+                    member = self.__find_primary()
                 else:
-                    mongo = self.__members[_connection_to_use]
-                return mongo.pool.pair, self.__send_and_receive(mongo,
-                                                                   msg,
-                                                                   **kwargs)
-            elif _must_use_master or not read_pref:
-                mongo = self.__find_primary()
-                return mongo.pool.pair, self.__send_and_receive(mongo,
-                                                                   msg,
-                                                                   **kwargs)
+                    member = self.__members[_connection_to_use]
+                return member.pool.pair, self.__try_read(
+                    member, msg, **kwargs)
         except AutoReconnect:
-            if mongo == self.__members.get(self.__writer):
+            if member == self.__members.get(self.__writer):
                 self.disconnect()
             raise
 
         errors = []
-        for host in helpers.shuffled(self.__readers):
+        pinned_member = self.__members.get(self.__pinned_host())
+        if pinned_member and pinned_member.matches_mode(mode) and any(
+            [pinned_member.matches_tags(tags) for tags in tag_sets]
+        ) and pinned_member.up:
             try:
-                mongo = self.__members[host]
-                return host, self.__send_and_receive(mongo, msg, **kwargs)
+                return (
+                    pinned_member.host,
+                    self.__try_read(pinned_member, msg, **kwargs))
+            except AutoReconnect, why:
+                pinned_member.up = False
+                errors.append(str(why))
+
+        # No pinned member, or pinned member down or doesn't match read pref
+        self.__unpin_host()
+
+        # If we've disconnected since last read, trigger refresh
+        try:
+            self.__find_primary()
+        except AutoReconnect:
+            # We'll throw an error later
+            pass
+
+        # TODO: lock?
+        members = self.__members.copy().values()
+
+        while len(errors) < MAX_RETRY:
+            member = rp.select_member(
+                members=members,
+                mode=mode, tag_sets=tag_sets,
+                secondary_acceptable_latency_ms=secondary_acceptable_latency_ms)
+
+            if not member:
+                # Ran out of members to try
+                break
+
+            try:
+                # Sets member.up False on failure, so select_member won't try
+                # it again.
+                response = self.__try_read(member, msg, **kwargs)
+
+                # Success
+                if self.in_request():
+                    # Keep reading from this member in this thread / greenlet
+                    self.__pin_host(member.host)
+                return member.host, response
             except AutoReconnect, why:
                 errors.append(str(why))
-        # Fallback to primary
-        if read_pref == ReadPreference.SECONDARY:
-            try:
-                mongo = self.__find_primary()
-                return mongo.pool.pair, self.__send_and_receive(mongo,
-                                                                   msg,
-                                                                   **kwargs)
-            except AutoReconnect, why:
-                self.disconnect()
-                errors.append(str(why))
-        raise AutoReconnect(', '.join(errors))
+
+        # Ran out of tries
+        msg = ("No replica set primary available for query with ReadPreference"
+               " %s" % rp.mode_names[mode])
+
+        if tag_sets != [{}]:
+            msg += " with tags " + str(tag_sets)
+
+        raise AutoReconnect(msg, errors)
 
     def start_request(self):
         """Ensure the current thread or greenlet always uses the same socket
@@ -1000,8 +1140,8 @@ class ReplicaSetConnection(common.BaseObject):
            The :class:`~pymongo.pool.Request` return value.
            :meth:`start_request` previously returned None
         """
-        for mongo in self.__members.values():
-            mongo.pool.start_request()
+        for member in self.__members.values():
+            member.pool.start_request()
 
         self.__in_request = True
         return pool.Request(self)
@@ -1027,10 +1167,11 @@ class ReplicaSetConnection(common.BaseObject):
         in the middle of a sequence of operations in which ordering is
         important. This could lead to unexpected results.
         """
-        for mongo in self.__members.values():
-            mongo.pool.end_request()
+        for member in self.__members.values():
+            member.pool.end_request()
 
         self.__in_request = False
+        self.__unpin_host()
 
     def __eq__(self, other):
         # XXX: Implement this?

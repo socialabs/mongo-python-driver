@@ -21,20 +21,28 @@ import replset_tools
 from replset_tools import use_greenlets
 
 
-from pymongo import (ReplicaSetConnection,
+from pymongo import (replica_set_connection,
+                     ReplicaSetConnection,
                      ReadPreference)
 from pymongo.connection import Connection, _partition_node
 from pymongo.errors import AutoReconnect, ConnectionFailure
 
+from test import utils
 
-class TestReadPreference(unittest.TestCase):
+
+# Override default 30-second interval for faster testing
+replica_set_connection._refresh_interval = MONITOR_INTERVAL = 0.5
+
+# TODO: test RSC initialize with no primary?
+
+class TestSecondaryConnection(unittest.TestCase):
 
     def setUp(self):
         members = [{}, {}, {'arbiterOnly': True}]
         res = replset_tools.start_replica_set(members)
         self.seed, self.name = res
 
-    def test_read_preference(self):
+    def test_secondary_connection(self):
         c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
@@ -48,72 +56,43 @@ class TestReadPreference(unittest.TestCase):
         # Test direct connection to a secondary
         host, port = replset_tools.get_secondaries()[0].split(':')
         port = int(port)
-        conn = Connection(
-            host, port, slave_okay=True, use_greenlets=use_greenlets)
-        self.assertEqual(host, conn.host)
-        self.assertEqual(port, conn.port)
-        self.assert_(conn.pymongo_test.test.find_one())
-        conn = Connection(
-            host, port,
-            read_preference=ReadPreference.SECONDARY,
-            use_greenlets=use_greenlets)
-        self.assertEqual(host, conn.host)
-        self.assertEqual(port, conn.port)
-        self.assert_(conn.pymongo_test.test.find_one())
+
+        for kwargs in [
+            {'read_preference': ReadPreference.SECONDARY},
+            {'read_preference': ReadPreference.SECONDARY_PREFERRED},
+            {'slave_okay': True},
+        ]:
+            conn = Connection(
+                host, port, use_greenlets=use_greenlets, **kwargs)
+            self.assertEqual(host, conn.host)
+            self.assertEqual(port, conn.port)
+            self.assert_(conn.pymongo_test.test.find_one())
 
         # Test direct connection to an arbiter
         host = replset_tools.get_arbiters()[0]
         self.assertRaises(
             ConnectionFailure, Connection, host, use_greenlets=use_greenlets)
 
-        # Test PRIMARY
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertEqual(cursor._Cursor__connection_id, c.primary)
-
-        # Test SECONDARY with a secondary
-        db.read_preference = ReadPreference.SECONDARY
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertTrue(cursor._Cursor__connection_id in c.secondaries)
-
-        # Test SECONDARY_ONLY with a secondary
-        db.read_preference = ReadPreference.SECONDARY_ONLY
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertTrue(cursor._Cursor__connection_id in c.secondaries)
-
-        # Test SECONDARY with no secondary
-        killed = replset_tools.kill_all_secondaries()
-        sleep(5) # Let monitor thread notice change
-        self.assertTrue(bool(len(killed)))
-        db.read_preference = ReadPreference.SECONDARY
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertEqual(cursor._Cursor__connection_id, c.primary)
-
-        # Test SECONDARY_ONLY with no secondary
-        db.read_preference = ReadPreference.SECONDARY_ONLY
-        for _ in xrange(10):
-            cursor = db.test.find()
-            self.assertRaises(AutoReconnect, cursor.next)
-
-        replset_tools.restart_members(killed)
-        # Test PRIMARY with no primary (should raise an exception)
-        db.read_preference = ReadPreference.PRIMARY
-        cursor = db.test.find()
-        cursor.next()
-        self.assertEqual(cursor._Cursor__connection_id, c.primary)
-        killed = replset_tools.kill_primary()
-        self.assertTrue(bool(len(killed)))
-        self.assertRaises(AutoReconnect, db.test.find_one)
-
     def tearDown(self):
         replset_tools.kill_all_members()
+
+
+class TestConnectWithoutPrimary(unittest.TestCase):
+
+    def setUp(self):
+        members = [{}, {}]
+        res = replset_tools.start_replica_set(members)
+        self.seed, self.name = res
+
+    def test_connect_without_primary(self):
+        replset_tools.kill_primary()
+
+        # Shouldn't throw error
+        c = ReplicaSetConnection(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
+
+        secondaries = [':'.join(s) for s in c.secondaries]
+        self.assertEqual(set(secondaries), set(replset_tools.get_secondaries()))
 
 
 class TestPassiveAndHidden(unittest.TestCase):
@@ -128,10 +107,9 @@ class TestPassiveAndHidden(unittest.TestCase):
         c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         db = c.pymongo_test
-        db.test.remove({}, safe=True, w=len(c.secondaries))
         w = len(c.secondaries) + 1
+        db.test.remove({}, safe=True, w=w)
         db.test.insert({'foo': 'bar'}, safe=True, w=w)
-        db.read_preference = ReadPreference.SECONDARY
 
         passives = replset_tools.get_passives()
         passives = [_partition_node(member) for member in passives]
@@ -139,14 +117,19 @@ class TestPassiveAndHidden(unittest.TestCase):
         hidden = [_partition_node(member) for member in hidden]
         self.assertEqual(c.secondaries, set(passives))
 
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertTrue(cursor._Cursor__connection_id not in hidden)
+        for mode in (
+            ReadPreference.SECONDARY, ReadPreference.SECONDARY_PREFERRED
+        ):
+            db.read_preference = mode
+            for _ in xrange(10):
+                cursor = db.test.find()
+                cursor.next()
+                self.assertTrue(cursor._Cursor__connection_id in passives)
+                self.assertTrue(cursor._Cursor__connection_id not in hidden)
 
         replset_tools.kill_members(replset_tools.get_passives(), 2)
-        sleep(5) # Let monitor thread notice change
-
+        sleep(2 * MONITOR_INTERVAL)
+        db.read_preference = ReadPreference.SECONDARY_PREFERRED
         for _ in xrange(10):
             cursor = db.test.find()
             cursor.next()
@@ -154,6 +137,7 @@ class TestPassiveAndHidden(unittest.TestCase):
 
     def tearDown(self):
         replset_tools.kill_all_members()
+
 
 class TestHealthMonitor(unittest.TestCase):
 
@@ -168,18 +152,18 @@ class TestHealthMonitor(unittest.TestCase):
         primary = c.primary
         secondaries = c.secondaries
 
+        # Wait for new primary to be elected
         def primary_changed():
             for _ in xrange(30):
-                if c.primary != primary:
+                if c.primary and c.primary != primary:
                     return True
                 sleep(1)
             return False
 
         killed = replset_tools.kill_primary()
-        sleep(5) # Let monitor thread notice change
         self.assertTrue(bool(len(killed)))
         self.assertTrue(primary_changed())
-        self.assertTrue(secondaries != c.secondaries)
+        self.assertNotEqual(secondaries, c.secondaries)
 
     def test_secondary_failure(self):
         c = ReplicaSetConnection(
@@ -197,13 +181,13 @@ class TestHealthMonitor(unittest.TestCase):
             return False
 
         killed = replset_tools.kill_secondary()
-        sleep(5) # Let monitor thread notice change
+        sleep(2 * MONITOR_INTERVAL)
         self.assertTrue(bool(len(killed)))
         self.assertEqual(primary, c.primary)
         self.assertTrue(readers_changed())
         secondaries = c.secondaries
 
-        replset_tools.restart_members(killed)
+        replset_tools.restart_members([killed])
         self.assertEqual(primary, c.primary)
         self.assertTrue(readers_changed())
 
@@ -212,7 +196,7 @@ class TestHealthMonitor(unittest.TestCase):
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
         primary = c.primary
-        secondaries = c.secondaries
+        secondaries = c.secondaries.copy()
 
         def primary_changed():
             for _ in xrange(30):
@@ -223,7 +207,7 @@ class TestHealthMonitor(unittest.TestCase):
 
         replset_tools.stepdown_primary()
         self.assertTrue(primary_changed())
-        self.assertTrue(secondaries != c.secondaries)
+        self.assertNotEqual(secondaries, c.secondaries)
 
     def tearDown(self):
         replset_tools.kill_all_members()
@@ -271,6 +255,8 @@ class TestReadWithFailover(unittest.TestCase):
         self.seed, self.name = res
 
     def test_read_with_failover(self):
+        import thread
+        print 'start, tid', thread.get_ident()
         c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
@@ -284,21 +270,316 @@ class TestReadWithFailover(unittest.TestCase):
         w = len(c.secondaries) + 1
         db.test.remove({}, safe=True, w=w)
         # Force replication
-        db.test.insert([{'foo': i} for i in xrange(10)],
-                       safe=True, w=w)
+        db.test.insert([{'foo': i} for i in xrange(10)], safe=True, w=w)
         self.assertEqual(10, db.test.count())
 
-        db.read_preference = ReadPreference.SECONDARY
+        db.read_preference = ReadPreference.SECONDARY_PREFERRED
         cursor = db.test.find().batch_size(5)
         cursor.next()
         self.assertEqual(5, cursor._Cursor__retrieved)
-        killed = replset_tools.kill_primary()
+        self.assertTrue(cursor._Cursor__connection_id in c.secondaries)
+        print 'killing primary'
+        replset_tools.kill_primary()
+        print 'killed primary'
         # Primary failure shouldn't interrupt the cursor
         self.assertTrue(iter_cursor(cursor))
         self.assertEqual(10, cursor._Cursor__retrieved)
 
     def tearDown(self):
         replset_tools.kill_all_members()
+
+
+class TestReadPreference(unittest.TestCase):
+    def setUp(self):
+        members = [
+            # primary
+            {'tags': {'dc': 'ny', 'name': 'primary'}},
+
+            # secondary
+            {'tags': {'dc': 'la', 'name': 'secondary'}, 'priority': 0},
+
+            # other_secondary
+            {'tags': {'dc': 'ny', 'name': 'other_secondary'}, 'priority': 0},
+        ]
+        
+        res = replset_tools.start_replica_set(members)
+        self.seed, self.name = res
+
+        primary = replset_tools.get_primary()
+        self.primary = _partition_node(primary)
+        self.primary_tags = replset_tools.get_tags(primary)
+        # Make sure priority worked
+        self.assertEqual('primary', self.primary_tags['name'])
+
+        self.primary_dc = {'dc': self.primary_tags['dc']}
+
+        secondaries = replset_tools.get_secondaries()
+
+        (secondary, ) = [
+            s for s in secondaries
+            if replset_tools.get_tags(s)['name'] == 'secondary']
+
+        self.secondary = _partition_node(secondary)
+        self.secondary_tags = replset_tools.get_tags(secondary)
+        self.secondary_dc = {'dc': self.secondary_tags['dc']}
+
+        (other_secondary, ) = [
+            s for s in secondaries
+            if replset_tools.get_tags(s)['name'] == 'other_secondary']
+
+        self.other_secondary = _partition_node(other_secondary)
+        self.other_secondary_tags = replset_tools.get_tags(other_secondary)
+        self.other_secondary_dc = {'dc': self.other_secondary_tags['dc']}
+
+        self.c = c = ReplicaSetConnection(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
+        self.db = c.pymongo_test
+        self.w = w = len(c.secondaries) + 1
+        self.db.test.remove({}, safe=True, w=w)
+        self.db.test.insert([{'foo': i} for i in xrange(10)], safe=True, w=w)
+
+        self.clear_ping_times()
+
+    def set_ping_time(self, member, ping_time_seconds):
+        host = _partition_node(member)
+        replica_set_connection._host_to_ping_time[host] = ping_time_seconds
+
+    def clear_ping_times(self):
+        replica_set_connection._host_to_ping_time.clear()
+
+    def test_read_preference(self):
+        # This is long, but we put all the tests in one function to save time
+        # on setUp, which takes about 30 seconds to bring up a replica set.
+        # We pass through four states:
+        #
+        #       1. A primary and two secondaries
+        #       2. Primary down
+        #       3. Primary up, one secondary down
+        #       4. Primary up, all secondaries down
+        #
+        # For each state, we verify the behavior of PRIMARY,
+        # PRIMARY_PREFERRED, SECONDARY, SECONDARY_PREFERRED, and NEAREST
+
+        def assertReadFrom(member, *args, **kwargs):
+            utils.assertReadFrom(self, member, *args, **kwargs)
+
+        def assertReadFromAll(members, *args, **kwargs):
+            utils.assertReadFromAll(self, members, *args, **kwargs)
+
+        # To make the code terser, copy modes and hosts into local scope
+        PRIMARY = ReadPreference.PRIMARY
+        PRIMARY_PREFERRED = ReadPreference.PRIMARY_PREFERRED
+        SECONDARY = ReadPreference.SECONDARY
+        SECONDARY_PREFERRED = ReadPreference.SECONDARY_PREFERRED
+        NEAREST = ReadPreference.NEAREST
+        
+        primary = self.primary
+        secondary = self.secondary
+        other_secondary = self.other_secondary
+
+        bad_tag = [{'bad': 'tag'}]
+                
+        # 1. THREE MEMBERS UP -------------------------------------------------
+        #       PRIMARY
+        assertReadFrom(primary, PRIMARY)
+
+        #       PRIMARY_PREFERRED
+        # Trivial: mode and tags both match
+        assertReadFrom(primary, PRIMARY_PREFERRED, self.primary_dc)
+
+        # Secondary matches but not primary, choose primary
+        assertReadFrom(primary, PRIMARY_PREFERRED, self.secondary_dc)
+
+        # Chooses primary if that's the only one matching tag
+        assertReadFrom(primary, PRIMARY_PREFERRED, self.primary_dc)
+
+        # Chooses primary even if it doesn't match tag
+        assertReadFrom(primary, PRIMARY_PREFERRED, bad_tag)
+        assertReadFrom(primary, PRIMARY_PREFERRED, [bad_tag, {}])
+
+        #       SECONDARY
+        assertReadFromAll([secondary, other_secondary], SECONDARY)
+
+        #       SECONDARY_PREFERRED
+        assertReadFromAll([secondary, other_secondary], SECONDARY_PREFERRED)
+
+        # Multiple tags
+        assertReadFrom(secondary, SECONDARY_PREFERRED, self.secondary_tags)
+
+        # Fall back to primary if it's the only one matching the tags
+        assertReadFrom(primary, SECONDARY_PREFERRED, {'name': 'primary'})
+
+        # No matching secondaries
+        assertReadFrom(primary, SECONDARY_PREFERRED, bad_tag)
+
+        # Fall back from non-matching tag set to matching set
+        assertReadFromAll([secondary, other_secondary],
+            SECONDARY_PREFERRED, [bad_tag, {}])
+
+        assertReadFrom(other_secondary,
+            SECONDARY_PREFERRED, [bad_tag, {'dc': 'ny'}])
+
+        #       NEAREST
+        self.clear_ping_times()
+
+        assertReadFromAll([primary, secondary, other_secondary], NEAREST)
+
+        assertReadFromAll([primary, other_secondary],
+            NEAREST, [bad_tag, {'dc': 'ny'}])
+
+        self.set_ping_time(primary, 0)
+        self.set_ping_time(secondary, .03) # 30 ms
+        self.set_ping_time(other_secondary, 10)
+
+        # Nearest member, no tags
+        assertReadFrom(primary, NEAREST)
+
+        # Tags override nearness
+        assertReadFrom(primary, NEAREST, {'name': 'primary'})
+        assertReadFrom(secondary, NEAREST, self.secondary_dc)
+
+        # Make secondary fast
+        self.set_ping_time(primary, .03) # 30 ms
+        self.set_ping_time(secondary, 0)
+
+        assertReadFrom(secondary, NEAREST)
+
+        # Other secondary fast
+        self.set_ping_time(secondary, 10)
+        self.set_ping_time(other_secondary, 0)
+
+        assertReadFrom(other_secondary, NEAREST)
+
+        # High secondaryAcceptableLatencyMS, should read from all members
+        assertReadFromAll(
+            [primary, secondary, other_secondary],
+            NEAREST, secondary_acceptable_latency_ms=1000*1000)
+
+        self.clear_ping_times()
+
+        assertReadFromAll([primary, other_secondary], NEAREST, [{'dc': 'ny'}])
+
+        # 2. PRIMARY DOWN -----------------------------------------------------
+        killed = replset_tools.kill_primary()
+
+        # Let monitor notice primary's gone
+        sleep(2 * MONITOR_INTERVAL)
+
+        #       PRIMARY
+        assertReadFrom(None, PRIMARY)
+
+        #       PRIMARY_PREFERRED
+        # No primary, choose matching secondary
+        assertReadFromAll([secondary, other_secondary], PRIMARY_PREFERRED)
+        assertReadFrom(secondary, PRIMARY_PREFERRED, {'name': 'secondary'})
+
+        # No primary or matching secondary
+        assertReadFrom(None, PRIMARY_PREFERRED, bad_tag)
+
+        #       SECONDARY
+        assertReadFromAll([secondary, other_secondary], SECONDARY)
+
+        # Only primary matches
+        assertReadFrom(None, SECONDARY, {'name': 'primary'})
+
+        # No matching secondaries
+        assertReadFrom(None, SECONDARY, bad_tag)
+
+        #       SECONDARY_PREFERRED
+        assertReadFromAll([secondary, other_secondary], SECONDARY_PREFERRED)
+
+        # Mode and tags both match
+        assertReadFrom(secondary, SECONDARY_PREFERRED, {'name': 'secondary'})
+
+        #       NEAREST
+        self.clear_ping_times()
+
+        assertReadFromAll([secondary, other_secondary], NEAREST)
+        
+        # 3. PRIMARY UP, ONE SECONDARY DOWN -----------------------------------
+        replset_tools.restart_members([killed])
+
+        for _ in range(30):
+            if replset_tools.get_primary():
+                break
+            sleep(1)
+        else:
+            self.fail("Primary didn't come back up")
+
+        replset_tools.kill_members([secondary], 2)
+        self.assertTrue(Connection(
+            primary, use_greenlets=use_greenlets, slave_okay=True
+        ).admin.command('ismaster')['ismaster'])
+
+        sleep(2 * MONITOR_INTERVAL)
+        
+        #       PRIMARY
+        assertReadFrom(primary, PRIMARY)
+
+        #       PRIMARY_PREFERRED
+        assertReadFrom(primary, PRIMARY_PREFERRED)
+
+        #       SECONDARY
+        assertReadFrom(other_secondary, SECONDARY)
+        assertReadFrom(other_secondary, SECONDARY, self.other_secondary_dc)
+
+        # Only the down secondary matches
+        assertReadFrom(None, SECONDARY, {'name': 'secondary'})
+
+        #       SECONDARY_PREFERRED
+        assertReadFrom(other_secondary, SECONDARY_PREFERRED)
+        assertReadFrom(
+            other_secondary, SECONDARY_PREFERRED, self.other_secondary_dc)
+
+        # The secondary matching the tag is down, use primary
+        assertReadFrom(primary, SECONDARY_PREFERRED, {'name': 'secondary'})
+
+        #       NEAREST
+        assertReadFromAll([primary, other_secondary], NEAREST)
+        assertReadFrom(other_secondary, NEAREST, {'name': 'other_secondary'})
+        assertReadFrom(primary, NEAREST, {'name': 'primary'})
+
+        # 4. PRIMARY UP, ALL SECONDARIES DOWN ---------------------------------
+        replset_tools.kill_members([other_secondary], 2)
+        self.assertTrue(Connection(
+            primary, use_greenlets=use_greenlets, slave_okay=True
+        ).admin.command('ismaster')['ismaster'])
+
+        #       PRIMARY
+        assertReadFrom(primary, PRIMARY)
+
+        #       PRIMARY_PREFERRED
+        assertReadFrom(primary, PRIMARY_PREFERRED)
+        assertReadFrom(primary, PRIMARY_PREFERRED, self.secondary_dc)
+
+        #       SECONDARY
+        assertReadFrom(None, SECONDARY)
+        assertReadFrom(None, SECONDARY, self.other_secondary_dc)
+        assertReadFrom(None, SECONDARY, {'dc': 'ny'})
+
+        #       SECONDARY_PREFERRED
+        assertReadFrom(primary, SECONDARY_PREFERRED)
+        assertReadFrom(primary, SECONDARY_PREFERRED, self.secondary_dc)
+        assertReadFrom(primary, SECONDARY_PREFERRED, {'name': 'secondary'})
+        assertReadFrom(primary, SECONDARY_PREFERRED, {'dc': 'ny'})
+
+        #       NEAREST
+        assertReadFrom(primary, NEAREST)
+        assertReadFrom(None, NEAREST, self.secondary_dc)
+        assertReadFrom(None, NEAREST, {'name': 'secondary'})
+
+        # Even if primary's slow, still read from it
+        self.set_ping_time(primary, 100)
+        assertReadFrom(primary, NEAREST)
+        assertReadFrom(None, NEAREST, self.secondary_dc)
+
+        self.clear_ping_times()
+
+    def tearDown(self):
+        self.c.close()
+        replset_tools.kill_all_members()
+        self.clear_ping_times()
+
 
 if __name__ == '__main__':
     if use_greenlets:

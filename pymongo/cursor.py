@@ -16,9 +16,8 @@
 
 from bson.code import Code
 from bson.son import SON
-from pymongo import (helpers,
-                     message,
-                     ReadPreference)
+from pymongo import helpers, message
+from pymongo.read_preferences import ReadPreference
 from pymongo.errors import (InvalidOperation,
                             AutoReconnect)
 
@@ -30,6 +29,9 @@ _QUERY_OPTIONS = {
     "await_data": 32,
     "exhaust": 64,
     "partial": 128}
+
+# TODO: is read_preference properly managed? E.g. if set on a collection or
+#   database, does the cursor inherit?
 
 
 # TODO might be cool to be able to do find().include("foo") or
@@ -43,7 +45,8 @@ class Cursor(object):
                  timeout=True, snapshot=False, tailable=False, sort=None,
                  max_scan=None, as_class=None, slave_okay=False,
                  await_data=False, partial=False, manipulate=True,
-                 read_preference=ReadPreference.PRIMARY,
+                 read_preference=ReadPreference.PRIMARY, tag_sets=[{}],
+                 secondary_acceptable_latency_ms=None,
                  _must_use_master=False, _uuid_subtype=None, **kwargs):
         """Create a new cursor.
 
@@ -113,6 +116,8 @@ class Cursor(object):
         self.__slave_okay = slave_okay
         self.__manipulate = manipulate
         self.__read_preference = read_preference
+        self.__secondary_acceptable_latency_ms = secondary_acceptable_latency_ms
+        self.__tag_sets = tag_sets
         self.__tz_aware = collection.database.connection.tz_aware
         self.__must_use_master = _must_use_master
         self.__uuid_subtype = _uuid_subtype or collection.uuid_subtype
@@ -179,6 +184,9 @@ class Cursor(object):
         copy.__partial = self.__partial
         copy.__manipulate = self.__manipulate
         copy.__read_preference = self.__read_preference
+        copy.__secondary_acceptable_latency_ms = (
+            self.__secondary_acceptable_latency_ms)
+        copy.__tag_sets = self.__tag_sets
         copy.__must_use_master = self.__must_use_master
         copy.__uuid_subtype = self.__uuid_subtype
         copy.__query_flags = self.__query_flags
@@ -491,6 +499,7 @@ class Cursor(object):
            :meth:`~pymongo.cursor.Cursor.__len__` was deprecated in favor of
            calling :meth:`count` with `with_limit_and_skip` set to ``True``.
         """
+        # TODO: read preference and tags for count, explain, distinct, and other commands
         command = {"query": self.__spec, "fields": self.__fields}
 
         command['read_preference'] = self.__read_preference
@@ -629,6 +638,9 @@ class Cursor(object):
         db = self.__collection.database
         kwargs = {"_must_use_master": self.__must_use_master}
         kwargs["read_preference"] = self.__read_preference
+        kwargs["secondary_acceptable_latency_ms"] = (
+            self.__secondary_acceptable_latency_ms)
+        kwargs["tag_sets"] = self.__tag_sets
         if self.__connection_id is not None:
             kwargs["_connection_to_use"] = self.__connection_id
         kwargs.update(self.__kwargs)

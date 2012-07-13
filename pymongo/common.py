@@ -16,7 +16,7 @@
 """Functions and classes common to multiple pymongo modules."""
 import warnings
 
-from pymongo import ReadPreference
+from pymongo.read_preferences import ReadPreference
 from pymongo.errors import ConfigurationError
 
 
@@ -82,29 +82,54 @@ def validate_int_or_basestring(option, value):
     raise TypeError("Wrong type for %s, value must be an "
                     "integer or a string" % (option,))
 
-
-def validate_timeout_or_none(option, value):
-    """Validates a timeout specified in milliseconds returning
-    a value in floating point seconds.
-    """
-    if value is None:
-        return value
+def validate_positive_float(option, value):
     try:
         value = float(value)
     except (ValueError, TypeError):
         raise ConfigurationError("%s must be an "
                                  "instance of int or float" % (option,))
     if value <= 0:
-        raise ConfigurationError("%s must be a positive integer" % (option,))
-    return value / 1000.0
+        raise ConfigurationError("%s must be a positive float" % (option,))
+
+    return value
+
+    
+def validate_timeout_or_none(option, value):
+    """Validates a timeout specified in milliseconds returning
+    a value in floating point seconds.
+    """
+    if value is None:
+        return value
+    return validate_positive_float(option, value) / 1000.0
 
 
 def validate_read_preference(dummy, value):
     """Validate read preference for a ReplicaSetConnection.
     """
     if value not in range(ReadPreference.PRIMARY,
-                          ReadPreference.SECONDARY_ONLY + 1):
+                          ReadPreference.NEAREST + 1):
         raise ConfigurationError("Not a valid read preference")
+    return value
+
+
+# TODO: test
+def validate_tag_sets(dummy, value):
+    """Validate tag sets for a ReplicaSetConnection.
+    """
+    if value is None:
+        return [{}]
+
+    if len(value) == 0:
+        raise ConfigurationError((
+            "Tag sets %s invalid, must be None or contain at least one set of"
+            " tags") % repr(value))
+
+    for tags in value:
+        if not isinstance(tags, dict):
+            raise ConfigurationError("Tag set %s invalid, must be a dict" % (
+                repr(tags)
+            ))
+
     return value
 
 
@@ -123,6 +148,7 @@ VALIDATORS = {
     'journal': validate_boolean,
     'connecttimeoutms': validate_timeout_or_none,
     'sockettimeoutms': validate_timeout_or_none,
+    'secondary_acceptable_latency_ms': validate_positive_float,
     'ssl': validate_boolean,
     'read_preference': validate_read_preference,
     'auto_start_request': validate_boolean,
@@ -160,6 +186,8 @@ class BaseObject(object):
 
         self.__slave_okay = False
         self.__read_pref = ReadPreference.PRIMARY
+        self.__tag_sets = [{}]
+        self.__secondary_acceptable_latency_ms = 15
         self.__safe = False
         self.__safe_opts = {}
         self.__set_options(options)
@@ -183,6 +211,14 @@ class BaseObject(object):
                 self.__slave_okay = validate_boolean(option, value)
             elif option == 'read_preference':
                 self.__read_pref = validate_read_preference(option, value)
+            elif option == 'tag_sets':
+                self.__tag_sets = validate_tag_sets(option, value)
+            elif option in (
+                'secondaryAcceptableLatencyMS',
+                'secondary_acceptable_latency_ms'
+            ):
+                self.__secondary_acceptable_latency_ms = \
+                    validate_positive_float(option, value)
             elif option == 'safe':
                 self.__safe = validate_boolean(option, value)
             elif option in SAFE_OPTIONS:
@@ -211,7 +247,7 @@ class BaseObject(object):
     slave_okay = property(__get_slave_okay, __set_slave_okay)
 
     def __get_read_pref(self):
-        """The read preference for this instance.
+        """The read preference mode for this instance.
 
         See :class:`~pymongo.ReadPreference` for available options.
 
@@ -224,6 +260,40 @@ class BaseObject(object):
         self.__read_pref = validate_read_preference('read_preference', value)
 
     read_preference = property(__get_read_pref, __set_read_pref)
+    
+    def __get_secondary_acceptable_latency_ms(self):
+        """Any replica-set member whose ping time is within
+           secondary_acceptable_latency_ms of the nearest member may accept
+           reads. Default 15 milliseconds.
+
+        See :class:`~pymongo.ReadPreference`.
+
+        .. versionadded:: 2.2.1+
+        """
+        return self.__secondary_acceptable_latency_ms
+
+    def __set_secondary_acceptable_latency_ms(self, value):
+        """Property setter for secondary_acceptable_latency_ms"""
+        self.__secondary_acceptable_latency_ms = (validate_positive_float(
+            'secondary_acceptable_latency_ms', value))
+
+    secondary_acceptable_latency_ms = property(
+        __get_secondary_acceptable_latency_ms,
+        __set_secondary_acceptable_latency_ms)
+
+    def __get_tag_sets(self):
+        """
+        # TODO: docstring
+
+        .. versionadded:: 2.2.1+
+        """
+        return self.__tag_sets
+
+    def __set_tag_sets(self, value):
+        """Property setter for tag_sets"""
+        self.__tag_sets = validate_tag_sets('tag_sets', value)
+
+    tag_sets = property(__get_tag_sets, __set_tag_sets)
 
     def __get_safe(self):
         """Use getlasterror with every write operation?
