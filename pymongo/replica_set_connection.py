@@ -1107,7 +1107,7 @@ class ReplicaSetConnection(common.BaseObject):
 
         # Ran out of tries
         msg = ("No replica set primary available for query with ReadPreference"
-               " %s" % rp.mode_names[mode])
+               " %s" % rp.modes[mode])
 
         if tag_sets != [{}]:
             msg += " with tags " + str(tag_sets)

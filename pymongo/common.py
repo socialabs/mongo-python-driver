@@ -15,6 +15,7 @@
 
 """Functions and classes common to multiple pymongo modules."""
 import warnings
+from pymongo import read_preferences
 
 from pymongo.read_preferences import ReadPreference
 from pymongo.errors import ConfigurationError
@@ -106,8 +107,7 @@ def validate_timeout_or_none(option, value):
 def validate_read_preference(dummy, value):
     """Validate read preference for a ReplicaSetConnection.
     """
-    if value not in range(ReadPreference.PRIMARY,
-                          ReadPreference.NEAREST + 1):
+    if value not in read_preferences.modes:
         raise ConfigurationError("Not a valid read preference")
     return value
 
@@ -119,6 +119,9 @@ def validate_tag_sets(dummy, value):
     if value is None:
         return [{}]
 
+    if not isinstance(value, list):
+        raise ConfigurationError((
+            "Tag sets %s invalid, must be a list" ) % repr(value))
     if len(value) == 0:
         raise ConfigurationError((
             "Tag sets %s invalid, must be None or contain at least one set of"

@@ -68,7 +68,7 @@ class ReadPreference:
     NEAREST = 4
 
 # For formatting error messages
-mode_names = {
+modes = {
     ReadPreference.PRIMARY: 'PRIMARY',
     ReadPreference.PRIMARY_PREFERRED: 'PRIMARY_PREFERRED',
     ReadPreference.SECONDARY: 'SECONDARY',
