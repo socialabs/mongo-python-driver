@@ -48,8 +48,7 @@ from pymongo import (common,
                      message,
                      pool,
                      uri_parser)
-from pymongo.read_preferences import ReadPreference
-import pymongo.read_preferences as rp
+from pymongo.read_preferences import ReadPreference, select_member, modes
 from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
                             ConnectionFailure,
@@ -285,14 +284,18 @@ class ReplicaSetConnection(common.BaseObject):
             before timing out.
           - `ssl`: If True, create the connection to the servers using SSL.
           - `read_preference`: The read preference for this connection.
-            See :class:`~pymongo.ReadPreference` for available options.
+            See :class:`~pymongo.read_preferences.ReadPreference` for available
+          - `tag_sets`: TODO: doc
+          - `secondary_acceptable_latency_ms`: Any replica-set member whose
+            ping time is within secondary_acceptable_latency_ms of the nearest
+            member may accept reads. Default 15 milliseconds.
           - `auto_start_request`: If True (the default), each thread that
             accesses this :class:`ReplicaSetConnection` has a socket allocated
             to it for the thread's lifetime, for each member of the set. For
-            :class:`~pymongo.ReadPreference` PRIMARY, auto_start_request=True
-            ensures consistent reads, even if you read after an unsafe
-            write. For read preferences other than PRIMARY, there are no
-            consistency guarantees.
+            :class:`~pymongo.read_preferences.ReadPreference` PRIMARY,
+            auto_start_request=True ensures consistent reads, even if you read
+            after an unsafe write. For read preferences other than PRIMARY,
+            there are no consistency guarantees.
           - `use_greenlets` (optional): if ``True``, use a background Greenlet
             instead of a background thread to monitor state of replica set.
             :meth:`start_request()` will ensure that the current greenlet uses
@@ -312,6 +315,8 @@ class ReplicaSetConnection(common.BaseObject):
             connection.Connection.
 
 
+        .. versionchanged:: 2.2.1+
+           Added `tag_sets` and `secondary_acceptable_latency_ms` options.
         .. versionchanged:: 2.2
            Added `auto_start_request` and `use_greenlets` options.
            Added support for `host`, `port`, and `network_timeout` keyword
@@ -1031,13 +1036,19 @@ class ReplicaSetConnection(common.BaseObject):
         :Parameters:
           - `msg`: (request_id, data) pair making up the message to send
         """
+        # If we've disconnected since last read, trigger refresh
+        try:
+            self.__find_primary()
+        except AutoReconnect:
+            # We'll throw an error later
+            pass
 
-        # TODO: wrong? what about db-level or collection-level options?
+        tag_sets = kwargs.get('tag_sets', [{}])
         mode = kwargs.get('read_preference', ReadPreference.PRIMARY)
         if _must_use_master:
             mode = ReadPreference.PRIMARY
+            tag_sets = [{}]
 
-        tag_sets = kwargs.get('tag_sets', [{}])
         secondary_acceptable_latency_ms = kwargs.get(
             'secondary_acceptable_latency_ms',
             self.secondary_acceptable_latency_ms)
@@ -1066,27 +1077,24 @@ class ReplicaSetConnection(common.BaseObject):
                     pinned_member.host,
                     self.__try_read(pinned_member, msg, **kwargs))
             except AutoReconnect, why:
-                pinned_member.up = False
-                errors.append(str(why))
+                if _must_use_master or mode == ReadPreference.PRIMARY:
+                    self.disconnect()
+                    raise
+                else:
+                    errors.append(str(why))
 
         # No pinned member, or pinned member down or doesn't match read pref
         self.__unpin_host()
-
-        # If we've disconnected since last read, trigger refresh
-        try:
-            self.__find_primary()
-        except AutoReconnect:
-            # We'll throw an error later
-            pass
 
         # TODO: lock?
         members = self.__members.copy().values()
 
         while len(errors) < MAX_RETRY:
-            member = rp.select_member(
+            member = select_member(
                 members=members,
-                mode=mode, tag_sets=tag_sets,
-                secondary_acceptable_latency_ms=secondary_acceptable_latency_ms)
+                mode=mode,
+                tag_sets=tag_sets,
+                latency=secondary_acceptable_latency_ms)
 
             if not member:
                 # Ran out of members to try
@@ -1104,23 +1112,30 @@ class ReplicaSetConnection(common.BaseObject):
                 return member.host, response
             except AutoReconnect, why:
                 errors.append(str(why))
+                members.remove(member)
 
         # Ran out of tries
-        msg = ("No replica set primary available for query with ReadPreference"
-               " %s" % rp.modes[mode])
+        if mode == ReadPreference.PRIMARY:
+            msg = "No replica set primary available for query"
+        elif mode == ReadPreference.SECONDARY:
+            msg = "No replica set secondary available for query"
+        else:
+            msg = "No replica set members available for query"
+
+        msg += " with ReadPreference %s" % modes[mode]
 
         if tag_sets != [{}]:
-            msg += " with tags " + str(tag_sets)
+            msg += " and tags " + repr(tag_sets)
 
         raise AutoReconnect(msg, errors)
 
     def start_request(self):
         """Ensure the current thread or greenlet always uses the same socket
         until it calls :meth:`end_request`. For
-        :class:`~pymongo.ReadPreference` PRIMARY, auto_start_request=True
-        ensures consistent reads, even if you read after an unsafe write. For
-        read preferences other than PRIMARY, there are no consistency
-        guarantees.
+        :class:`~pymongo.read_preferences.ReadPreference` PRIMARY,
+        auto_start_request=True ensures consistent reads, even if you read
+        after an unsafe write. For read preferences other than PRIMARY, there
+        are no consistency guarantees.
 
         In Python 2.6 and above, or in Python 2.5 with
         "from __future__ import with_statement", :meth:`start_request` can be

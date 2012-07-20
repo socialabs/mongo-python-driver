@@ -154,7 +154,8 @@ class Connection(common.BaseObject):
             before timing out.
           - `ssl`: If True, create the connection to the server using SSL.
           - `read_preference`: The read preference for this connection.
-            See :class:`~pymongo.ReadPreference` for available options.
+            See :class:`~pymongo.read_preferences.ReadPreference` for available
+            options.
           - `auto_start_request`: If True (the default), each thread that
             accesses this Connection has a socket allocated to it for the
             thread's lifetime.  This ensures consistent reads, even if you read

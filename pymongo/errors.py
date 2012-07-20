@@ -39,9 +39,9 @@ class AutoReconnect(ConnectionFailure):
     will continue to raise this exception until the first successful
     connection is made).
     """
-    def __init__(self, msg, errors=None):
+    def __init__(self, message='', errors=None):
         self.errors = errors or []
-        ConnectionFailure.__init__(self, msg)
+        ConnectionFailure.__init__(self, message)
 
     # TODO: include errors in __str__, not just msg?
 

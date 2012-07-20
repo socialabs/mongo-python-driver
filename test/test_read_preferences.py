@@ -13,18 +13,20 @@
 # limitations under the License.
 
 """Test the replica_set_connection module."""
+import random
 
 import sys
 import unittest
+
 sys.path[0:0] = [""]
 
-from pymongo.read_preferences import ReadPreference
+from bson.son import SON
+from pymongo.connection import Connection
+from pymongo.replica_set_connection import ReplicaSetConnection
+from pymongo.read_preferences import ReadPreference, modes
 from pymongo.errors import ConfigurationError
 
-from test.test_connection import host, port
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
-
-pair = '%s:%d' % (host, port)
 
 
 class TestReadPreferencesBase(TestConnectionReplicaSetBase):
@@ -74,6 +76,11 @@ class TestReadPreferences(TestReadPreferencesBase):
         self.assertReadsFrom('primary',
             read_preference=ReadPreference.PRIMARY)
 
+    def test_primary_with_tags(self):
+        # Tags not allowed with PRIMARY
+        self.assertRaises(ConfigurationError,
+            self._get_connection, tag_sets=[{'dc': 'ny'}])
+
     def test_primary_preferred(self):
         self.assertReadsFrom('primary',
             read_preference=ReadPreference.PRIMARY_PREFERRED)
@@ -106,16 +113,229 @@ class TestReadPreferences(TestReadPreferencesBase):
             " but didn't use %s" % not_used)
 
 
-class TestTags(TestReadPreferencesBase):
-    def test_primary(self):
-        # Tags not allowed with PRIMARY
-        self.assertRaises(ConfigurationError,
-            self._get_connection, tag_sets=[{'dc': 'ny'}])
+class ReadPrefTester(ReplicaSetConnection):
+    def __init__(self, *args, **kwargs):
+        self.has_read_from = set()
+        super(ReadPrefTester, self).__init__(*args, **kwargs)
+
+    def _ReplicaSetConnection__send_and_receive(self, member, *args, **kwargs):
+        self.has_read_from.add(member)
+        rsc = super(ReadPrefTester, self)
+        return rsc._ReplicaSetConnection__send_and_receive(
+            member, *args, **kwargs)
 
 
-class TestCommands(TestReadPreferencesBase):
-    def test_commands_and_read_preferences(self):
-        assert False, 'TODO: https://wiki.10gen.com/display/10GEN/Driver+Read+Semantics#DriverReadSemantics-Commands'
+class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
+    def setUp(self):
+        super(TestCommandAndReadPreference, self).setUp()
+        
+        # Need auto_start_request False to avoid pinning members.
+        self.c = ReadPrefTester(replicaSet=self.name, auto_start_request=False)
+
+    def tearDown(self):
+        self.c.close()
+
+        # We create a lot of collections and indexes in these tests, so drop
+        # the database
+        self._get_connection().drop_database('pymongo_test')
+        super(TestCommandAndReadPreference, self).tearDown()
+
+    def executed_on_which_member(self, connection, fn, *args, **kwargs):
+        connection.has_read_from.clear()
+        fn(*args, **kwargs)
+        self.assertEqual(1, len(connection.has_read_from))
+        member, = connection.has_read_from
+        return member
+
+    def assertExecutedOn(self, state, connection, fn, *args, **kwargs):
+        member = self.executed_on_which_member(connection, fn, *args, **kwargs)
+        if state == 'primary':
+            self.assertTrue(member.is_primary)
+        elif state == 'secondary':
+            self.assertFalse(member.is_primary)
+        else:
+            self.fail("Bad state %s" % repr(state))
+
+    def _test_fn(self, obedient, fn):
+        if not obedient:
+            for mode in modes:
+                self.c.read_preference = mode
+
+                # Run it a few times to make sure we don't just get lucky the
+                # first time.
+                for _ in range(10):
+                    self.assertExecutedOn('primary', self.c, fn)
+        else:
+            for mode, expected_state in [
+                (ReadPreference.PRIMARY, 'primary'),
+                (ReadPreference.PRIMARY_PREFERRED, 'primary'),
+                (ReadPreference.SECONDARY, 'secondary'),
+                (ReadPreference.SECONDARY_PREFERRED, 'secondary'),
+                (ReadPreference.NEAREST, 'any'),
+            ]:
+                self.c.read_preference = mode
+                for _ in range(10):
+                    if expected_state in ('primary', 'secondary'):
+                        self.assertExecutedOn(expected_state, self.c, fn)
+                    elif expected_state == 'any':
+                        used = set()
+                        for _ in range(1000):
+                            member = self.executed_on_which_member(
+                                self.c, fn)
+                            used.add(member.host)
+                            if len(used) == len(self.c.secondaries) + 1:
+                                # Success
+                                break
+
+                        unused = self.c.secondaries.union(
+                            set([self.c.primary])
+                        ).difference(used)
+                        if unused:
+                            self.fail(
+                                "Some members not used for NEAREST: %s" % (
+                                    unused))
+
+    def test_command(self):
+        # Test generic 'command' method. Some commands obey read preference,
+        # most don't.
+        # Disobedient commands, always go to primary
+        self._test_fn(False, lambda: self.c.pymongo_test.command('ping'))
+        self._test_fn(False, lambda: self.c.pymongo_test.command('buildinfo'))
+
+        # Obedient commands.
+        self._test_fn(True, lambda: self.c.pymongo_test.command('group', {
+            'ns': 'test', 'key': {'a': 1}, '$reduce': 'function(obj, prev) { }',
+            'initial': {}}))
+
+        self._test_fn(True, lambda: self.c.pymongo_test.command('dbStats'))
+
+        # collStats fails if no collection
+        self.c.pymongo_test.test.insert({}, w=self.w)
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'collStats', 'test'))
+
+        # Count
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'count', 'test'))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'count', 'test', query={'a': 1}))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('count', 'test'), ('query', {'a': 1})])))
+
+        # Distinct
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'distinct', 'test', key={'a': 1}))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'distinct', 'test', key={'a': 1}, query={'a': 1}))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('distinct', 'test'), ('key', {'a': 1}), ('query', {'a': 1})])))
+
+        # Geo stuff. Make sure a 2d index is created and replicated
+        self.c.pymongo_test.system.indexes.insert({
+            'key' : { 'location' : '2d' }, 'ns' : 'pymongo_test.test',
+            'name' : 'location_2d' }, w=self.w)
+
+        self.c.pymongo_test.system.indexes.insert(SON([
+            ('ns', 'pymongo_test.test'),
+            ('key', SON([('location', 'geoHaystack'), ('key', 1)])),
+            ('bucketSize', 100),
+            ('name', 'location_geoHaystack'),
+        ]), w=self.w)
+
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'geoNear', 'test', near=[0, 0]))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('geoNear', 'test'), ('near', [0, 0])])))
+
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'geoSearch', 'test', near=[33, 33], maxDistance=6,
+            search={'type': 'restaurant' }, limit=30))
+        
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
+            ('search', {'type': 'restaurant'}), ('limit', 30)])))
+
+        # TODO: geoWalk?
+
+    def test_map_reduce_command(self):
+        # mapreduce fails if no collection
+        self.c.pymongo_test.test.insert({}, w=self.w)
+
+        # Non-inline mapreduce always goes to primary, doesn't obey read prefs.
+        # Test with command in a SON and with kwargs
+        self._test_fn(False, lambda: self.c.pymongo_test.command(SON([
+            ('mapreduce', 'test'),
+            ('map', 'function() { }'),
+            ('reduce', 'function() { }'),
+            ('out', 'mr_out')
+        ])))
+
+        self._test_fn(False, lambda: self.c.pymongo_test.command(
+            'mapreduce', 'test', map='function() { }',
+            reduce='function() { }', out='mr_out'))
+
+        self._test_fn(False, lambda: self.c.pymongo_test.command(
+            'mapreduce', 'test', map='function() { }',
+            reduce='function() { }', out={'replace': 'some_collection'}))
+
+        # Inline mapreduce obeys read prefs
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'mapreduce', 'test', map='function() { }',
+            reduce='function() { }', out={'inline': True}))
+
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('mapreduce', 'test'),
+            ('map', 'function() { }'),
+            ('reduce', 'function() { }'),
+            ('out', {'inline': True})
+        ])))
+
+    def test_create_collection(self):
+        # Collections should be created on primary, obviously
+        self._test_fn(False, lambda: self.c.pymongo_test.command(
+            'create', 'some_collection%s' % random.randint(0, sys.maxint)))
+
+        self._test_fn(False, lambda: self.c.pymongo_test.create_collection(
+            'some_collection%s' % random.randint(0, sys.maxint)))
+
+    def test_drop_collection(self):
+        self._test_fn(False, lambda: self.c.pymongo_test.drop_collection(
+            'some_collection'))
+
+        self._test_fn(False, lambda: self.c.pymongo_test.some_collection.drop())
+
+    def test_group(self):
+        self._test_fn(True, lambda: self.c.pymongo_test.test.group(
+            {'a': 1}, {}, {}, 'function() { }'))
+
+    def test_map_reduce(self):
+        # mapreduce fails if no collection
+        self.c.pymongo_test.test.insert({}, w=self.w)
+
+        self._test_fn(False, lambda: self.c.pymongo_test.test.map_reduce(
+            'function() { }', 'function() { }', 'mr_out'))
+
+        self._test_fn(True, lambda: self.c.pymongo_test.test.map_reduce(
+            'function() { }', 'function() { }', {'inline': 1}))
+
+    def test_inline_map_reduce(self):
+        # mapreduce fails if no collection
+        self.c.pymongo_test.test.insert({}, w=self.w)
+
+        self._test_fn(True, lambda: self.c.pymongo_test.test.inline_map_reduce(
+            'function() { }', 'function() { }'))
+
+        self._test_fn(True, lambda: self.c.pymongo_test.test.inline_map_reduce(
+            'function() { }', 'function() { }', full_response=True))
+
+    def test_count(self):
+        self._test_fn(True, lambda: self.c.pymongo_test.test.count())
+        self._test_fn(True, lambda: self.c.pymongo_test.test.find().count())
+
+    def test_distinct(self):
+        self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
+        self._test_fn(True,
+            lambda: self.c.pymongo_test.test.find().distinct('a'))
 
 
 if __name__ == "__main__":

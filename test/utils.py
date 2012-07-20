@@ -72,9 +72,7 @@ def read_from_which_host(
     if isinstance(tag_sets, dict):
         tag_sets = [tag_sets]
     db.tag_sets = tag_sets or [{}]
-
-    db.secondary_acceptable_latency_ms = (
-        secondary_acceptable_latency_ms)
+    db.secondary_acceptable_latency_ms = secondary_acceptable_latency_ms
 
     cursor = db.test.find()
     try:

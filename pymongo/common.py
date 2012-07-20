@@ -83,14 +83,18 @@ def validate_int_or_basestring(option, value):
     raise TypeError("Wrong type for %s, value must be an "
                     "integer or a string" % (option,))
 
+
 def validate_positive_float(option, value):
+    """Validates that 'value' is a float, or can be converted to one, and is
+       positive.
+    """
+    err = ConfigurationError("%s must be a positive int or float" % (option,))
     try:
         value = float(value)
     except (ValueError, TypeError):
-        raise ConfigurationError("%s must be an "
-                                 "instance of int or float" % (option,))
+        raise err
     if value <= 0:
-        raise ConfigurationError("%s must be a positive float" % (option,))
+        raise err
 
     return value
 
@@ -129,9 +133,8 @@ def validate_tag_sets(dummy, value):
 
     for tags in value:
         if not isinstance(tags, dict):
-            raise ConfigurationError("Tag set %s invalid, must be a dict" % (
-                repr(tags)
-            ))
+            raise ConfigurationError(
+                "Tag set %s invalid, must be a dict" % repr(tags))
 
     return value
 
@@ -151,9 +154,11 @@ VALIDATORS = {
     'journal': validate_boolean,
     'connecttimeoutms': validate_timeout_or_none,
     'sockettimeoutms': validate_timeout_or_none,
-    'secondary_acceptable_latency_ms': validate_positive_float,
     'ssl': validate_boolean,
     'read_preference': validate_read_preference,
+    'tag_sets': validate_tag_sets,
+    'secondaryacceptablelatencyms': validate_positive_float,
+    'secondary_acceptable_latency_ms': validate_positive_float,
     'auto_start_request': validate_boolean,
     'use_greenlets': validate_boolean,
 }
@@ -194,6 +199,11 @@ class BaseObject(object):
         self.__safe = False
         self.__safe_opts = {}
         self.__set_options(options)
+        if (self.__read_pref == ReadPreference.PRIMARY
+            and self.__tag_sets != [{}]
+        ):
+            raise ConfigurationError(
+                "ReadPreference PRIMARY cannot be combined with tags")
 
     def __set_safe_option(self, option, value, check=False):
         """Validates and sets getlasterror options for this
@@ -252,7 +262,7 @@ class BaseObject(object):
     def __get_read_pref(self):
         """The read preference mode for this instance.
 
-        See :class:`~pymongo.ReadPreference` for available options.
+        See :class:`~pymongo.read_preferences.ReadPreference` for available options.
 
         .. versionadded:: 2.1
         """
@@ -264,25 +274,24 @@ class BaseObject(object):
 
     read_preference = property(__get_read_pref, __set_read_pref)
     
-    def __get_secondary_acceptable_latency_ms(self):
+    def __get_acceptable_latency(self):
         """Any replica-set member whose ping time is within
            secondary_acceptable_latency_ms of the nearest member may accept
-           reads. Default 15 milliseconds.
+           reads. Defaults to 15 milliseconds.
 
-        See :class:`~pymongo.ReadPreference`.
+        See :class:`~pymongo.read_preferences.ReadPreference`.
 
         .. versionadded:: 2.2.1+
         """
         return self.__secondary_acceptable_latency_ms
 
-    def __set_secondary_acceptable_latency_ms(self, value):
+    def __set_acceptable_latency(self, value):
         """Property setter for secondary_acceptable_latency_ms"""
         self.__secondary_acceptable_latency_ms = (validate_positive_float(
             'secondary_acceptable_latency_ms', value))
 
     secondary_acceptable_latency_ms = property(
-        __get_secondary_acceptable_latency_ms,
-        __set_secondary_acceptable_latency_ms)
+        __get_acceptable_latency, __set_acceptable_latency)
 
     def __get_tag_sets(self):
         """

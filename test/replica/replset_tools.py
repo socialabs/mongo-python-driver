@@ -120,7 +120,9 @@ def start_replica_set(members, fresh=True):
             expected_arbiters += 1
     expected_secondaries = len(members) - expected_arbiters - 1
 
-    while True:
+    # Wait for 5 minutes for replica set to come up
+    patience = 5
+    for _ in range(patience * 60 / 2):
         time.sleep(2)
         try:
             if (get_primary() and
@@ -130,6 +132,10 @@ def start_replica_set(members, fresh=True):
         except pymongo.errors.AutoReconnect:
             # Keep waiting
             pass
+    else:
+        kill_all_members()
+        raise Exception(
+            "Replica set still not initalized after %s minutes" % patience)
     return primary, set_name
 
 

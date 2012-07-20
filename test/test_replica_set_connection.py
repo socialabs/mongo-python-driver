@@ -14,6 +14,7 @@
 
 """Test the replica_set_connection module."""
 
+import copy
 import datetime
 import os
 import signal
@@ -23,6 +24,7 @@ import time
 import thread
 import traceback
 import unittest
+
 sys.path[0:0] = [""]
 
 from nose.plugins.skip import SkipTest
@@ -117,28 +119,54 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual(c.primary, self.primary)
         self.assertEqual(c.hosts, self.hosts)
         self.assertEqual(c.arbiters, self.arbiters)
-        self.assertEqual(c.read_preference, ReadPreference.PRIMARY)
         self.assertEqual(c.max_pool_size, 10)
         self.assertEqual(c.document_class, dict)
         self.assertEqual(c.tz_aware, False)
-        self.assertEqual(c.slave_okay, False)
-        self.assertEqual(c.safe, False)
+
+        # Make sure RSC's properties are copied to Database and Collection
+        for obj in c, c.pymongo_test, c.pymongo_test.test:
+            self.assertEqual(obj.read_preference, ReadPreference.PRIMARY)
+            self.assertEqual(obj.tag_sets, [{}])
+            self.assertEqual(obj.secondary_acceptable_latency_ms, 15)
+            self.assertEqual(obj.slave_okay, False)
+            self.assertEqual(obj.safe, False)
+
+        cursor = c.pymongo_test.test.find()
+        self.assertEqual(
+            ReadPreference.PRIMARY, cursor._Cursor__read_preference)
+        self.assertEqual([{}], cursor._Cursor__tag_sets)
+        self.assertEqual(15, cursor._Cursor__secondary_acceptable_latency_ms)
+        self.assertEqual(False, cursor._Cursor__slave_okay)
         c.close()
 
+        tag_sets = [{'dc': 'la', 'rack': '2'}, {'foo': 'bar'}]
         c = ReplicaSetConnection(pair, replicaSet=self.name, max_pool_size=25,
                                  document_class=SON, tz_aware=True,
                                  slaveOk=False, safe=True,
-                                 read_preference=ReadPreference.SECONDARY)
+                                 read_preference=ReadPreference.SECONDARY,
+                                 tag_sets=copy.deepcopy(tag_sets),
+                                 secondary_acceptable_latency_ms=77)
         c.admin.command('ping')
         self.assertEqual(c.primary, self.primary)
         self.assertEqual(c.hosts, self.hosts)
         self.assertEqual(c.arbiters, self.arbiters)
-        self.assertEqual(c.read_preference, ReadPreference.SECONDARY)
         self.assertEqual(c.max_pool_size, 25)
         self.assertEqual(c.document_class, SON)
         self.assertEqual(c.tz_aware, True)
-        self.assertEqual(c.slave_okay, False)
-        self.assertEqual(c.safe, True)
+
+        for obj in c, c.pymongo_test, c.pymongo_test.test:
+            self.assertEqual(obj.read_preference, ReadPreference.SECONDARY)
+            self.assertEqual(obj.tag_sets, tag_sets)
+            self.assertEqual(obj.secondary_acceptable_latency_ms, 77)
+            self.assertEqual(obj.slave_okay, False)
+            self.assertEqual(obj.safe, True)
+
+        cursor = c.pymongo_test.test.find()
+        self.assertEqual(
+            ReadPreference.SECONDARY, cursor._Cursor__read_preference)
+        self.assertEqual(tag_sets, cursor._Cursor__tag_sets)
+        self.assertEqual(77, cursor._Cursor__secondary_acceptable_latency_ms)
+        self.assertEqual(False, cursor._Cursor__slave_okay)
 
         if version.at_least(c, (1, 7, 4)):
             self.assertEqual(c.max_bson_size, 16777216)
@@ -635,6 +663,7 @@ class TestConnection(TestConnectionReplicaSetBase):
             self.assertFalse(pool.in_request())
         conn.start_request()
         self.assertTrue(conn.in_request())
+        conn.close()
 
         conn = self._get_connection(auto_start_request=False)
         self.assertFalse(conn.in_request())
@@ -642,33 +671,36 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertTrue(conn.in_request())
         conn.end_request()
         self.assertFalse(conn.in_request())
+        conn.close()
 
     def test_schedule_refresh(self):
         # Monitor thread starts waiting for _refresh_interval, 30 seconds
         conn = self._get_connection()
 
-        for _ in range(2):
-            # Reconnect if necessary
-            conn.pymongo_test.test.find_one()
+        # Reconnect if necessary
+        conn.pymongo_test.test.find_one()
 
-            secondaries = conn.secondaries
-            for secondary in secondaries:
-                conn._ReplicaSetConnection__members[secondary].up = False
+        secondaries = conn.secondaries
+        for secondary in secondaries:
+            conn._ReplicaSetConnection__members[secondary].up = False
 
-            conn._ReplicaSetConnection__members[conn.primary].up = False
+        conn._ReplicaSetConnection__members[conn.primary].up = False
 
-            # Wake up monitor thread
-            conn._ReplicaSetConnection__schedule_refresh()
-            time.sleep(5)
-            for secondary in secondaries:
-                self.assertTrue(conn._ReplicaSetConnection__members[secondary].up,
-                    "ReplicaSetConnection didn't detect secondary is up")
+        # Wake up monitor thread
+        conn._ReplicaSetConnection__schedule_refresh()
 
-            self.assertTrue(conn._ReplicaSetConnection__members[conn.primary].up,
-                "ReplicaSetConnection didn't detect primary is up")
+        # Refresh interval is 30 seconds; scheduling a refresh tells the
+        # monitor thread / greenlet to start a refresh now. We still need to
+        # sleep a few seconds for it to complete.
+        time.sleep(5)
+        for secondary in secondaries:
+            self.assertTrue(conn._ReplicaSetConnection__members[secondary].up,
+                "ReplicaSetConnection didn't detect secondary is up")
 
-            # Try it again, make sure monitor is restarted
-            conn.close()
+        self.assertTrue(conn._ReplicaSetConnection__members[conn.primary].up,
+            "ReplicaSetConnection didn't detect primary is up")
+
+        conn.close()
 
     def test_pinned_member(self):
         conn = self._get_connection(

@@ -1,6 +1,6 @@
 # Copyright 2012 10gen, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License",
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -13,8 +13,6 @@
 # limitations under the License.
 
 """Utilities for choosing which member of a replica set to read from."""
-
-# TODO: use tests from read-prefs-reference repository
 
 import random
 
@@ -64,28 +62,31 @@ class ReadPreference:
     PRIMARY = 0
     PRIMARY_PREFERRED = 1
     SECONDARY = 2
+    SECONDARY_ONLY = 2
     SECONDARY_PREFERRED = 3
     NEAREST = 4
 
 # For formatting error messages
 modes = {
-    ReadPreference.PRIMARY: 'PRIMARY',
-    ReadPreference.PRIMARY_PREFERRED: 'PRIMARY_PREFERRED',
-    ReadPreference.SECONDARY: 'SECONDARY',
+    ReadPreference.PRIMARY:             'PRIMARY',
+    ReadPreference.PRIMARY_PREFERRED:   'PRIMARY_PREFERRED',
+    ReadPreference.SECONDARY:           'SECONDARY',
     ReadPreference.SECONDARY_PREFERRED: 'SECONDARY_PREFERRED',
-    ReadPreference.NEAREST: 'NEAREST',
+    ReadPreference.NEAREST:             'NEAREST',
 }
 
-def find_primary(members):
+def select_primary(members):
     for member in members:
         if member.is_primary:
-            return member
+            if member.up:
+                return member
+            else:
+                return None
 
     return None
 
 
-# TODO: rename?
-def select_member_with_tags(members, tags, secondary_only, secondary_acceptable_latency_ms):
+def select_member_with_tags(members, tags, secondary_only, latency):
     candidates = []
 
     for candidate in members:
@@ -105,51 +106,74 @@ def select_member_with_tags(members, tags, secondary_only, secondary_acceptable_
     fastest = min([candidate.ping_time for candidate in candidates])
     near_candidates = [
         candidate for candidate in candidates
-        if candidate.ping_time - fastest < secondary_acceptable_latency_ms / 1000.]
+        if candidate.ping_time - fastest < latency / 1000.]
 
     return random.choice(near_candidates)
 
 
-def select_member(members, mode, tag_sets, secondary_acceptable_latency_ms):
-    """Return a Member or None
+def select_member(
+    members,
+    mode=ReadPreference.PRIMARY,
+    tag_sets=None,
+    latency=15
+):
+    """Return a Member or None.
     """
-    if mode == ReadPreference.PRIMARY:
+    if tag_sets is None:
+        tag_sets = [{}]
+
+    # For brevity
+    PRIMARY             = ReadPreference.PRIMARY
+    PRIMARY_PREFERRED   = ReadPreference.PRIMARY_PREFERRED
+    SECONDARY           = ReadPreference.SECONDARY
+    SECONDARY_PREFERRED = ReadPreference.SECONDARY_PREFERRED
+    NEAREST             = ReadPreference.NEAREST
+        
+    if mode == PRIMARY:
         if tag_sets != [{}]:
             raise ConfigurationError("PRIMARY cannot be combined with tags")
-        primary = find_primary(members)
-        if primary and primary.up:
-            return primary
-        else:
-            return None
+        return select_primary(members)
 
-    elif mode == ReadPreference.PRIMARY_PREFERRED:
-        candidate_primary = select_member(members, ReadPreference.PRIMARY, [{}], secondary_acceptable_latency_ms)
+    elif mode == PRIMARY_PREFERRED:
+        candidate_primary = select_member(members, PRIMARY, [{}], latency)
         if candidate_primary:
             return candidate_primary
         else:
-            return select_member(members, ReadPreference.SECONDARY, tag_sets, secondary_acceptable_latency_ms)
+            return select_member(members, SECONDARY, tag_sets, latency)
 
-    elif mode == ReadPreference.SECONDARY:
+    elif mode == SECONDARY:
         for tags in tag_sets:
-            candidate = select_member_with_tags(members, tags, True, secondary_acceptable_latency_ms)
+            candidate = select_member_with_tags(members, tags, True, latency)
             if candidate:
                 return candidate
 
         return None
 
-    elif mode == ReadPreference.SECONDARY_PREFERRED:
-        candidate_secondary = select_member(members, ReadPreference.SECONDARY, tag_sets, secondary_acceptable_latency_ms)
+    elif mode == SECONDARY_PREFERRED:
+        candidate_secondary = select_member(
+            members, SECONDARY, tag_sets, latency)
         if candidate_secondary:
             return candidate_secondary
         else:
-            return select_member(members, ReadPreference.PRIMARY, [{}], secondary_acceptable_latency_ms)
-    elif mode == ReadPreference.NEAREST:
+            return select_member(members, PRIMARY, [{}], latency)
+
+    elif mode == NEAREST:
         for tags in tag_sets:
-            candidate = select_member_with_tags(members, tags, False, secondary_acceptable_latency_ms)
+            candidate = select_member_with_tags(members, tags, False, latency)
             if candidate:
                 return candidate
 
         # Ran out of tags.
         return None
+
     else:
-        raise ConfigurationError("Invalid mode")
+        raise ConfigurationError("Invalid mode %s" % repr(mode))
+
+
+"""Commands that may be sent to replica-set secondaries, depending on
+   ReadPreference and tags. All other commands are always run on the primary.
+"""
+secondary_ok_commands = set([
+    "group", "aggregate", "collStats", "dbStats", "count", "distinct",
+    "geoNear", "geoSearch", "geoWalk", "mapreduce",
+])

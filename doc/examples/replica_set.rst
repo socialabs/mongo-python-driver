@@ -173,6 +173,8 @@ we have to change the read preference::
   >>> from pymongo import ReadPreference
   >>> db.read_preference = ReadPreference.SECONDARY
 
+TODO: huge update
+
 Now all queries will be sent to the secondary members of the set. If there are
 no secondary members the primary will be used as a fallback. If you have
 queries you would prefer to never send to the primary you can specify that

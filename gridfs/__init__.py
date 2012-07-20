@@ -27,6 +27,7 @@ from gridfs.grid_file import (GridIn,
 from pymongo import (ASCENDING,
                      DESCENDING)
 from pymongo.database import Database
+from pymongo.errors import AutoReconnect
 
 
 class GridFS(object):
@@ -54,10 +55,14 @@ class GridFS(object):
         self.__collection = database[collection]
         self.__files = self.__collection.files
         self.__chunks = self.__collection.chunks
-        if not database.slave_okay and not database.read_preference:
+        try:
             self.__chunks.ensure_index([("files_id", ASCENDING),
                                         ("n", ASCENDING)],
                                        unique=True)
+        except AutoReconnect:
+            # Either we're directly connected to a secondary or slave, or no
+            # server is available. See PYTHON-263.
+            pass
 
     def new_file(self, **kwargs):
         """Create a new file in GridFS.
@@ -158,7 +163,7 @@ class GridFS(object):
 
         :Parameters:
           - `filename`: ``"filename"`` of the file to get, or `None`
-          - `version` (optional): version of the file to get (defualts
+          - `version` (optional): version of the file to get (defaults
             to -1, the most recent version uploaded)
           - `**kwargs` (optional): find files by custom metadata.
 
@@ -168,10 +173,13 @@ class GridFS(object):
            Accept keyword arguments to find files by custom metadata.
         .. versionadded:: 1.9
         """
-        database = self.__database
-        if not database.slave_okay and not database.read_preference:
+        try:
             self.__files.ensure_index([("filename", ASCENDING),
                                        ("uploadDate", DESCENDING)])
+        except AutoReconnect:
+            # Either we're directly connected to a secondary or slave, or no
+            # server is available. See PYTHON-263.
+            pass
 
         query = kwargs
         if filename is not None:
