@@ -24,6 +24,7 @@ from replset_tools import use_greenlets
 from pymongo import (replica_set_connection,
                      ReplicaSetConnection,
                      ReadPreference)
+from pymongo.replica_set_connection import Member, Monitor
 from pymongo.connection import Connection, _partition_node
 from pymongo.errors import AutoReconnect, ConnectionFailure
 
@@ -31,7 +32,7 @@ from test import utils
 
 
 # Override default 30-second interval for faster testing
-replica_set_connection._refresh_interval = MONITOR_INTERVAL = 0.5
+Monitor._refresh_interval = MONITOR_INTERVAL = 0.5
 
 
 class TestSecondaryConnection(unittest.TestCase):
@@ -75,28 +76,6 @@ class TestSecondaryConnection(unittest.TestCase):
     def tearDown(self):
         self.c.close()
         replset_tools.kill_all_members()
-
-
-#class TestConnectWithoutPrimary(unittest.TestCase):
-#
-#    def setUp(self):
-#        members = [{}, {}]
-#        res = replset_tools.start_replica_set(members)
-#        self.seed, self.name = res
-#
-#    def test_connect_without_primary(self):
-#        replset_tools.kill_primary()
-#
-#        # Shouldn't throw error
-#        self.c = ReplicaSetConnection(
-#            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
-#
-#        secondaries = [':'.join(s) for s in c.secondaries]
-#        self.assertEqual(set(secondaries), set(replset_tools.get_secondaries()))
-#
-#    def tearDown(self):
-#        self.c.close()
-#        replset_tools.kill_all_members()
 
 
 class TestPassiveAndHidden(unittest.TestCase):
@@ -343,10 +322,10 @@ class TestReadPreference(unittest.TestCase):
         self.clear_ping_times()
 
     def set_ping_time(self, host, ping_time_seconds):
-        replica_set_connection._host_to_ping_time[host] = ping_time_seconds
+        Member._host_to_ping_time[host] = ping_time_seconds
 
     def clear_ping_times(self):
-        replica_set_connection._host_to_ping_time.clear()
+        Member._host_to_ping_time.clear()
 
     def test_read_preference(self):
         # This is long, but we put all the tests in one function to save time
@@ -597,10 +576,8 @@ if __name__ == '__main__':
         import gevent
         print('gevent version %s' % gevent.__version__)
 
-        if gevent.__version__ == '0.13.6':
+        if gevent.__version__ >= '0.13.6':
             print('method %s' % gevent.core.get_method())
-        else:
-            print(gevent.hub.get_hub())
         from gevent import monkey
         monkey.patch_socket()
         sleep = gevent.sleep

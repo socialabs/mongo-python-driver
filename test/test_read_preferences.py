@@ -21,9 +21,8 @@ import unittest
 sys.path[0:0] = [""]
 
 from bson.son import SON
-from pymongo.connection import Connection
 from pymongo.replica_set_connection import ReplicaSetConnection
-from pymongo.read_preferences import ReadPreference, modes
+from pymongo.read_preferences import ReadPreference, modes, MovingAverage
 from pymongo.errors import ConfigurationError
 
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
@@ -336,6 +335,54 @@ class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
         self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
         self._test_fn(True,
             lambda: self.c.pymongo_test.test.find().distinct('a'))
+
+
+class TestMovingAverage(unittest.TestCase):
+    def test_empty_moving_average(self):
+        avg = MovingAverage(0)
+        self.assertEqual(None, avg.get())
+        avg.update(10)
+        self.assertEqual(None, avg.get())
+
+    def test_trivial_moving_average(self):
+        avg = MovingAverage(1)
+        self.assertEqual(None, avg.get())
+        avg.update(10)
+        self.assertEqual(10, avg.get())
+        avg.update(20)
+        self.assertEqual(20, avg.get())
+        avg.update(0)
+        self.assertEqual(0, avg.get())
+
+    def test_2_sample_moving_average(self):
+        avg = MovingAverage(2)
+        self.assertEqual(None, avg.get())
+        avg.update(10)
+        self.assertEqual(10, avg.get())
+        avg.update(20)
+        self.assertEqual(15, avg.get())
+        avg.update(30)
+        self.assertEqual(25, avg.get())
+        avg.update(-100)
+        self.assertEqual(-35, avg.get())
+
+    def test_5_sample_moving_average(self):
+        avg = MovingAverage(5)
+        self.assertEqual(None, avg.get())
+        avg.update(10)
+        self.assertEqual(10, avg.get())
+        avg.update(20)
+        self.assertEqual(15, avg.get())
+        avg.update(30)
+        self.assertEqual(20, avg.get())
+        avg.update(-100)
+        self.assertEqual((10 + 20 + 30 - 100) / 4, avg.get())
+        avg.update(17)
+        self.assertEqual((10 + 20 + 30 - 100 + 17) / 5., avg.get())
+        avg.update(43)
+        self.assertEqual((20 + 30 - 100 + 17 + 43) / 5., avg.get())
+        avg.update(-1111)
+        self.assertEqual((30 - 100 + 17 + 43 - 1111) / 5., avg.get())
 
 
 if __name__ == "__main__":

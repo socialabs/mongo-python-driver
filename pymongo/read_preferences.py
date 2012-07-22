@@ -15,6 +15,7 @@
 """Utilities for choosing which member of a replica set to read from."""
 
 import random
+from collections import deque
 
 from pymongo.errors import ConfigurationError
 
@@ -103,10 +104,10 @@ def select_member_with_tags(members, tags, secondary_only, latency):
         return None
 
     # ping_time is in seconds
-    fastest = min([candidate.ping_time for candidate in candidates])
+    fastest = min([candidate.get_avg_ping_time() for candidate in candidates])
     near_candidates = [
         candidate for candidate in candidates
-        if candidate.ping_time - fastest < latency / 1000.]
+        if candidate.get_avg_ping_time() - fastest < latency / 1000.]
 
     return random.choice(near_candidates)
 
@@ -177,3 +178,24 @@ secondary_ok_commands = set([
     "group", "aggregate", "collStats", "dbStats", "count", "distinct",
     "geoNear", "geoSearch", "geoWalk", "mapreduce",
 ])
+
+
+class MovingAverage(object):
+    """Tracks a moving average. Not thread-safe.
+    """
+    def __init__(self, window_sz):
+        self.window_sz = window_sz
+        self.samples = deque()
+        self.total = 0
+
+    def update(self, sample):
+        self.samples.append(sample)
+        self.total += sample
+        if len(self.samples) > self.window_sz:
+            self.total -= self.samples.popleft()
+
+    def get(self):
+        if self.samples:
+            return self.total / float(len(self.samples))
+        else:
+            return None

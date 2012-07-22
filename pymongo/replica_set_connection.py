@@ -48,7 +48,8 @@ from pymongo import (common,
                      message,
                      pool,
                      uri_parser)
-from pymongo.read_preferences import ReadPreference, select_member, modes
+from pymongo.read_preferences import (
+    ReadPreference, select_member, modes, MovingAverage)
 from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
                             ConnectionFailure,
@@ -77,6 +78,7 @@ def _partition_node(node):
 class Monitor(object):
     """Base class for replica set monitors.
     """
+    _refresh_interval = 30
     def __init__(self, rsc, event_class):
         self.rsc = weakref.proxy(rsc, self.shutdown)
         self.event = event_class()
@@ -97,18 +99,13 @@ class Monitor(object):
         """Run until the RSC is collected or an
         unexpected error occurs.
         """
-        last_refresh_duration = 0
         while True:
-            if _refresh_interval > last_refresh_duration:
-                self.event.wait(_refresh_interval - last_refresh_duration)
+            self.event.wait(Monitor._refresh_interval)
             if self.stopped:
                 break
             self.event.clear()
             try:
-                last_refresh_duration = 0
-                start = time.time()
                 self.rsc.refresh()
-                last_refresh_duration = time.time() - start
             except AutoReconnect:
                 pass
             # RSC has been collected or there
@@ -162,9 +159,13 @@ except ImportError:
 class Member(object):
     """Represent one member of a replica set
     """
+    # For unittesting only. Use under no circumstances!
+    _host_to_ping_time = {}
+
     def __init__(self, host, ismaster_response, ping_time, pool):
         self.host = host
         self.pool = pool
+        self.ping_time = MovingAverage(5)
         self.update(ismaster_response, ping_time)
 
     def update(self, ismaster_response, ping_time):
@@ -172,18 +173,20 @@ class Member(object):
         self.max_bson_size = ismaster_response.get(
             'maxBsonObjectSize', MAX_BSON_SIZE)
         self.tags = ismaster_response.get('tags', {})
-        self.set_ping_time(ping_time)
+        self.record_ping_time(ping_time)
         self.up = True
 
-    def get_ping_time(self):
-        # Simulate ping times for unittesting
-        return _host_to_ping_time.get(self.host, self.__ping_time)
+    def get_avg_ping_time(self):
+        """Get a moving average of this member's ping times
+        """
+        if self.host in Member._host_to_ping_time:
+            # Simulate ping times for unittesting
+            return Member._host_to_ping_time[self.host]
 
-    def set_ping_time(self, ping_time):
-        # TODO: calculate moving average
-        self.__ping_time = ping_time
+        return self.ping_time.get()
 
-    ping_time = property(get_ping_time, set_ping_time)
+    def record_ping_time(self, ping_time):
+        self.ping_time.update(ping_time)
 
     def matches_mode(self, mode):
         if mode == ReadPreference.PRIMARY and not self.is_primary:
@@ -205,10 +208,15 @@ class Member(object):
 
         return True
 
+    def matches_tag_sets(self, tag_sets):
+        """Return True if this member matches any of the tag sets, e.g.
+           [{'dc': 'ny'}, {'dc': 'la'}, {}]
+        """
+        for tags in tag_sets:
+            if self.matches_tags(tags):
+                return True
 
-# For unittesting only. Use these under no circumstances!
-_host_to_ping_time = {}
-_refresh_interval = 30
+        return False
 
 
 class ReplicaSetConnection(common.BaseObject):
@@ -733,8 +741,8 @@ class ReplicaSetConnection(common.BaseObject):
                 if node in self.__members:
                     member = self.__members[node]
                     sock_info = self.__socket(member)
-                    response, _ = self.__simple_command(sock_info, 'admin',
-                                                     {'ismaster': 1})
+                    response, _ = self.__simple_command(
+                        sock_info, 'admin', {'ismaster': 1})
                     member.pool.maybe_return_socket(sock_info)
                 else:
                     response, _, _ = self.__is_master(node)
@@ -1069,9 +1077,11 @@ class ReplicaSetConnection(common.BaseObject):
 
         errors = []
         pinned_member = self.__members.get(self.__pinned_host())
-        if pinned_member and pinned_member.matches_mode(mode) and any(
-            [pinned_member.matches_tags(tags) for tags in tag_sets]
-        ) and pinned_member.up:
+        if (pinned_member
+            and pinned_member.matches_mode(mode)
+            and pinned_member.matches_tag_sets(tag_sets)
+            and pinned_member.up
+        ):
             try:
                 return (
                     pinned_member.host,

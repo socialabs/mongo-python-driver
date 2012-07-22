@@ -165,7 +165,7 @@ def get_primary():
 def get_random_secondary():
     secondaries = get_members_in_state(2)
     if len(secondaries):
-        return [secondaries[random.randrange(0, len(secondaries))]][0]
+        return random.choice(secondaries)
     return None
 
 
