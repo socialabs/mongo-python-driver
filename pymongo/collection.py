@@ -605,7 +605,7 @@ class Collection(common.BaseObject):
            version **>= 1.5.1**
            
         .. versionadded:: 2.2.1+
-           The `tag_sets` parameter.
+           The `tag_sets` and `secondary_acceptable_latency_ms` parameters.
            
         .. versionadded:: 1.11+
            The `await_data`, `partial`, and `manipulate` parameters.
@@ -939,7 +939,6 @@ class Collection(common.BaseObject):
 
         return self.__database.command("aggregate", self.__name,
                                         pipeline=pipeline,
-                                        read_preference=self.read_preference,
                                         slave_okay=self.slave_okay,
                                         _use_master=use_master)
 

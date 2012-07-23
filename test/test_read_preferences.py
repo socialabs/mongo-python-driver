@@ -26,6 +26,7 @@ from pymongo.read_preferences import ReadPreference, modes, MovingAverage
 from pymongo.errors import ConfigurationError
 
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
+from test import version
 
 
 class TestReadPreferencesBase(TestConnectionReplicaSetBase):
@@ -92,6 +93,12 @@ class TestReadPreferences(TestReadPreferencesBase):
         self.assertReadsFrom('secondary',
             read_preference=ReadPreference.SECONDARY_PREFERRED)
         
+    def test_secondary_only(self):
+        # Test deprecated mode SECONDARY_ONLY, which is now a synonym for
+        # SECONDARY
+        self.assertEqual(
+            ReadPreference.SECONDARY, ReadPreference.SECONDARY_ONLY)
+
     def test_nearest(self):
         # With high secondaryAcceptableLatencyMS, expect to read from any
         # member
@@ -254,7 +261,11 @@ class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
             ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
             ('search', {'type': 'restaurant'}), ('limit', 30)])))
 
-        # TODO: geoWalk?
+        if version.at_least(self.c, (2, 1, 1)):
+            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+                ('aggregate', 'test'),
+                ('pipeline', [])
+            ])))
 
     def test_map_reduce_command(self):
         # mapreduce fails if no collection
@@ -335,6 +346,10 @@ class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
         self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
         self._test_fn(True,
             lambda: self.c.pymongo_test.test.find().distinct('a'))
+
+    def test_aggregate(self):
+        if version.at_least(self.c, (2, 1, 1)):
+            self._test_fn(True, lambda: self.c.pymongo_test.test.aggregate([]))
 
 
 class TestMovingAverage(unittest.TestCase):

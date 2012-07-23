@@ -168,6 +168,17 @@ class TestConnection(TestConnectionReplicaSetBase):
         self.assertEqual(77, cursor._Cursor__secondary_acceptable_latency_ms)
         self.assertEqual(False, cursor._Cursor__slave_okay)
 
+        cursor = c.pymongo_test.test.find(
+            read_preference=ReadPreference.NEAREST,
+            tag_sets=[{'dc':'ny'}, {}],
+            secondary_acceptable_latency_ms=123)
+
+        self.assertEqual(
+            ReadPreference.NEAREST, cursor._Cursor__read_preference)
+        self.assertEqual([{'dc':'ny'}, {}], cursor._Cursor__tag_sets)
+        self.assertEqual(123, cursor._Cursor__secondary_acceptable_latency_ms)
+        self.assertEqual(False, cursor._Cursor__slave_okay)
+
         if version.at_least(c, (1, 7, 4)):
             self.assertEqual(c.max_bson_size, 16777216)
         else:
