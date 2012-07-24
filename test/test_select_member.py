@@ -121,7 +121,7 @@ class ModeTest(unittest.TestCase):
             else:
                 n1 += 1
 
-        self.assertAlmostEqual(n0, n1, delta=400)
+        self.assertTrue(abs(n0 - n1) <= 400)
 
 
 class TagsTest(unittest.TestCase):
