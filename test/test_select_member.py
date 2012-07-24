@@ -13,8 +13,6 @@
 # limitations under the License.
 
 """Test the read_preferences.select_member function."""
-import random
-
 import sys
 import unittest
 
@@ -164,7 +162,8 @@ class PingTest(unittest.TestCase):
         ).host for _ in range(1000))
         self.assertEqual(set([1, 2, 3]), chosen)
 
-        # member 2 is closest secondary in 'sf', so member 3 is ok but still not 4
+        # member 2 is closest secondary in 'sf', so member 3 is ok but still
+        # not 4
         chosen = set(select_member(
             members, NEAREST, tag_sets=[{'dc': 'sf'}]
         ).host for _ in range(1000))

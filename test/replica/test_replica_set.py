@@ -43,35 +43,52 @@ class TestSecondaryConnection(unittest.TestCase):
         self.seed, self.name = res
 
     def test_secondary_connection(self):
-        self.c = c = ReplicaSetConnection(
+        self.c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
-        self.assertTrue(bool(len(c.secondaries)))
-        db = c.pymongo_test
-        db.test.remove({}, safe=True, w=len(c.secondaries))
+        self.assertTrue(bool(len(self.c.secondaries)))
+        db = self.c.pymongo_test
+        db.test.remove({}, safe=True, w=len(self.c.secondaries))
 
         # Force replication...
-        w = len(c.secondaries) + 1
+        w = len(self.c.secondaries) + 1
         db.test.insert({'foo': 'bar'}, safe=True, w=w)
 
-        # Test direct connection to a secondary
-        host, port = replset_tools.get_secondaries()[0].split(':')
-        port = int(port)
+        # Test direct connection to a primary or secondary
+        primary_host, primary_port = replset_tools.get_primary().split(':')
+        primary_port = int(primary_port)
+        secondary_host, secondary_port = replset_tools.get_secondaries()[0].split(':')
+        secondary_port = int(secondary_port)
+
+        # No error
+        Connection(primary_host, primary_port, use_greenlets=use_greenlets)
+        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.PRIMARY_PREFERRED)
+        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.SECONDARY_PREFERRED)
+        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.NEAREST)
+
+        self.assertRaises(AutoReconnect,
+            Connection, primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.SECONDARY)
 
         for kwargs in [
+            {'read_preference': ReadPreference.PRIMARY_PREFERRED},
             {'read_preference': ReadPreference.SECONDARY},
             {'read_preference': ReadPreference.SECONDARY_PREFERRED},
+            {'read_preference': ReadPreference.NEAREST},
             {'slave_okay': True},
         ]:
             conn = Connection(
-                host, port, use_greenlets=use_greenlets, **kwargs)
-            self.assertEqual(host, conn.host)
-            self.assertEqual(port, conn.port)
+                secondary_host, secondary_port, use_greenlets=use_greenlets, **kwargs)
+            self.assertEqual(secondary_host, conn.host)
+            self.assertEqual(secondary_port, conn.port)
             self.assert_(conn.pymongo_test.test.find_one())
 
         # Test direct connection to an arbiter
-        host = replset_tools.get_arbiters()[0]
+        secondary_host = replset_tools.get_arbiters()[0]
         self.assertRaises(
-            ConnectionFailure, Connection, host, use_greenlets=use_greenlets)
+            ConnectionFailure, Connection, secondary_host, use_greenlets=use_greenlets)
 
     def tearDown(self):
         self.c.close()
@@ -87,10 +104,10 @@ class TestPassiveAndHidden(unittest.TestCase):
         self.seed, self.name = res
 
     def test_passive_and_hidden(self):
-        self.c = c = ReplicaSetConnection(
+        self.c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
-        db = c.pymongo_test
-        w = len(c.secondaries) + 1
+        db = self.c.pymongo_test
+        w = len(self.c.secondaries) + 1
         db.test.remove({}, safe=True, w=w)
         db.test.insert({'foo': 'bar'}, safe=True, w=w)
 
@@ -98,7 +115,7 @@ class TestPassiveAndHidden(unittest.TestCase):
         passives = [_partition_node(member) for member in passives]
         hidden = replset_tools.get_hidden_members()
         hidden = [_partition_node(member) for member in hidden]
-        self.assertEqual(c.secondaries, set(passives))
+        self.assertEqual(self.c.secondaries, set(passives))
 
         for mode in (
             ReadPreference.SECONDARY, ReadPreference.SECONDARY_PREFERRED
@@ -109,14 +126,6 @@ class TestPassiveAndHidden(unittest.TestCase):
                 cursor.next()
                 self.assertTrue(cursor._Cursor__connection_id in passives)
                 self.assertTrue(cursor._Cursor__connection_id not in hidden)
-
-        replset_tools.kill_members(replset_tools.get_passives(), 2)
-        sleep(2 * MONITOR_INTERVAL)
-        db.read_preference = ReadPreference.SECONDARY_PREFERRED
-        for _ in xrange(10):
-            cursor = db.test.find()
-            cursor.next()
-            self.assertEqual(cursor._Cursor__connection_id, c.primary)
 
     def tearDown(self):
         self.c.close()
@@ -312,12 +321,13 @@ class TestReadPreference(unittest.TestCase):
         self.other_secondary_tags = replset_tools.get_tags(other_secondary)
         self.other_secondary_dc = {'dc': self.other_secondary_tags['dc']}
 
-        self.c = c = ReplicaSetConnection(
+        self.c = ReplicaSetConnection(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
-        self.db = c.pymongo_test
-        self.w = w = len(c.secondaries) + 1
-        self.db.test.remove({}, safe=True, w=w)
-        self.db.test.insert([{'foo': i} for i in xrange(10)], safe=True, w=w)
+        self.db = self.c.pymongo_test
+        self.w = len(self.c.secondaries) + 1
+        self.db.test.remove({}, safe=True, w=self.w)
+        self.db.test.insert(
+            [{'foo': i} for i in xrange(10)], safe=True, w=self.w)
 
         self.clear_ping_times()
 
@@ -377,10 +387,10 @@ class TestReadPreference(unittest.TestCase):
         # Secondary matches but not primary, choose primary
         assertReadFrom(primary, PRIMARY_PREFERRED, self.secondary_dc)
 
-        # Chooses primary if that's the only one matching tag
+        # Chooses primary, ignoring tag sets
         assertReadFrom(primary, PRIMARY_PREFERRED, self.primary_dc)
 
-        # Chooses primary even if it doesn't match tag
+        # Chooses primary, ignoring tag sets
         assertReadFrom(primary, PRIMARY_PREFERRED, bad_tag)
         assertReadFrom(primary, PRIMARY_PREFERRED, [bad_tag, {}])
 

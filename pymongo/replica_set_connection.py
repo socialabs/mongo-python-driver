@@ -162,9 +162,9 @@ class Member(object):
     # For unittesting only. Use under no circumstances!
     _host_to_ping_time = {}
 
-    def __init__(self, host, ismaster_response, ping_time, pool):
+    def __init__(self, host, ismaster_response, ping_time, connection_pool):
         self.host = host
-        self.pool = pool
+        self.pool = connection_pool
         self.ping_time = MovingAverage(5)
         self.update(ismaster_response, ping_time)
 
@@ -651,21 +651,22 @@ class ReplicaSetConnection(common.BaseObject):
 
     def __is_master(self, host):
         """Directly call ismaster.
-           Returns (response, pool, ping_time in seconds).
+           Returns (response, connection_pool, ping_time in seconds).
         """
-        pool = self.pool_class(host, self.__max_pool_size,
-                                self.__net_timeout, self.__conn_timeout,
-                                self.__use_ssl)
-        sock_info = pool.get_socket()
+        connection_pool = self.pool_class(
+            host, self.__max_pool_size, self.__net_timeout, self.__conn_timeout,
+            self.__use_ssl)
+
+        sock_info = connection_pool.get_socket()
         try:
             response, ping_time = self.__simple_command(
                 sock_info, 'admin', {'ismaster': 1}
             )
 
-            pool.maybe_return_socket(sock_info)
-            return response, pool, ping_time
+            connection_pool.maybe_return_socket(sock_info)
+            return response, connection_pool, ping_time
         except (ConnectionFailure, socket.error):
-            pool.discard_socket(sock_info)
+            connection_pool.discard_socket(sock_info)
             raise
 
     def __update_pools(self):
@@ -684,12 +685,12 @@ class ReplicaSetConnection(common.BaseObject):
                     member.pool.maybe_return_socket(sock_info)
                     member.update(res, ping_time)
                 else:
-                    res, conn, ping_time = self.__is_master(host)
+                    res, connection_pool, ping_time = self.__is_master(host)
                     self.__members[host] = Member(
                         host=host,
                         ismaster_response=res,
                         ping_time=ping_time,
-                        pool=conn)
+                        connection_pool=connection_pool)
             except (ConnectionFailure, socket.error):
                 if member:
                     member.pool.discard_socket(sock_info)
@@ -796,12 +797,12 @@ class ReplicaSetConnection(common.BaseObject):
                     sock_info, 'admin', {'ismaster': 1}
                 )
             else:
-                res, conn, ping_time = self.__is_master(host)
+                res, connection_pool, ping_time = self.__is_master(host)
                 self.__members[host] = Member(
                     host=host,
                     ismaster_response=res,
                     ping_time=ping_time,
-                    pool=conn)
+                    connection_pool=connection_pool)
         except (ConnectionFailure, socket.error), why:
             if member:
                 member.pool.discard_socket(sock_info)
@@ -1049,13 +1050,6 @@ class ReplicaSetConnection(common.BaseObject):
         :Parameters:
           - `msg`: (request_id, data) pair making up the message to send
         """
-        # If we've disconnected since last read, trigger refresh
-        try:
-            self.__find_primary()
-        except AutoReconnect:
-            # We'll throw an error later
-            pass
-
         tag_sets = kwargs.get('tag_sets', [{}])
         mode = kwargs.get('read_preference', ReadPreference.PRIMARY)
         if _must_use_master:

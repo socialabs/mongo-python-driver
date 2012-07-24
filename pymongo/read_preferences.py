@@ -173,8 +173,8 @@ def select_member(
    ReadPreference and tags. All other commands are always run on the primary.
 """
 secondary_ok_commands = set([
-    "group", "aggregate", "collStats", "dbStats", "count", "distinct",
-    "geoNear", "geoSearch", "geoWalk", "mapreduce",
+    "group", "aggregate", "collstats", "dbstats", "count", "distinct",
+    "geonear", "geosearch", "geowalk", "mapreduce",
 ])
 
 

@@ -534,7 +534,8 @@ class Cursor(object):
 
         With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
-        if `read_preference` is not :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
+        if `read_preference` is
+        not :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
         (deprecated) `slave_okay` is `True` the distinct command will be sent
         to a secondary or slave.
 
