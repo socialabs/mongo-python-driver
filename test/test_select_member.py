@@ -31,7 +31,7 @@ def make_member(state, tags=None, ping_time=0, up=True, host=None):
             'tags': tags or {},
         },
         ping_time=ping_time / 1000.0,
-        pool=None)
+        connection_pool=None)
     
     m.up = up
     return m
