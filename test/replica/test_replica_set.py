@@ -134,6 +134,15 @@ class TestPassiveAndHidden(unittest.TestCase):
                 self.assertTrue(cursor._Cursor__connection_id in passives)
                 self.assertTrue(cursor._Cursor__connection_id not in hidden)
 
+        replset_tools.kill_members(replset_tools.get_passives(), 2)
+        sleep(2 * MONITOR_INTERVAL)
+        db.read_preference = ReadPreference.SECONDARY_PREFERRED
+
+        for _ in xrange(10):
+            cursor = db.test.find()
+            cursor.next()
+            self.assertEqual(cursor._Cursor__connection_id, self.c.primary)
+
     def tearDown(self):
         self.c.close()
         replset_tools.kill_all_members()
@@ -207,6 +216,10 @@ class TestHealthMonitor(unittest.TestCase):
 
         replset_tools.stepdown_primary()
         self.assertTrue(primary_changed())
+
+        # There can be a delay between finding the primary and updating
+        # secondaries
+        sleep(5)
         self.assertNotEqual(secondaries, c.secondaries)
 
     def tearDown(self):

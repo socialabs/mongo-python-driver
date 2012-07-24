@@ -261,7 +261,7 @@ class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
             ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
             ('search', {'type': 'restaurant'}), ('limit', 30)])))
 
-        if version.at_least(self.c, (2, 1, 1)):
+        if version.at_least(self.c, (2, 1, 0)):
             self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
                 ('aggregate', 'test'),
                 ('pipeline', [])
@@ -348,7 +348,7 @@ class TestCommandAndReadPreference(TestConnectionReplicaSetBase):
             lambda: self.c.pymongo_test.test.find().distinct('a'))
 
     def test_aggregate(self):
-        if version.at_least(self.c, (2, 1, 1)):
+        if version.at_least(self.c, (2, 1, 0)):
             self._test_fn(True, lambda: self.c.pymongo_test.test.aggregate([]))
 
 
