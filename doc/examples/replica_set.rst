@@ -156,8 +156,8 @@ ReplicaSetConnection
 --------------------
 
 Using a :class:`~pymongo.replica_set_connection.ReplicaSetConnection` instead
-of a simple :meth:`~pymongo.connection.Connection` offers two key features:
-secondary reads and replica-set health monitoring. To connect using
+of a simple :class:`~pymongo.connection.Connection` offers two key features:
+secondary reads and replica set health monitoring. To connect using
 `ReplicaSetConnection` just provide a host:port pair and the name of the
 replica set::
 
@@ -214,26 +214,28 @@ and **secondary_acceptable_latency_ms**.
 
 **tag_sets**:
 
-Replica-set members can be
-`tagged <http://www.mongodb.org/display/DOCS/Data+Center+Awareness>`_
-according to any criteria you choose. By default, ReplicaSetConnection ignores
-tags when choosing a member to read from, but it can be configured with the
-``tag_sets`` parameter:
+Replica-set members can be `tagged
+<http://www.mongodb.org/display/DOCS/Data+Center+Awareness>`_ according to any
+criteria you choose. By default, ReplicaSetConnection ignores tags when
+choosing a member to read from, but it can be configured with the ``tag_sets``
+parameter. ``tag_sets`` must be a list of dictionaries, each dict providing tag
+values that the replica set member must match. ReplicaSetConnection tries each
+set of tags in turn until it finds a set of tags with at least one matching
+member. For example, to prefer reads from the New York data center, but fall
+back to the San Francisco data center, tag your replica set members according
+to their location and create a ReplicaSetConnection like so:
 
-  >>> db = ReplicaSetConnection(
+  >>> rsc = ReplicaSetConnection(
   ...     "morton.local:27017",
   ...     replicaSet='foo'
   ...     read_preference=ReadPreference.SECONDARY,
-  ...     tag_sets=[{'dc': 'ny'}]
-  ... ).test
+  ...     tag_sets=[{'dc': 'ny'}, {'dc': 'sf'}]
+  ... )
 
-In this case, ReplicaSetConnection will read from secondaries whose ``dc`` tag
-has the value ``"ny"``, and raise :class:`~pymongo.errors.AutoReconnect` if
-none is available. To specify a priority-order for tag sets, provide a list of
-tag sets: ``[{'dc': 'ny'}, {'dc': 'la'}, {}]``. A final, empty tag set, ``{}``,
-means "read from any member that matches the mode, ignoring tags."
-ReplicaSetConnection tries each set of tags in turn until it finds a set of
-tags with at least one matching member.
+ReplicaSetConnection tries to find secondaries in New York, then San Francisco,
+and raises :class:`~pymongo.errors.AutoReconnect` if none are available. As an
+additional fallback, specify a final, empty tag set, ``{}``, which means "read
+from any member that matches the mode, ignoring tags."
 
 **secondary_acceptable_latency_ms**:
 
@@ -249,7 +251,7 @@ ping time.
 Health Monitoring
 '''''''''''''''''
 
-When ReplicaSetConnection is initialized it launches a background thread to
+When ReplicaSetConnection is initialized it launches a background task to
 monitor the replica set for changes in:
 
 * Health: detect when a member goes down or comes up, or if a different member
@@ -262,4 +264,4 @@ members as the state of the replica set changes.
 
 It is critical to call
 :meth:`~pymongo.replica_set_connection.ReplicaSetConnection.close` to terminate
-the monitoring thread before your process exits.
+the monitoring task before your process exits.
