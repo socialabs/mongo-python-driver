@@ -197,3 +197,12 @@ class MovingAverage(object):
             return self.total / float(len(self.samples))
         else:
             return None
+
+def mongos_mode(mode):
+    return {
+        ReadPreference.PRIMARY:             'primary',
+        ReadPreference.PRIMARY_PREFERRED:   'primaryPreferred',
+        ReadPreference.SECONDARY:           'secondary',
+        ReadPreference.SECONDARY_PREFERRED: 'secondaryPreferred',
+        ReadPreference.NEAREST:             'nearest',
+    }[mode]

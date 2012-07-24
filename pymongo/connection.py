@@ -230,6 +230,7 @@ class Connection(common.BaseObject):
         self.__host = None
         self.__port = None
         self.__is_primary = False
+        self.__is_mongos = False
 
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
@@ -437,6 +438,14 @@ class Connection(common.BaseObject):
         return self.__is_primary
 
     @property
+    def is_mongos(self):
+        """If this Connection is connected to mongos.
+
+        .. versionadded:: 2.2.1+
+        """
+        return self.__is_mongos
+
+    @property
     def max_pool_size(self):
         """The maximum pool size limit set for this connection.
 
@@ -518,7 +527,7 @@ class Connection(common.BaseObject):
 
     def __try_node(self, node):
         """Try to connect to this node and see if it works
-        for our connection type. Returns ((host, port), is_primary).
+        for our connection type. Returns ((host, port), is_primary, is_mongos).
 
         :Parameters:
          - `node`: The (host, port) pair to try.
@@ -550,7 +559,7 @@ class Connection(common.BaseObject):
                 # TODO: Rework this for PYTHON-368 (mongos high availability).
                 if not self.__nodes:
                     self.__nodes = set([node])
-                return node, True
+                return node, True, response.get('msg', '') == 'isdbgrid'
             elif "primary" in response:
                 candidate = _partition_node(response["primary"])
                 return self.__try_node(candidate)
@@ -561,7 +570,7 @@ class Connection(common.BaseObject):
         # Direct connection
         if response.get("arbiterOnly", False):
             raise ConfigurationError("%s:%d is an arbiter" % node)
-        return node, response['ismaster']
+        return node, response['ismaster'], response.get('msg', '') == 'isdbgrid'
 
     def __find_node(self, seeds=None):
         """Find a host, port pair suitable for our connection type.
@@ -589,16 +598,18 @@ class Connection(common.BaseObject):
         candidates = seeds or self.__nodes.copy()
         for candidate in candidates:
             try:
-                node, is_primary = self.__try_node(candidate)
+                node, is_primary, is_mongos = self.__try_node(candidate)
                 self.__is_primary = is_primary
+                self.__is_mongos = is_mongos
                 return node
             except Exception, why:
                 errors.append(str(why))
         # Try any hosts we discovered that were not in the seed list.
         for candidate in self.__nodes - candidates:
             try:
-                node, is_primary = self.__try_node(candidate)
+                node, is_primary, is_mongos = self.__try_node(candidate)
                 self.__is_primary = is_primary
+                self.__is_mongos = is_mongos
                 return node
             except Exception, why:
                 errors.append(str(why))

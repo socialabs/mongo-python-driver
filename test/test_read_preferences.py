@@ -26,7 +26,8 @@ from pymongo.read_preferences import ReadPreference, modes, MovingAverage
 from pymongo.errors import ConfigurationError
 
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
-from test import version
+from test.test_connection import get_connection
+from test import version, utils
 
 
 class TestReadPreferencesBase(TestConnectionReplicaSetBase):
@@ -398,6 +399,68 @@ class TestMovingAverage(unittest.TestCase):
         self.assertEqual((20 + 30 - 100 + 17 + 43) / 5., avg.get())
         avg.update(-1111)
         self.assertEqual((30 - 100 + 17 + 43 - 1111) / 5., avg.get())
+
+
+class TestMongosConnection(unittest.TestCase):
+    def test_mongos_connection(self):
+        c = get_connection()
+        is_mongos = utils.is_mongos(c)
+
+        # Test default mode, PRIMARY
+        c = get_connection()
+        cursor = c.pymongo_test.test.find()
+        if is_mongos:
+            self.assertEqual(
+                {'mode': 'primary'},
+                cursor._Cursor__query_spec().get('$readPreference')
+            )
+        else:
+            self.assertFalse(
+                '$readPreference' in cursor._Cursor__query_spec())
+
+        # Test non-PRIMARY modes which can be combined with tags
+        for mode, mongos_mode in (
+            (ReadPreference.PRIMARY_PREFERRED, 'primaryPreferred'),
+            (ReadPreference.SECONDARY, 'secondary'),
+            (ReadPreference.SECONDARY_PREFERRED, 'secondaryPreferred'),
+            (ReadPreference.NEAREST, 'nearest'),
+        ):
+            for tag_sets in (
+                None, [{}]
+            ):
+                c = get_connection(
+                    read_preference=mode,
+                    tag_sets=tag_sets)
+
+                self.assertEqual(is_mongos, c.is_mongos)
+                cursor = c.pymongo_test.test.find()
+                if is_mongos:
+                    self.assertEqual(
+                        {'mode': mongos_mode},
+                        cursor._Cursor__query_spec().get('$readPreference')
+                    )
+                else:
+                    self.assertFalse(
+                        '$readPreference' in cursor._Cursor__query_spec())
+
+            for tag_sets in (
+                [{'dc': 'la'}],
+                [{'dc': 'la'}, {'dc': 'sf'}],
+                [{'dc': 'la'}, {'dc': 'sf'}, {}],
+            ):
+                c = get_connection(
+                    read_preference=mode,
+                    tag_sets=tag_sets)
+
+                self.assertEqual(is_mongos, c.is_mongos)
+                cursor = c.pymongo_test.test.find()
+                if is_mongos:
+                    self.assertEqual(
+                        {'mode': mongos_mode, 'tags': tag_sets},
+                        cursor._Cursor__query_spec().get('$readPreference'))
+                else:
+                    self.assertFalse(
+                        '$readPreference' in cursor._Cursor__query_spec())
 
 
 if __name__ == "__main__":

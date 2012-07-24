@@ -584,6 +584,14 @@ class ReplicaSetConnection(common.BaseObject):
         return self.__arbiters
 
     @property
+    def is_mongos(self):
+        """If this ReplicaSetConnection is connected to mongos (always False)
+
+        .. versionadded:: 2.2.1+
+        """
+        return False
+
+    @property
     def max_pool_size(self):
         """The maximum pool size limit set for this connection.
         """

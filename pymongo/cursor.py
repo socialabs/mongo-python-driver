@@ -16,7 +16,7 @@
 
 from bson.code import Code
 from bson.son import SON
-from pymongo import helpers, message
+from pymongo import helpers, message, read_preferences
 from pymongo.read_preferences import ReadPreference
 from pymongo.errors import (InvalidOperation,
                             AutoReconnect)
@@ -222,6 +222,14 @@ class Cursor(object):
             operators["$snapshot"] = True
         if self.__max_scan:
             operators["$maxScan"] = self.__max_scan
+        if self.__collection.database.connection.is_mongos:
+            read_pref = {
+                'mode': read_preferences.mongos_mode(self.__read_preference)}
+
+            if self.__tag_sets and self.__tag_sets != [{}]:
+                read_pref['tags'] = self.__tag_sets
+
+            operators['$readPreference'] = read_pref
 
         if operators:
             # Make a shallow copy so we can cleanly rewind or clone.

@@ -85,6 +85,14 @@ class MasterSlaveConnection(BaseObject):
     def slaves(self):
         return self.__slaves
 
+    @property
+    def is_mongos(self):
+        """If this MasterSlaveConnection is connected to mongos (always False)
+
+        .. versionadded:: 2.2.1+
+        """
+        return False
+
     def get_document_class(self):
         return self.__document_class
 
