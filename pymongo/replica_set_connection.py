@@ -1050,6 +1050,14 @@ class ReplicaSetConnection(common.BaseObject):
         :Parameters:
           - `msg`: (request_id, data) pair making up the message to send
         """
+
+        # If we've disconnected since last read, trigger refresh
+        try:
+            self.__find_primary()
+        except AutoReconnect:
+            # We'll throw an error later
+            pass
+
         tag_sets = kwargs.get('tag_sets', [{}])
         mode = kwargs.get('read_preference', ReadPreference.PRIMARY)
         if _must_use_master:
