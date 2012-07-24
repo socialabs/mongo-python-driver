@@ -55,14 +55,11 @@ class GridFS(object):
         self.__collection = database[collection]
         self.__files = self.__collection.files
         self.__chunks = self.__collection.chunks
-        try:
+        connection = database.connection
+        if not hasattr(connection, 'is_primary') or connection.is_primary:
             self.__chunks.ensure_index([("files_id", ASCENDING),
                                         ("n", ASCENDING)],
                                        unique=True)
-        except AutoReconnect:
-            # Either we're directly connected to a secondary or slave, or no
-            # server is available. See PYTHON-263.
-            pass
 
     def new_file(self, **kwargs):
         """Create a new file in GridFS.
@@ -173,13 +170,10 @@ class GridFS(object):
            Accept keyword arguments to find files by custom metadata.
         .. versionadded:: 1.9
         """
-        try:
+        connection = self.__database.connection
+        if not hasattr(connection, 'is_primary') or connection.is_primary:
             self.__files.ensure_index([("filename", ASCENDING),
                                        ("uploadDate", DESCENDING)])
-        except AutoReconnect:
-            # Either we're directly connected to a secondary or slave, or no
-            # server is available. See PYTHON-263.
-            pass
 
         query = kwargs
         if filename is not None:

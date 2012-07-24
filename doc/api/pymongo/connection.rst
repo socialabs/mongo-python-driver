@@ -17,6 +17,7 @@
 
       .. autoattribute:: host
       .. autoattribute:: port
+      .. autoattribute:: is_primary
       .. autoattribute:: nodes
       .. autoattribute:: max_pool_size
       .. autoattribute:: document_class

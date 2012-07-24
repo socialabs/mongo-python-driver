@@ -229,6 +229,7 @@ class Connection(common.BaseObject):
         self.__nodes = seeds
         self.__host = None
         self.__port = None
+        self.__is_primary = False
 
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
@@ -427,6 +428,15 @@ class Connection(common.BaseObject):
         return self.__port
 
     @property
+    def is_primary(self):
+        """If this Connection is connected to a replica-set primary, or the
+           master of a master-slave set.
+
+        .. versionadded:: 2.2.1+
+        """
+        return self.__is_primary
+
+    @property
     def max_pool_size(self):
         """The maximum pool size limit set for this connection.
 
@@ -508,7 +518,7 @@ class Connection(common.BaseObject):
 
     def __try_node(self, node):
         """Try to connect to this node and see if it works
-        for our connection type.
+        for our connection type. Returns ((host, port), is_primary).
 
         :Parameters:
          - `node`: The (host, port) pair to try.
@@ -540,7 +550,7 @@ class Connection(common.BaseObject):
                 # TODO: Rework this for PYTHON-368 (mongos high availability).
                 if not self.__nodes:
                     self.__nodes = set([node])
-                return node
+                return node, True
             elif "primary" in response:
                 candidate = _partition_node(response["primary"])
                 return self.__try_node(candidate)
@@ -551,7 +561,7 @@ class Connection(common.BaseObject):
         # Direct connection
         if response.get("arbiterOnly", False):
             raise ConfigurationError("%s:%d is an arbiter" % node)
-        return node
+        return node, response['ismaster']
 
     def __find_node(self, seeds=None):
         """Find a host, port pair suitable for our connection type.
@@ -571,24 +581,25 @@ class Connection(common.BaseObject):
         In either case a connection to an arbiter will never succeed.
 
         Sets __host and __port so that :attr:`host` and :attr:`port`
-        will return the address of the connected host.
+        will return the address of the connected host. Sets __is_primary to
+        True if this is a primary or master, else False.
         """
         errors = []
         # self.__nodes may change size as we iterate.
         candidates = seeds or self.__nodes.copy()
         for candidate in candidates:
             try:
-                node = self.__try_node(candidate)
-                if node:
-                    return node
+                node, is_primary = self.__try_node(candidate)
+                self.__is_primary = is_primary
+                return node
             except Exception, why:
                 errors.append(str(why))
         # Try any hosts we discovered that were not in the seed list.
         for candidate in self.__nodes - candidates:
             try:
-                node = self.__try_node(candidate)
-                if node:
-                    return node
+                node, is_primary = self.__try_node(candidate)
+                self.__is_primary = is_primary
+                return node
             except Exception, why:
                 errors.append(str(why))
         # Couldn't find a suitable host.

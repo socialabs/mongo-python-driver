@@ -59,18 +59,24 @@ class TestSecondaryConnection(unittest.TestCase):
         secondary_host, secondary_port = replset_tools.get_secondaries()[0].split(':')
         secondary_port = int(secondary_port)
 
-        # No error
-        Connection(primary_host, primary_port, use_greenlets=use_greenlets)
-        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
-            read_preference=ReadPreference.PRIMARY_PREFERRED)
-        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
-            read_preference=ReadPreference.SECONDARY_PREFERRED)
-        Connection(primary_host, primary_port, use_greenlets=use_greenlets,
-            read_preference=ReadPreference.NEAREST)
+        self.assertTrue(Connection(
+            primary_host, primary_port, use_greenlets=use_greenlets).is_primary)
 
-        self.assertRaises(AutoReconnect,
-            Connection, primary_host, primary_port, use_greenlets=use_greenlets,
-            read_preference=ReadPreference.SECONDARY)
+        self.assertTrue(Connection(
+            primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.PRIMARY_PREFERRED).is_primary)
+
+        self.assertTrue(Connection(
+            primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.SECONDARY_PREFERRED).is_primary)
+
+        self.assertTrue(Connection(
+            primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.NEAREST).is_primary)
+
+        self.assertTrue(Connection(
+            primary_host, primary_port, use_greenlets=use_greenlets,
+            read_preference=ReadPreference.SECONDARY).is_primary)
 
         for kwargs in [
             {'read_preference': ReadPreference.PRIMARY_PREFERRED},
@@ -83,6 +89,7 @@ class TestSecondaryConnection(unittest.TestCase):
                 secondary_host, secondary_port, use_greenlets=use_greenlets, **kwargs)
             self.assertEqual(secondary_host, conn.host)
             self.assertEqual(secondary_port, conn.port)
+            self.assertFalse(conn.is_primary)
             self.assert_(conn.pymongo_test.test.find_one())
 
         # Test direct connection to an arbiter
