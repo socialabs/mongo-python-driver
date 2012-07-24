@@ -21,43 +21,41 @@ from pymongo.errors import ConfigurationError
 
 
 class ReadPreference:
-    """An enum that defines the read preferences supported by PyMongo.
+    """An enum that defines the read preferences supported by PyMongo. Used in
+    three cases:
 
-    TODO: update
-    +----------------------+--------------------------------------------------+
-    |    Connection type   |                 Read Preference                  |
-    +======================+================+================+================+
-    |                      |`PRIMARY`       |`SECONDARY`     |`SECONDARY_ONLY`|
-    +----------------------+----------------+----------------+----------------+
-    |Connection to a single|Queries are     |Queries are     |Same as         |
-    |host.                 |allowed if the  |allowed if the  |`SECONDARY`     |
-    |                      |connection is to|connection is to|                |
-    |                      |the replica set |the replica set |                |
-    |                      |primary.        |primary or a    |                |
-    |                      |                |secondary.      |                |
-    +----------------------+----------------+----------------+----------------+
-    |Connection to a       |Queries are sent|Queries are     |Same as         |
-    |mongos.               |to the primary  |distributed     |`SECONDARY`     |
-    |                      |of a shard.     |among shard     |                |
-    |                      |                |secondaries.    |                |
-    |                      |                |Queries are sent|                |
-    |                      |                |to the primary  |                |
-    |                      |                |if no           |                |
-    |                      |                |secondaries are |                |
-    |                      |                |available.      |                |
-    |                      |                |                |                |
-    +----------------------+----------------+----------------+----------------+
-    |ReplicaSetConnection  |Queries are sent|Queries are     |Queries are     |
-    |                      |to the primary  |distributed     |never sent to   |
-    |                      |of the replica  |among replica   |the replica set |
-    |                      |set.            |set secondaries.|primary. An     |
-    |                      |                |Queries are sent|exception is    |
-    |                      |                |to the primary  |raised if no    |
-    |                      |                |if no           |secondary is    |
-    |                      |                |secondaries are |available.      |
-    |                      |                |available.      |                |
-    |                      |                |                |                |
-    +----------------------+----------------+----------------+----------------+
+    :class:`~pymongo.connection.Connection` to a single host:
+
+    * `PRIMARY`: Queries are allowed if the connection is to the replica set
+      primary.
+    * `PRIMARY_PREFERRED`: Queries are allowed if the connection is to the
+      primary or a secondary.
+    * `SECONDARY`: Queries are allowed if the connection is to a secondary.
+    * `SECONDARY_PREFERRED`: Same as `PRIMARY_PREFERRED`.
+    * `NEAREST`: Same as `PRIMARY_PREFERRED`.
+
+    :class:`~pymongo.connection.Connection` to a mongos, with a sharded cluster
+    of replica sets:
+
+    * `PRIMARY`: Queries are sent to the primary of a shard.
+    * `PRIMARY_PREFERRED`: Queries are sent to the primary if available,
+      otherwise a secondary.
+    * `SECONDARY`: Queries are distributed among shard secondaries. An error
+      is raised if no secondaries are available.
+    * `SECONDARY_PREFERRED`: Queries are distributed among shard secondaries,
+      or the primary if no secondary is available.
+    * `NEAREST`: Queries are distributed among all members of a shard.
+
+    :class:`~pymongo.replica_set_connection.ReplicaSetConnection`:
+
+    * `PRIMARY`: Queries are sent to the primary of the replica set.
+    * `PRIMARY_PREFERRED`: Queries are sent to the primary if available,
+      otherwise a secondary.
+    * `SECONDARY`: Queries are distributed among secondaries. An error
+      is raised if no secondaries are available.
+    * `SECONDARY_PREFERRED`: Queries are distributed among secondaries,
+      or the primary if no secondary is available.
+    * `NEAREST`: Queries are distributed among all members.
     """
 
     PRIMARY = 0

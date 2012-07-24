@@ -293,7 +293,12 @@ class ReplicaSetConnection(common.BaseObject):
           - `ssl`: If True, create the connection to the servers using SSL.
           - `read_preference`: The read preference for this connection.
             See :class:`~pymongo.read_preferences.ReadPreference` for available
-          - `tag_sets`: TODO: doc
+          - `tag_sets`: Read from replica-set members with these tags.
+            To specify a priority-order for tag sets, provide a list of
+            tag sets: ``[{'dc': 'ny'}, {'dc': 'la'}, {}]``. A final, empty tag
+            set, ``{}``, means "read from any member that matches the mode,
+            ignoring tags." ReplicaSetConnection tries each set of tags in turn
+            until it finds a set of tags with at least one matching member.
           - `secondary_acceptable_latency_ms`: Any replica-set member whose
             ping time is within secondary_acceptable_latency_ms of the nearest
             member may accept reads. Default 15 milliseconds.
@@ -697,7 +702,6 @@ class ReplicaSetConnection(common.BaseObject):
             elif res['ismaster']:
                 primary = host
 
-        # TODO lock from here to end?
         if primary != self.__writer:
             self.__reset_pinned_hosts()
 
@@ -1026,7 +1030,8 @@ class ReplicaSetConnection(common.BaseObject):
             raise
 
     def __try_read(self, member, msg, **kwargs):
-        """TODO: doc
+        """Attempt a read from a member; on failure mark the member "down" and
+           wake up the monitor thread to refresh as soon as possible.
         """
         try:
             return self.__send_and_receive(member, msg, **kwargs)
@@ -1096,7 +1101,6 @@ class ReplicaSetConnection(common.BaseObject):
         # No pinned member, or pinned member down or doesn't match read pref
         self.__unpin_host()
 
-        # TODO: lock?
         members = self.__members.copy().values()
 
         while len(errors) < MAX_RETRY:

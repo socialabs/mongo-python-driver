@@ -116,7 +116,6 @@ def validate_read_preference(dummy, value):
     return value
 
 
-# TODO: test
 def validate_tag_sets(dummy, value):
     """Validate tag sets for a ReplicaSetConnection.
     """
@@ -294,8 +293,15 @@ class BaseObject(object):
         __get_acceptable_latency, __set_acceptable_latency)
 
     def __get_tag_sets(self):
-        """
-        # TODO: docstring
+        """Replica-set members can be
+           `tagged <http://www.mongodb.org/display/DOCS/Data+Center+Awareness>`_.
+           Set ``tag_sets`` to a list of dictionaries like [{'dc': 'ny'}] to
+           read only from members whose ``dc`` tag has the value ``"ny"``.
+           To specify a priority-order for tag sets, provide a list of
+           tag sets: ``[{'dc': 'ny'}, {'dc': 'la'}, {}]``. A final, empty tag
+           set, ``{}``, means "read from any member that matches the mode,
+           ignoring tags." ReplicaSetConnection tries each set of tags in turn
+           until it finds a set of tags with at least one matching member.
 
         .. versionadded:: 2.2.1+
         """

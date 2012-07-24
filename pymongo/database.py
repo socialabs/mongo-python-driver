@@ -320,7 +320,12 @@ class Database(common.BaseObject):
           - `read_preference`: The read preference for this connection.
             See :class:`~pymongo.read_preferences.ReadPreference` for available
             options.
-          - `tag_sets`: TODO: doc
+          - `tag_sets`: Read from replica-set members with these tags.
+            To specify a priority-order for tag sets, provide a list of
+            tag sets: ``[{'dc': 'ny'}, {'dc': 'la'}, {}]``. A final, empty tag
+            set, ``{}``, means "read from any member that matches the mode,
+            ignoring tags." ReplicaSetConnection tries each set of tags in turn
+            until it finds a set of tags with at least one matching member.
           - `secondary_acceptable_latency_ms`: Any replica-set member whose
             ping time is within secondary_acceptable_latency_ms of the nearest
             member may accept reads. Default 15 milliseconds.

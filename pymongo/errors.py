@@ -43,8 +43,6 @@ class AutoReconnect(ConnectionFailure):
         self.errors = errors or []
         ConnectionFailure.__init__(self, message)
 
-    # TODO: include errors in __str__, not just msg?
-
 
 class ConfigurationError(PyMongoError):
     """Raised when something is incorrectly configured.
