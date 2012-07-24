@@ -354,9 +354,9 @@ class TestGridfsReplicaSet(TestConnectionReplicaSetBase):
 
         try:
             fs = gridfs.GridFS(rsc.pymongo_test)
-            oid = fs.put(b'foo')
+            oid = fs.put(b('foo'))
             content = fs.get(oid).read()
-            self.assertEqual(b'foo', content)
+            self.assertEqual(b('foo'), content)
         finally:
             rsc.close()
 
@@ -378,12 +378,12 @@ class TestGridfsReplicaSet(TestConnectionReplicaSetBase):
             fs = gridfs.GridFS(secondary_connection.pymongo_test)
 
             # This won't detect secondary, raises error
-            self.assertRaises(AutoReconnect, fs.put, b'foo')
+            self.assertRaises(AutoReconnect, fs.put, b('foo'))
 
     def tearDown(self):
         rsc = self._get_connection()
-        rsc.pymongo_test.drop_collection('fs.files')
-        rsc.pymongo_test.drop_collection('fs.chunks')
+        rsc.pymongo_test.drop_collection(b('fs.files'))
+        rsc.pymongo_test.drop_collection(b('fs.chunks'))
         rsc.close()
 
 
