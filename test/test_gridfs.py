@@ -382,8 +382,8 @@ class TestGridfsReplicaSet(TestConnectionReplicaSetBase):
 
     def tearDown(self):
         rsc = self._get_connection()
-        rsc.pymongo_test.drop_collection(b('fs.files'))
-        rsc.pymongo_test.drop_collection(b('fs.chunks'))
+        rsc.pymongo_test.drop_collection('fs.files')
+        rsc.pymongo_test.drop_collection('fs.chunks')
         rsc.close()
 
 
