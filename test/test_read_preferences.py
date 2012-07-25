@@ -407,7 +407,6 @@ class TestMongosConnection(unittest.TestCase):
         is_mongos = utils.is_mongos(c)
 
         # Test default mode, PRIMARY
-        c = get_connection()
         cursor = c.pymongo_test.test.find()
         if is_mongos:
             self.assertEqual(

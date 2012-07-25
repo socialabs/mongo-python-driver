@@ -430,8 +430,8 @@ class Connection(common.BaseObject):
 
     @property
     def is_primary(self):
-        """If this Connection is connected to a replica-set primary, or the
-           master of a master-slave set.
+        """If this Connection is connected to a standalone, a replica-set
+           primary, or the master of a master-slave set.
 
         .. versionadded:: 2.2.1+
         """
