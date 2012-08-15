@@ -1345,10 +1345,6 @@ class MotorCursor(MotorBase):
         if self.alive and self.cursor_id:
             self.close()
 
-# TODO: doc all these three gen tasks, and
-#   consider if there are additional convenience methods possible. Lots of
-#   examples. Link to tornado gen docs.
-# TODO: some way to generate docs even without Tornado installed?
 if requirements_satisfied:
     class Op(gen.Task):
         def __init__(self, func, *args, **kwargs):

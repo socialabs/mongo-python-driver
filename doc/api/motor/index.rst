@@ -24,3 +24,4 @@ Classes
    motor_database
    motor_collection
    motor_cursor
+   generator_interface

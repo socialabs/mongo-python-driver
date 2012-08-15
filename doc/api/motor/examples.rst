@@ -110,8 +110,10 @@ It is extremely important to use :meth:`~motor.MotorCursor.limit` with
 :meth:`~motor.MotorCursor.to_list` to avoid buffering an unbounded number of
 documents in memory.
 
-Tornado's generator interface
------------------------------
+.. _generator-interface-example:
+
+Using Tornado's generator interface
+-----------------------------------
 
 Motor provides :class:`~motor.Op`, :class:`~motor.WaitOp`, and
 :class:`~motor.WaitAllOps` for convenient use with the
@@ -120,19 +122,51 @@ use async methods without explicit callbacks:
 
 .. code-block:: python
 
-    @tornado.web.asynchronous
-    @tornado.gen.engine
-    def post(self):
-        """Insert a message
-        """
-        msg = self.get_argument('msg')
-        db = self.settings['db']
+    from tornado import gen
 
-        # motor.Op raises an exception on error, otherwise returns result
-        result = yield motor.Op(db.messages.insert, {'msg': msg})
+    class NewMessageHandler(tornado.web.RequestHandler):
+        @tornado.web.asynchronous
+        @gen.engine
+        def post(self):
+            """Insert a message
+            """
+            msg = self.get_argument('msg')
+            db = self.settings['db']
 
-        # Success
-        self.redirect('/')
+            # motor.Op raises an exception on error, otherwise returns result
+            result = yield motor.Op(db.messages.insert, {'msg': msg})
+
+            # Success
+            self.redirect('/')
+
+
+    class MessagesHandler(tornado.web.RequestHandler):
+        @tornado.web.asynchronous
+        @gen.engine
+        def get(self):
+            """Display all messages
+            """
+            self.write('<a href="/compose">Compose a message</a><br>')
+            self.write('<ul>')
+            db = self.settings['db']
+            cursor = db.messages.find().sort([('_id', -1)])
+            message = yield motor.Op(cursor.next)
+            while message:
+                self.write('<li>%s</li>' % message['msg'])
+                message = yield motor.Op(cursor.next)
+
+            # Iteration complete
+            self.write('</ul>')
+            self.finish()
+
+Or using `to_list` instead of `each`:
+
+.. code-block:: python
+
+    cursor = db.messages.find().sort([('_id', -1)]).limit(100)
+    messages = yield motor.Op(cursor.to_list)
+    for message in messages:
+        self.write('<li>%s</li>' % message['msg'])
 
 One can also parallelize operations and wait for all to complete. To query for
 two messages at once and wait for both:
