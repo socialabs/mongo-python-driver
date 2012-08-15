@@ -15,11 +15,9 @@
 """Motor, an asynchronous driver for MongoDB and Tornado."""
 
 import functools
-import logging
 import socket
 import time
 import warnings
-import weakref
 
 # So that 'setup.py doc' can import this module without Tornado or greenlet
 requirements_satisfied = True
@@ -34,6 +32,7 @@ try:
 except ImportError:
     requirements_satisfied = False
     warnings.warn("greenlet module not installed", ImportWarning)
+
 
 import pymongo
 import pymongo.collection
