@@ -90,17 +90,18 @@ To find multiple documents, Motor provides :meth:`~motor.MotorCursor.each` and
 
     db.users.find().each(callback=each_user)
 
-Safe writes
------------
+Acknowledged Writes
+-------------------
 
 PyMongo's default behavior for
 :meth:`~pymongo.collection.Collection.insert`,
 :meth:`~pymongo.collection.Collection.update`,
 :meth:`~pymongo.collection.Collection.save`, and
-:meth:`~pymongo.collection.Collection.remove` is unacknowledged writes:
-the driver does not request nor await a response from the server unless the
-method is passed ``safe=True`` or another
+:meth:`~pymongo.collection.Collection.remove` is to perform *unacknowledged
+writes*: the driver does not request nor await a response from the server unless
+the method is passed ``safe=True`` or another
 `getLastError option <http://www.mongodb.org/display/DOCS/getLastError+Command>`_.
+Unacknowledged writes are very low-latency but can mask errors.
 
 In Motor, writes are acknowledged (they are "safe writes") if passed a callback:
 
@@ -112,11 +113,12 @@ In Motor, writes are acknowledged (they are "safe writes") if passed a callback:
         else:
             print 'added user'
 
-    db.users.insert({'name': 'Bernie'}, callback=inserted)
+    db.users.insert({'name': 'Bernie'}, callback=inserted) # Acknowledged
 
-The ``result`` parameter to the callback contains the ``_id`` of the document
-for `insert` or `save`, and MongoDB's `getLastError` response for `update` or
-`remove`.
+On success, the ``result`` parameter to the callback contains the
+client-generated ``_id`` of the document for `insert` or `save`, and MongoDB's
+`getLastError` response for `update` or `remove`. On error, ``result`` is `None`
+and the ``error`` parameter is an Exception.
 
 With no callback, Motor does unacknowledged writes.
 
@@ -131,6 +133,55 @@ In this case the callback is executed as soon as the message has been written to
 the socket connected to MongoDB, but no response is expected from the server.
 Passing a callback and ``safe=False`` can be useful to do fast writes without
 overrunning the output buffer.
+
+Result Values for Acknowledged and Unacknowledged Writes
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+These are the values passed as the `result` parameter to your callback for
+acknowledged and unacknowledged writes with Motor:
+
++-----------+-------------------------+--------------------------------+
+| Operation | With Callback           | With Callback and `safe=False` |
++===========+=========================+================================+
+| insert    | New \_id                | New \_id                       |
++-----------+-------------------------+--------------------------------+
+| save      | \_id (whether new or existing document, safe or unsafe)  |
++-----------+-------------------------+--------------------------------+
+| update    | ``{'ok': 1.0, 'n': 1}`` | ``None``                       |
++-----------+-------------------------+--------------------------------+
+| remove    | ``{'ok': 1.0, 'n': 1}`` | ``None``                       |
++-----------+-------------------------+--------------------------------+
+
+Unacknowledged Writes With gen.engine
+'''''''''''''''''''''''''''''''''''''
+
+When using Motor with `tornado.gen`_, each Motor operation is passed an implicit
+callback and is therefore acknowledged ("safe"):
+
+.. code-block:: python
+
+    from tornado import gen
+
+    @gen.engine
+    def f():
+        # Acknowledged
+        yield motor.Op(motor_db.collection.insert, {'name': 'Randall'})
+
+You can override this behavior and do unacknowledged writes by passing
+``safe=False``:
+
+.. code-block:: python
+
+    from tornado import gen
+
+    @gen.engine
+    def f():
+        # Unacknowledged
+        yield motor.Op(motor_db.collection.insert, {'name': 'Ross'}, safe=False)
+
+.. _tornado.gen: http://www.tornadoweb.org/documentation/gen.html
+
+.. seealso:: :ref:`generator-interface`
 
 Requests
 --------

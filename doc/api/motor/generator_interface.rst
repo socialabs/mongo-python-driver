@@ -1,3 +1,5 @@
+.. _generator-interface:
+
 Generator Interface
 ===================
 
