@@ -32,6 +32,7 @@ import nose
 from nose.config import Config
 from nose.plugins import Plugin
 from nose.plugins.manager import PluginManager
+from nose.plugins.skip import Skip
 from nose.selector import Selector
 
 from test.motor.puritanical import PuritanicalIOLoop
@@ -167,6 +168,6 @@ if __name__ == '__main__':
 
     nose.main(
         config=config,
-        addplugins=[SynchroNosePlugin()],
+        addplugins=[SynchroNosePlugin(), Skip()],
         defaultTest=test_dir,
     )

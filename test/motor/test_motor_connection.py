@@ -300,7 +300,6 @@ class MotorConnectionTest(MotorTest):
         # Tornado 2.3 IOStream stores the error that closed it
         if tornado.version_info >= (2, 3):
             # Are these assumptions valid on Windows?
-            self.assertTrue('Errno 61' in exc.message)
             self.assertTrue('Connection refused' in exc.message)
         else:
             self.assertTrue('error' in exc.message)
@@ -318,7 +317,10 @@ class MotorConnectionTest(MotorTest):
 
         self.assertTrue(isinstance(exc, AutoReconnect))
         connection_duration = time.time() - start
-        self.assertAlmostEqual(1, connection_duration, delta=0.25)
+        self.assertTrue(abs(connection_duration - 1) < 0.25, (
+            'Expected connection to timeout after about 1 sec, timed out'
+            ' after %s'
+        ) % connection_duration)
 
     @async_test_engine()
     def test_max_pool_size_validation(self):
