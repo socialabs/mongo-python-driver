@@ -42,7 +42,8 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
 
     @async_test_engine()
     def test_replica_set_connection(self):
-        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+        cx = motor.MotorReplicaSetConnection(
+            '%s:%s' % (host, port), replicaSet='repl0')
 
         # Can't access databases before connecting
         self.assertRaises(
@@ -64,13 +65,15 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
             cx.delegate._ReplicaSetConnection__monitor.io_loop)
 
     def test_connection_callback(self):
-        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+        cx = motor.MotorReplicaSetConnection(
+            '%s:%s' % (host, port), replicaSet='repl0')
         self.check_optional_callback(cx.open)
 
     @async_test_engine()
     def test_open_sync(self):
         loop = ioloop.IOLoop.instance()
-        cx = motor.MotorReplicaSetConnection(host, port, replicaSet='repl0')
+        cx = motor.MotorReplicaSetConnection(
+            '%s:%s' % (host, port), replicaSet='repl0')
         self.assertFalse(cx.connected)
 
         # open_sync() creates a special IOLoop just to run the connection
@@ -101,7 +104,7 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         # loop is restored.
         loop = puritanical.PuritanicalIOLoop()
         cx = motor.MotorReplicaSetConnection(
-            host, port, replicaSet='repl0', io_loop=loop)
+            '%s:%s' % (host, port), replicaSet='repl0', io_loop=loop)
         self.assertEqual(cx, cx.open_sync())
         self.assertTrue(cx.connected)
 
@@ -129,7 +132,7 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         self.assertRaises(
             TypeError,
             lambda: motor.MotorReplicaSetConnection(
-                host, port, replicaSet='repl0', io_loop='foo')
+                '%s:%s' % (host, port), replicaSet='repl0', io_loop='foo')
         )
 
         loop = puritanical.PuritanicalIOLoop()
@@ -138,7 +141,7 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         def test(self):
             # Make sure we can do async things with the custom loop
             cx = motor.MotorReplicaSetConnection(
-                host, port, replicaSet='repl0', io_loop=loop)
+                '%s:%s' % (host, port), replicaSet='repl0', io_loop=loop)
             yield AssertEqual(cx, cx.open)
             self.assertTrue(cx.connected)
             self.assertTrue(isinstance(
@@ -158,7 +161,7 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         class DictSubclass(dict):
             pass
 
-        args = ['localhost:27017']
+        args = ['%s:%s' % (host, port)]
         kwargs = dict(
             connectTimeoutMS=1000, socketTimeoutMS=1500, max_pool_size=23,
             document_class=DictSubclass, tz_aware=True, replicaSet='repl0')
@@ -187,7 +190,7 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
     @async_test_engine()
     def test_auto_reconnect_exception_when_read_preference_is_secondary(self):
         cx = motor.MotorReplicaSetConnection(
-            'localhost:27017', replicaSet='repl0')
+            '%s:%s' % (host, port), replicaSet='repl0')
 
         yield motor.Op(cx.open)
         db = cx.pymongo_test
