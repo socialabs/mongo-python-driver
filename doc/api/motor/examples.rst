@@ -159,7 +159,7 @@ use async methods without explicit callbacks:
             self.write('</ul>')
             self.finish()
 
-Or using `to_list` instead of `each`:
+Or using `to_list` instead of `next`:
 
 .. code-block:: python
 
