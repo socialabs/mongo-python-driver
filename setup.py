@@ -242,6 +242,7 @@ if PY3:
         # are testing.
         # https://bitbucket.org/tarek/distribute/issue/233
         extra_opts["packages"].append("test")
+        extra_opts["packages"].append("test/motor")
         # Hack to make "python3.x setup.py nosetests" work in python 3
         # otherwise it won't run 2to3 before running the tests.
         if "nosetests" in sys.argv:
