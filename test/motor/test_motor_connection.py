@@ -272,7 +272,7 @@ class MotorConnectionTest(MotorTest):
             lambda: isinstance(
                 results[0]['error'],
                 pymongo.errors.AutoReconnect
-            ) and results[0]['error'].message == 'timed out'
+            ) and str(results[0]['error']) == 'timed out'
         )
 
         self.assertEventuallyEqual(
@@ -300,9 +300,9 @@ class MotorConnectionTest(MotorTest):
         # Tornado 2.3 IOStream stores the error that closed it
         if tornado.version_info >= (2, 3):
             # Are these assumptions valid on Windows?
-            self.assertTrue('Connection refused' in exc.message)
+            self.assertTrue('Connection refused' in str(exc))
         else:
-            self.assertTrue('error' in exc.message)
+            self.assertTrue('error' in str(exc))
 
     @async_test_engine()
     def test_connection_timeout(self):
@@ -359,7 +359,7 @@ class MotorConnectionTest(MotorTest):
                 ndocs[0] += 1
 
                 # Part-way through, start an insert
-                if ndocs[0] == (200 * concurrency) / 3:
+                if ndocs[0] == int((200 * concurrency) / 3):
                     cx.test.insert_collection.insert(
                         {'foo': 'bar'}, callback=inserted)
 
