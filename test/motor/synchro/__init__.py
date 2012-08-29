@@ -443,7 +443,7 @@ class Cursor(Synchro):
         return self
 
     def next(self):
-        sync_next = synchronize(self, self.delegate.next, has_safe_arg=False)
+        sync_next = synchronize(self, self.delegate.next_object, has_safe_arg=False)
         rv = sync_next()
         if rv is not None:
             return rv
@@ -455,7 +455,7 @@ class Cursor(Synchro):
             return Cursor(self.delegate[index])
         else:
             sync_next = synchronize(
-                self, self.delegate[index].each, has_safe_arg=False)
+                self, self.delegate[index].next_object, has_safe_arg=False)
             return sync_next()
 
     # Return MotorCollection wrapped in Synchro Collection

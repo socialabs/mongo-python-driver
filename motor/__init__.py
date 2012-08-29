@@ -52,7 +52,7 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 # TODO: document which versions of greenlet and tornado this has been tested
 #   against, include those in some file that pip or pypi can understand?
 # TODO: is while cursor.alive or while True the right way to iterate with
-#   gen.engine and next()?
+#   gen.engine and next_object()?
 # TODO: document, smugly, that Motor has configurable IOLoops
 # TODO: since Tornado uses logging, so can we
 # TODO: test cross-host copydb
@@ -925,7 +925,7 @@ class MotorCollection(MotorBase):
         """
         if 'callback' in kwargs:
             raise pymongo.errors.InvalidOperation(
-                "Pass a callback to next, each, to_list, count, or tail, not"
+                "Pass a callback to next_object, each, to_list, count, or tail, not"
                 " to find"
             )
 
@@ -1037,7 +1037,7 @@ class MotorCursor(MotorBase):
         self.started = True
         self._refresh(callback=callback)
 
-    def next(self, callback):
+    def next_object(self, callback):
         """Asynchronously retrieve the next document in the result set,
         fetching a batch of results from the server if necessary.
 
@@ -1061,14 +1061,14 @@ class MotorCursor(MotorBase):
           ...     if error:
           ...         raise error
           ...     cursor = collection.find().sort([('_id', 1)])
-          ...     cursor.next(callback=on_next)
+          ...     cursor.next_object(callback=on_next)
           ...
           >>> def on_next(result, error):
           ...     if error:
           ...         raise error
           ...     elif result:
           ...         sys.stdout.write(str(result['_id']) + ', ')
-          ...         cursor.next(callback=on_next)
+          ...         cursor.next_object(callback=on_next)
           ...     else:
           ...         # Iteration complete
           ...         IOLoop.instance().stop()
@@ -1110,7 +1110,7 @@ class MotorCursor(MotorBase):
                 if error:
                     callback(None, error)
                 else:
-                    self.next(callback)
+                    self.next_object(callback)
 
             self._get_more(got_more)
         else:

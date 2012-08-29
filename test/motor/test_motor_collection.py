@@ -63,7 +63,7 @@ class MotorCollectionTest(MotorTest):
             yield AssertEqual(None, coll.find_one, {'_id':'xyzzy'})
 
     @async_test_engine()
-    def test_next(self):
+    def test_next_object(self):
         # 1. Open a connection.
         #
         # 2. test_collection has docs inserted in setUp(). Query for documents
@@ -84,7 +84,7 @@ class MotorCollectionTest(MotorTest):
 
         results = []
         while True:
-            doc = yield motor.Op(cursor.next)
+            doc = yield motor.Op(cursor.next_object)
 
             if doc:
                 results.append(doc['_id'])
@@ -163,7 +163,7 @@ class MotorCollectionTest(MotorTest):
     def test_find_callback(self):
         cx = self.motor_connection(host, port)
         cursor = cx.test.test_collection.find()
-        self.check_required_callback(cursor.next)
+        self.check_required_callback(cursor.next_object)
         self.check_required_callback(cursor.each)
         self.check_required_callback(cursor.to_list)
 

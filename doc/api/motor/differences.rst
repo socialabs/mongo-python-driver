@@ -256,7 +256,7 @@ In Motor, however, no exception is raised. The query simply has no results:
         # 'result' and 'error' are both None
         print result, error
 
-    db.collection.find()[100].next(callback)
+    db.collection.find()[100].next_object(callback)
 
 The difference arises because the PyMongo :class:`~pymongo.cursor.Cursor`'s
 slicing operator blocks until it has queried the MongoDB server, and determines

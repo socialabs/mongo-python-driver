@@ -54,10 +54,10 @@ class MotorCursorTest(MotorTest):
             coll.find({'_id': {'$lt': 100}, '$where': where}).count)
 
     @async_test_engine()
-    def test_next(self):
+    def test_next_object(self):
         coll = self.motor_connection(host, port).test.test_collection
         cursor = coll.find({}, {'_id': 1}).sort([('_id', pymongo.ASCENDING)])
-        yield AssertEqual({'_id': 0}, cursor.next)
+        yield AssertEqual({'_id': 0}, cursor.next_object)
         self.assertTrue(cursor.alive)
 
         # Dereferencing the cursor eventually closes it on the server; yielding
@@ -111,7 +111,7 @@ class MotorCursorTest(MotorTest):
         # Make sure our setup code made some documents
         results = yield motor.Op(coll.find().to_list)
         self.assertTrue(len(results) > 0)
-        yield AssertEqual(None, coll.find()[:0].next)
+        yield AssertEqual(None, coll.find()[:0].next_object)
         yield AssertEqual(None, coll.find()[:0].each)
         yield AssertEqual([], coll.find()[:0].to_list)
         self.wait_for_cursors()
@@ -258,7 +258,7 @@ class MotorCursorTest(MotorTest):
         coll = cx.test.test_collection
         yield AssertEqual(
             {'_id': 0, 's': hex(0)},
-            coll.find().sort([('_id', 1)])[0].next)
+            coll.find().sort([('_id', 1)])[0].next_object)
 
         yield AssertEqual(
             [{'_id': 5, 's': hex(5)}],
@@ -266,7 +266,7 @@ class MotorCursorTest(MotorTest):
 
         # Only 200 documents, so 1000th doc doesn't exist. PyMongo raises
         # IndexError here, but Motor simply returns None.
-        yield AssertEqual(None, coll.find()[1000].next)
+        yield AssertEqual(None, coll.find()[1000].next_object)
         yield AssertEqual([], coll.find()[1000].to_list)
 
     def test_cursor_index_each(self):

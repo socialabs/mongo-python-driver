@@ -5,7 +5,7 @@
 
 .. autoclass:: MotorCursor
 
-  .. automethod:: next
+  .. automethod:: next_object
   .. automethod:: each
   .. automethod:: to_list
   .. automethod:: tail

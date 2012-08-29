@@ -158,7 +158,7 @@ class MotorTailTest(MotorTest):
                 yield gen.Task(loop.add_timeout, time.time() + 0.1)
                 cursor = self.capped.find(tailable=True)
 
-            result = yield motor.Op(cursor.next)
+            result = yield motor.Op(cursor.next_object)
             if result:
                 results.append(result)
             else:

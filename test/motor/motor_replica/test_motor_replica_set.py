@@ -81,14 +81,14 @@ class MotorTestReadPreference(
         # Test PRIMARY
         for _ in xrange(10):
             cursor = db.test.find()
-            yield motor.Op(cursor.next)
+            yield motor.Op(cursor.next_object)
             self.assertEqual(cursor.delegate._Cursor__connection_id, c.primary)
 
         # Test SECONDARY with a secondary
         db.read_preference = ReadPreference.SECONDARY
         for _ in xrange(10):
             cursor = db.test.find()
-            yield motor.Op(cursor.next)
+            yield motor.Op(cursor.next_object)
             self.assertTrue(
                 cursor.delegate._Cursor__connection_id in c.secondaries)
 
@@ -96,7 +96,7 @@ class MotorTestReadPreference(
         db.read_preference = ReadPreference.SECONDARY_ONLY
         for _ in xrange(10):
             cursor = db.test.find()
-            yield motor.Op(cursor.next)
+            yield motor.Op(cursor.next_object)
             self.assertTrue(cursor.delegate._Cursor__connection_id in c.secondaries)
 
         # Test SECONDARY with no secondary
@@ -107,21 +107,21 @@ class MotorTestReadPreference(
         db.read_preference = ReadPreference.SECONDARY
         for _ in xrange(10):
             cursor = db.test.find()
-            result = yield motor.Op(cursor.next)
+            result = yield motor.Op(cursor.next_object)
             self.assertEqual(cursor.delegate._Cursor__connection_id, c.primary)
 
         # Test SECONDARY_ONLY with no secondary
         db.read_preference = ReadPreference.SECONDARY_ONLY
         for _ in xrange(10):
             cursor = db.test.find()
-            yield AssertRaises(AutoReconnect, cursor.next)
+            yield AssertRaises(AutoReconnect, cursor.next_object)
 
         replset_tools.restart_members(killed)
 
         # Test PRIMARY with no primary (should raise an exception)
         db.read_preference = ReadPreference.PRIMARY
         cursor = db.test.find()
-        yield motor.Op(cursor.next)
+        yield motor.Op(cursor.next_object)
         self.assertEqual(cursor.delegate._Cursor__connection_id, c.primary)
         killed = replset_tools.kill_primary()
         self.assertTrue(bool(len(killed)))
@@ -163,7 +163,7 @@ class MotorTestPassiveAndHidden(
 
         for _ in xrange(10):
             cursor = db.test.find()
-            yield motor.Op(cursor.next)
+            yield motor.Op(cursor.next_object)
             self.assertTrue(cursor.delegate._Cursor__connection_id not in hidden)
 
         replset_tools.kill_members(replset_tools.get_passives(), 2)
@@ -171,7 +171,7 @@ class MotorTestPassiveAndHidden(
 
         for _ in xrange(10):
             cursor = db.test.find()
-            yield motor.Op(cursor.next)
+            yield motor.Op(cursor.next_object)
             self.assertEqual(cursor.delegate._Cursor__connection_id, c.primary)
 
     def tearDown(self):
@@ -343,14 +343,14 @@ class MotorTestReadWithFailover(
 
         db.read_preference = ReadPreference.SECONDARY
         cursor = db.test.find().batch_size(5)
-        yield motor.Op(cursor.next)
+        yield motor.Op(cursor.next_object)
         self.assertEqual(5, cursor.delegate._Cursor__retrieved)
         replset_tools.kill_primary()
         yield gen.Task(loop.add_timeout, time.time() + 2)
 
         # Primary failure shouldn't interrupt the cursor
         while True:
-            result = yield motor.Op(cursor.next)
+            result = yield motor.Op(cursor.next_object)
             if not result:
                 # Complete
                 break

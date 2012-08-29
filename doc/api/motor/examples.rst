@@ -150,16 +150,16 @@ use async methods without explicit callbacks:
             self.write('<ul>')
             db = self.settings['db']
             cursor = db.messages.find().sort([('_id', -1)])
-            message = yield motor.Op(cursor.next)
+            message = yield motor.Op(cursor.next_object)
             while message:
                 self.write('<li>%s</li>' % message['msg'])
-                message = yield motor.Op(cursor.next)
+                message = yield motor.Op(cursor.next_object)
 
             # Iteration complete
             self.write('</ul>')
             self.finish()
 
-Or using `to_list` instead of `next`:
+Or using `to_list` instead of `next_object`:
 
 .. code-block:: python
 
