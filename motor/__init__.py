@@ -188,13 +188,22 @@ class MotorSocket(object):
         self.stream.read_bytes(num_bytes, callback)
 
     def close(self):
-        if self.stream:
+        sock = self.stream.socket
+        try:
             try:
                 self.stream.close()
             except KeyError:
                 # Tornado's _impl (epoll, kqueue, ...) has already removed this
                 # file descriptor from its dict.
                 pass
+        finally:
+            # Sometimes necessary to avoid ResourceWarnings in Python 3:
+            # specifically, if the fd is closed from the OS's view, then
+            # stream.close() throws an exception, but the socket still has an
+            # fd and so will print a ResourceWarning. In that case, calling
+            # sock.close() directly clears the fd and does not raise an error.
+            if sock:
+                sock.close()
 
     def fileno(self):
         return self.stream.socket.fileno()
