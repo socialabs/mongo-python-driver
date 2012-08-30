@@ -61,11 +61,11 @@ OSX
 ---
 
 10gen provides pre-built egg packages for Apple provided Python versions on
-Snow Leopard (2.5, 2.6) and Lion (2.5, 2.6, 2.7). If you want to install
-PyMongo for other Python versions (or from source) you will have to install
-the following to build the C extensions:
+Snow Leopard (2.5, 2.6), Lion (2.5, 2.6, 2.7) and Mountain Lion (2.5, 2.6, 2.7).
+If you want to install PyMongo for other Python versions (or from source) you
+will have to install the following to build the C extensions:
 
-**Snow Leopard** - Xcode 3 with 'UNIX Development Support'.
+**Snow Leopard (10.6)** - Xcode 3 with 'UNIX Development Support'.
 
 **Snow Leopard Xcode 4**: The Python versions shipped with OSX 10.6.x
 are universal binaries. They support i386, PPC, and (in the case of python2.6)
@@ -84,15 +84,22 @@ Xcode 4 installed. There is a workaround::
 See `http://bugs.python.org/issue11623 <http://bugs.python.org/issue11623>`_
 for a more detailed explanation.
 
-**Lion** - PyMongo's C extensions can be built against python.org versions of
-Python >= 3.2. Building against versions older than 3.2.3 requires **Xcode 4.1**.
-Any version of Xcode 4 can be used to build the C extensions against 3.2.3 and
-newer. In all cases Xcode must be installed with 'UNIX Development Support'.
-See the following for more information:
+**Lion (10.7)** - PyMongo's C extensions can be built against versions of Python
+>= 3.2 downloaded from python.org. Building against versions older than 3.2.3
+requires **Xcode 4.1**. Any version of Xcode 4 can be used to build the C
+extensions against 3.2.3 and newer. In all cases Xcode must be installed with
+'UNIX Development Support'. See the following for more information:
 
 http://bugs.python.org/issue13590
 
 http://hg.python.org/cpython/file/v3.2.3/Misc/NEWS#l198
+
+**Mountain Lion (10.8)** - PyMongo's C extensions can be built against versions
+of Python >= 3.3rc1 downloaded from python.org with no special requirements.
+If you want to build against the python.org provided 3.2.3 you must have
+MacOSX10.6.sdk in /Developer/SDKs. See the following for more information:
+
+http://bugs.python.org/issue14499
 
 Installing from source
 ----------------------
@@ -121,14 +128,17 @@ directions apply to both CPython and ActiveState's ActivePython:
 64-bit Windows
 ~~~~~~~~~~~~~~
 
-Install Visual Studio 2008. You must use the full version as Visual C++ 2008
-Express does not provide 64-bit compilers. Make sure that you check the
+For Python 3.3 install Visual Studio 2010. For Python 3.2 and older install
+Visual Studio 2008. In either case you must use the full version as Visual
+C++ Express does not provide 64-bit compilers. Make sure that you check the
 "x64 Compilers and Tools" option under Visual C++.
 
 32-bit Windows
 ~~~~~~~~~~~~~~
 
-For Python 2.6 and newer install Visual C++ 2008 Express SP1.
+For Python 3.3 install Visual C++ 2010 Express.
+
+For Python 2.6 through 3.2 install Visual C++ 2008 Express SP1.
 
 For Python 2.4 or 2.5 you must install
 `MingW32 <http://www.mingw.org/wiki/InstallationHOWTOforMinGW>`_ then run the

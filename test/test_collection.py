@@ -44,7 +44,7 @@ from pymongo.errors import (ConfigurationError,
                             OperationFailure,
                             TimeoutError)
 from test.test_connection import get_connection
-from test.utils import joinall
+from test.utils import is_mongos, joinall
 from test import (qcheck,
                   version)
 
@@ -191,22 +191,39 @@ class TestCollection(unittest.TestCase):
 
         db.test.drop_index("goodbye_1")
         self.assertEqual("goodbye_1",
-                         db.test.ensure_index("goodbye", ttl=1))
+                         db.test.ensure_index("goodbye", cache_for=1))
         time.sleep(1.1)
         self.assertEqual("goodbye_1",
                          db.test.ensure_index("goodbye"))
 
         db.test.drop_index("goodbye_1")
         self.assertEqual("goodbye_1",
-                         db.test.create_index("goodbye", ttl=1))
+                         db.test.create_index("goodbye", cache_for=1))
         time.sleep(1.1)
         self.assertEqual("goodbye_1",
                          db.test.ensure_index("goodbye"))
         # Make sure the expiration time is updated.
         self.assertEqual(None,
                          db.test.ensure_index("goodbye"))
+
         # Clean up indexes for later tests
         db.test.drop_indexes()
+
+    def test_deprecated_ttl_index_kwarg(self):
+        db = self.db
+
+        # In Python 2.6+ we could use the catch_warnings context
+        # manager to test this warning nicely. As we can't do that
+        # we must test raising errors before the ignore filter is applied.
+        warnings.simplefilter("error", DeprecationWarning)
+        self.assertRaises(DeprecationWarning, lambda:
+                        db.test.ensure_index("goodbye", ttl=10))
+        warnings.resetwarnings()
+        warnings.simplefilter("ignore")
+
+        self.assertEqual("goodbye_1",
+                         db.test.ensure_index("goodbye", ttl=10))
+        self.assertEqual(None, db.test.ensure_index("goodbye"))
 
     def test_ensure_unique_index_threaded(self):
         coll = self.db.test_unique_threaded
@@ -288,15 +305,24 @@ class TestCollection(unittest.TestCase):
         db.test.create_index("who")
         db.test.create_index("when")
         info = db.test.index_information()
+
+        def check_result(result):
+            self.assertEqual(4, result['nIndexes'])
+            self.assertEqual(4, result['nIndexesWas'])
+            indexes = result['indexes']
+            names = [idx['name'] for idx in indexes]
+            for name in names:
+                self.assertTrue(name in info)
+            for key in info:
+                self.assertTrue(key in names)
+
         reindexed = db.test.reindex()
-        self.assertEqual(4, reindexed['nIndexes'])
-        self.assertEqual(4, reindexed['nIndexesWas'])
-        indexes = reindexed['indexes']
-        names = [idx['name'] for idx in indexes]
-        for name in names:
-            self.assertTrue(name in info)
-        for key in info:
-            self.assertTrue(key in names)
+        if 'raw' in reindexed:
+            # mongos
+            for result in reindexed['raw'].itervalues():
+                check_result(result)
+        else:
+            check_result(reindexed)
 
     def test_index_info(self):
         db = self.db
@@ -330,6 +356,8 @@ class TestCollection(unittest.TestCase):
         self.assertEqual([('loc', '2d')], index_info['key'])
 
     def test_index_haystack(self):
+        if is_mongos(self.db.connection):
+            raise SkipTest("geoSearch is not supported by mongos")
         db = self.db
         db.test.drop_indexes()
         db.test.remove()
@@ -690,6 +718,7 @@ class TestCollection(unittest.TestCase):
     def test_insert_multiple_with_duplicate(self):
         db = self.db
         db.drop_collection("test")
+        db.safe = True
         db.test.ensure_index([('i', ASCENDING)], unique=True)
 
         # No error
@@ -702,7 +731,34 @@ class TestCollection(unittest.TestCase):
 
         self.assertRaises(
             DuplicateKeyError,
+            lambda: db.test.insert([{'i': 2}] * 2),
+        )
+
+        # Test based on default setting as False
+        db.drop_collection("test")
+        db.safe = False
+        db.test.ensure_index([('i', ASCENDING)], unique=True)
+
+        # No error
+        db.test.insert([{'i': 1}] * 2)
+        self.assertEqual(1, db.test.count())
+
+        # Implied safe
+        self.assertRaises(
+            DuplicateKeyError,
+            lambda: db.test.insert([{'i': 2}] * 2, w=1),
+        )
+
+        # Explicit safe
+        self.assertRaises(
+            DuplicateKeyError,
             lambda: db.test.insert([{'i': 2}] * 2, safe=True),
+        )
+
+        # Misconfigured value for safe
+        self.assertRaises(
+            TypeError,
+            lambda: db.test.insert([{'i': 2}] * 2, safe=1),
         )
 
     def test_insert_iterables(self):
@@ -829,7 +885,7 @@ class TestCollection(unittest.TestCase):
     def test_continue_on_error(self):
         db = self.db
         if not version.at_least(db.connection, (1, 9, 1)):
-            raise SkipTest()
+            raise SkipTest("continue_on_error requires MongoDB >= 1.9.1")
 
         db.drop_collection("test")
         oid = db.test.insert({"one": 1})
@@ -915,7 +971,7 @@ class TestCollection(unittest.TestCase):
     def test_multi_update(self):
         db = self.db
         if not version.at_least(db.connection, (1, 1, 3, -1)):
-            raise SkipTest()
+            raise SkipTest("multi-update requires MongoDB >= 1.1.3")
 
         db.drop_collection("test")
 
@@ -1009,7 +1065,7 @@ class TestCollection(unittest.TestCase):
 
     def test_last_error_options(self):
         if not version.at_least(self.connection, (1, 5, 1)):
-            raise SkipTest()
+            raise SkipTest("getLastError options require MongoDB >= 1.5.1")
 
         # XXX: Fix this if we ever have a replica set unittest env.
         # mongo >=1.7.6 errors with 'norepl' when w=2+
@@ -1022,7 +1078,7 @@ class TestCollection(unittest.TestCase):
             self.assertRaises(TimeoutError, self.db.test.update,
                               {"x": 1}, {"y": 2}, w=2, wtimeout=1)
             self.assertRaises(TimeoutError, self.db.test.remove,
-                              {"x": 1}, {"y": 2}, w=2, wtimeout=1)
+                              {"x": 1}, w=2, wtimeout=1)
 
         self.db.test.save({"x": 1}, w=1, wtimeout=1)
         self.db.test.insert({"x": 1}, w=1, wtimeout=1)
@@ -1051,6 +1107,21 @@ class TestCollection(unittest.TestCase):
         db.test.save({'foo': 'baz'})
         self.assertEqual(db.test.find({'foo': 'bar'}).count(), 1)
         self.assertEqual(db.test.find({'foo': re.compile(r'ba.*')}).count(), 2)
+
+    def test_aggregate(self):
+        if not version.at_least(self.db.connection, (2, 1, 0)):
+            raise SkipTest("The aggregate command requires MongoDB >= 2.1.0")
+        db = self.db
+        db.drop_collection("test")
+        db.test.save({'foo': [1, 2]})
+
+        self.assertRaises(TypeError, db.test.aggregate, "wow")
+
+        pipeline = {"$project": {"_id": False, "foo": True}}
+        expected = {'ok': 1.0, 'result': [{'foo': [1, 2]}]}
+        self.assertEqual(expected, db.test.aggregate(pipeline))
+        self.assertEqual(expected, db.test.aggregate([pipeline]))
+        self.assertEqual(expected, db.test.aggregate((pipeline,)))
 
     def test_group(self):
         db = self.db
@@ -1340,7 +1411,7 @@ class TestCollection(unittest.TestCase):
 
     def test_distinct(self):
         if not version.at_least(self.db.connection, (1, 1)):
-            raise SkipTest()
+            raise SkipTest("distinct command requires MongoDB >= 1.1")
 
         self.db.drop_collection("test")
 
@@ -1420,7 +1491,7 @@ class TestCollection(unittest.TestCase):
 
     def test_map_reduce(self):
         if not version.at_least(self.db.connection, (1, 1, 1)):
-            raise SkipTest()
+            raise SkipTest("mapReduce command requires MongoDB >= 1.1.1")
 
         db = self.db
         db.drop_collection("test")
@@ -1475,14 +1546,18 @@ class TestCollection(unittest.TestCase):
             self.assertEqual(2, result.find_one({"_id": "dog"})["value"])
             self.assertEqual(1, result.find_one({"_id": "mouse"})["value"])
 
-            result = db.test.map_reduce(map, reduce,
-                                        out=SON([('replace', 'mrunittests'),
-                                                 ('db', 'mrtestdb')
-                                                ]))
-            self.assertEqual(3, result.find_one({"_id": "cat"})["value"])
-            self.assertEqual(2, result.find_one({"_id": "dog"})["value"])
-            self.assertEqual(1, result.find_one({"_id": "mouse"})["value"])
-            self.connection.mrtestdb.mrunittests.drop()
+            if (is_mongos(self.db.connection)
+                and not version.at_least(self.db.connection, (2, 1, 2))):
+                pass
+            else:
+                result = db.test.map_reduce(map, reduce,
+                                            out=SON([('replace', 'mrunittests'),
+                                                     ('db', 'mrtestdb')
+                                                    ]))
+                self.assertEqual(3, result.find_one({"_id": "cat"})["value"])
+                self.assertEqual(2, result.find_one({"_id": "dog"})["value"])
+                self.assertEqual(1, result.find_one({"_id": "mouse"})["value"])
+                self.connection.mrtestdb.mrunittests.drop()
 
         full_result = db.test.map_reduce(map, reduce,
                                          out='mrunittests', full_response=True)
@@ -1602,7 +1677,7 @@ class TestCollection(unittest.TestCase):
 
     def test_find_with_nested(self):
         if not version.at_least(self.db.connection, (2, 0, 0)):
-            raise SkipTest()
+            raise SkipTest("nested $and and $or requires MongoDB >= 2.0")
         c = self.db.test
         c.drop()
         c.insert([{'i': i} for i in range(5)])  # [0, 1, 2, 3, 4]
@@ -1670,7 +1745,7 @@ class TestCollection(unittest.TestCase):
 
     def test_uuid_subtype(self):
         if not have_uuid:
-            raise SkipTest()
+            raise SkipTest("No uuid module")
 
         coll = self.connection.pymongo_test.uuid
         coll.drop()
@@ -1680,7 +1755,7 @@ class TestCollection(unittest.TestCase):
 
         # Test property
         self.assertEqual(OLD_UUID_SUBTYPE, coll.uuid_subtype)
-        self.assertRaises(ConfigurationError, change_subtype, coll, 5)
+        self.assertRaises(ConfigurationError, change_subtype, coll, 7)
         self.assertRaises(ConfigurationError, change_subtype, coll, 2)
 
         # Test basic query
@@ -1776,16 +1851,18 @@ class TestCollection(unittest.TestCase):
 
         coll.uuid_subtype = UUID_SUBTYPE
         q = {"_id": uu}
-        result = coll.inline_map_reduce(map, reduce, query=q)
-        self.assertEqual([], result)
+        if version.at_least(self.db.connection, (1, 7, 4)):
+            result = coll.inline_map_reduce(map, reduce, query=q)
+            self.assertEqual([], result)
 
         result = coll.map_reduce(map, reduce, "results", query=q)
         self.assertEqual(0, db.results.count())
 
         coll.uuid_subtype = OLD_UUID_SUBTYPE
         q = {"_id": uu}
-        result = coll.inline_map_reduce(map, reduce, query=q)
-        self.assertEqual(2, len(result))
+        if version.at_least(self.db.connection, (1, 7, 4)):
+            result = coll.inline_map_reduce(map, reduce, query=q)
+            self.assertEqual(2, len(result))
 
         result = coll.map_reduce(map, reduce, "results", query=q)
         self.assertEqual(2, db.results.count())

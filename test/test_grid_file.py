@@ -17,10 +17,6 @@
 """Tests for the grid_file module.
 """
 
-try:
-    from io import BytesIO as StringIO
-except ImportError:
-    from cStringIO import StringIO
 import datetime
 import os
 import sys
@@ -30,7 +26,7 @@ sys.path[0:0] = [""]
 from nose.plugins.skip import SkipTest
 
 from bson.objectid import ObjectId
-from bson.py3compat import b
+from bson.py3compat import b, StringIO
 from gridfs.grid_file import (DEFAULT_CHUNK_SIZE,
                               _SEEK_CUR,
                               _SEEK_END,
@@ -481,7 +477,7 @@ Bye"""))
 
     def test_context_manager(self):
         if sys.version_info < (2, 6):
-            raise SkipTest()
+            raise SkipTest("With statement requires Python >= 2.6")
 
         contents = b("Imagine this is some important data...")
         # Hack around python2.4 an 2.5 not supporting 'with' syntax

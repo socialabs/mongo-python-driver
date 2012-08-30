@@ -40,7 +40,7 @@ from pymongo.son_manipulator import (AutoReference,
                                      NamespaceInjector,
                                      ObjectIdShuffler)
 from test import version
-from test.utils import server_started_with_auth
+from test.utils import is_mongos, server_started_with_auth
 from test.test_connection import get_connection
 
 
@@ -159,6 +159,8 @@ class TestDatabase(unittest.TestCase):
         self.assertTrue(db.validate_collection(db.test, True, True))
 
     def test_profiling_levels(self):
+        if is_mongos(self.connection):
+            raise SkipTest('profile is not supported by mongos')
         db = self.connection.pymongo_test
         self.assertEqual(db.profiling_level(), OFF)  # default
 
@@ -176,6 +178,8 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(db.profiling_level(), OFF)
 
     def test_profiling_info(self):
+        if is_mongos(self.connection):
+            raise SkipTest('profile is not supported by mongos')
         db = self.connection.pymongo_test
 
         db.set_profiling_level(ALL)
@@ -216,6 +220,8 @@ class TestDatabase(unittest.TestCase):
         self.assertRaises(TypeError, iterate)
 
     def test_errors(self):
+        if is_mongos(self.connection):
+            raise SkipTest('getpreverror not supported by mongos')
         db = self.connection.pymongo_test
 
         db.reset_error_history()
@@ -311,6 +317,28 @@ class TestDatabase(unittest.TestCase):
         # just make sure there are no exceptions here
         db.logout()
         db.logout()
+
+    def test_authenticate_and_safe(self):
+        db = self.connection.auth_test
+        db.system.users.remove({})
+        db.add_user("bernie", "password")
+        db.authenticate("bernie", "password")
+
+        db.test.remove({})
+        self.assertTrue(db.test.insert({"bim": "baz"}, safe=True))
+        self.assertEqual(1, db.test.count())
+
+        self.assertEqual(1,
+                         db.test.update({"bim": "baz"},
+                                        {"$set": {"bim": "bar"}},
+                                        safe=True).get('n'))
+
+        self.assertEqual(1,
+                         db.test.remove({}, safe=True).get('n'))
+
+        self.assertEqual(0, db.test.count())
+        self.connection.drop_database("auth_test")
+
 
     def test_authenticate_and_request(self):
         # Database.authenticate() needs to be in a request - check that it

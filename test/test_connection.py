@@ -37,7 +37,7 @@ from pymongo.errors import (AutoReconnect,
                             InvalidURI,
                             OperationFailure)
 from test import version
-from test.utils import server_is_master_with_slave, delay
+from test.utils import is_mongos, server_is_master_with_slave, delay
 
 host = os.environ.get("DB_IP", "localhost")
 port = int(os.environ.get("DB_PORT", 27017))
@@ -202,10 +202,12 @@ class TestConnection(unittest.TestCase):
             if not server_is_master_with_slave(c):
                 self.assertFalse("pymongo_test1" in c.database_names())
 
-            c.copy_database("pymongo_test", "pymongo_test1",
-                            username="mike", password="password")
-            self.assertTrue("pymongo_test1" in c.database_names())
-            self.assertEqual("bar", c.pymongo_test1.test.find_one()["foo"])
+            if not is_mongos(c):
+                # See SERVER-6427
+                c.copy_database("pymongo_test", "pymongo_test1",
+                                username="mike", password="password")
+                self.assertTrue("pymongo_test1" in c.database_names())
+                self.assertEqual("bar", c.pymongo_test1.test.find_one()["foo"])
 
     def test_iteration(self):
         connection = Connection(self.host, self.port)
@@ -238,7 +240,12 @@ class TestConnection(unittest.TestCase):
         c.admin.system.users.remove({})
         c.pymongo_test.system.users.remove({})
 
-        c.admin.add_user("admin", "pass")
+        try:
+            # First admin user add fails gle in MongoDB >= 2.1.2
+            # See SERVER-4225 for more information.
+            c.admin.add_user("admin", "pass")
+        except OperationFailure:
+            pass
         c.admin.authenticate("admin", "pass")
         c.pymongo_test.add_user("user", "pass")
 
@@ -270,12 +277,12 @@ class TestConnection(unittest.TestCase):
     def test_fork(self):
         # Test using a connection before and after a fork.
         if sys.platform == "win32":
-            raise SkipTest()
+            raise SkipTest("Can't fork on windows")
 
         try:
             from multiprocessing import Process, Pipe
         except ImportError:
-            raise SkipTest()
+            raise SkipTest("No multiprocessing module")
 
         db = Connection(self.host, self.port).pymongo_test
 
@@ -406,7 +413,7 @@ class TestConnection(unittest.TestCase):
         except:
             # Either mongod was started without --ipv6
             # or the OS doesn't support it (or both).
-            raise SkipTest("No IPV6")
+            raise SkipTest("No IPv6")
 
         # Try a few simple things
         connection = Connection("mongodb://[::1]:%d" % (self.port,))
@@ -425,6 +432,8 @@ class TestConnection(unittest.TestCase):
 
     def test_fsync_lock_unlock(self):
         c = get_connection()
+        if is_mongos(c):
+            raise SkipTest('fsync/lock not supported by mongos')
         self.assertFalse(c.is_locked)
         # async flushing not supported on windows...
         if sys.platform not in ('cygwin', 'win32'):
@@ -443,7 +452,7 @@ class TestConnection(unittest.TestCase):
 
     def test_contextlib(self):
         if sys.version_info < (2, 6):
-            raise SkipTest()
+            raise SkipTest("With statement requires Python >= 2.6")
 
         import contextlib
 

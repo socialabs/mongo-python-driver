@@ -28,7 +28,8 @@ socket exclusively by default.
   >>> connection = Connection()
 
 Make sure you're using the latest version of Gevent to ensure that
-thread-locals are patched to act like greenlet-locals.
+thread-locals are patched to act like greenlet-locals, and be careful to call
+patch_all() before loading any other modules.
 
 Using Gevent With Threads
 -------------------------
@@ -52,8 +53,9 @@ Additionally, it will use a background greenlet instead of a background thread
 to monitor the state of the replica set.
 
 Using :meth:`~pymongo.replica_set_connection.ReplicaSetConnection.start_request()`
-with :class:`~pymongo.ReadPreference` PRIMARY ensures that the current greenlet
-uses the same socket for all operations until a call to :meth:`end_request()`.
+with :class:`~pymongo.read_preferences.ReadPreference` PRIMARY ensures that the
+current greenlet uses the same socket for all operations until a call to
+:meth:`end_request()`.
 
 You must `install Gevent <http://gevent.org/>`_ to use
 :class:`~pymongo.replica_set_connection.ReplicaSetConnection`

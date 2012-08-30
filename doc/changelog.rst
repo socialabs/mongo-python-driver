@@ -1,6 +1,41 @@
 Changelog
 =========
 
+Changes in Version 2.3
+----------------------
+
+Version 2.3 adds support for new features and behavior changes in MongoDB
+2.2.
+
+Important New Features:
+
+- Support for expanded read preferences including directing reads to tagged
+  servers - See :ref:`secondary-reads` for more information.
+- Support for mongos failover -
+  See :ref:`mongos-high-availability` for more information.
+- A new :meth:`~pymongo.collection.Collection.aggregate` method to support
+  MongoDB's new `aggregation framework
+  <http://docs.mongodb.org/manual/applications/aggregation/>`_.
+- Support for legacy Java and C# byte order when encoding and decoding UUIDs.
+- Support for connecting directly to an arbiter.
+
+.. warning::
+
+    Starting with MongoDB 2.2 the getLastError command requires authentication
+    when the server's `authentication features
+    <http://www.mongodb.org/display/DOCS/Security+and+Authentication>`_ are enabled.
+    Changes to PyMongo were required to support this behavior change. Users of
+    authentication must upgrade to PyMongo 2.3 (or newer) for "safe" write operations
+    to function correctly.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.3 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.3 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/11146
+
 Changes in Version 2.2.1
 ------------------------
 
@@ -100,7 +135,7 @@ Important New Features:
   automatic failover handling and periodically checks the state of the
   replica set to handle issues like primary stepdown or secondaries
   being removed for backup operations. Read preferences are defined through
-  :class:`~pymongo.ReadPreference`.
+  :class:`~pymongo.read_preferences.ReadPreference`.
 - PyMongo supports the new BSON binary subtype 4 for UUIDs. The default
   subtype to use can be set through
   :attr:`~pymongo.collection.Collection.uuid_subtype`
@@ -706,7 +741,7 @@ Changes in Version 1.2
   get around some issues with queries on fields named ``query``
 - enforce 4MB document limit on the client side
 - added :meth:`~pymongo.collection.Collection.map_reduce` helper - see
-  :doc:`example <examples/map_reduce>`
+  :doc:`example <examples/aggregation>`
 - added :meth:`~pymongo.cursor.Cursor.distinct` method on
   :class:`~pymongo.cursor.Cursor` instances to allow distinct with
   queries

@@ -95,12 +95,12 @@ class TestObjectId(unittest.TestCase):
         # multiprocessing on windows is weird and I don't feel like figuring it
         # out right now. this should fix buildbot.
         if sys.platform == "win32":
-            raise SkipTest()
+            raise SkipTest("Can't fork on Windows")
 
         try:
             import multiprocessing
         except ImportError:
-            raise SkipTest()
+            raise SkipTest("Can't fork on Windows")
 
         pool = multiprocessing.Pool(2)
         ids = pool.map(oid, range(20))
@@ -178,6 +178,18 @@ class TestObjectId(unittest.TestCase):
 
         self.assertEqual(oid_1_9, ObjectId("4d9a66561376c00b88000000"))
         self.assertEqual(oid_1_9, oid_1_10)
+
+    def test_is_valid(self):
+        self.assertFalse(ObjectId.is_valid(4))
+        self.assertFalse(ObjectId.is_valid(175.0))
+        self.assertFalse(ObjectId.is_valid({"test": 4}))
+        self.assertFalse(ObjectId.is_valid(["something"]))
+        self.assertFalse(ObjectId.is_valid(""))
+        self.assertFalse(ObjectId.is_valid("12345678901"))
+        self.assertFalse(ObjectId.is_valid("1234567890123"))
+
+        self.assertTrue(ObjectId.is_valid(b("123456789012")))
+        self.assertTrue(ObjectId.is_valid("123456789012123456789012"))
 
 if __name__ == "__main__":
     unittest.main()

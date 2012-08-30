@@ -34,7 +34,7 @@ from pymongo.pool import (
 from pymongo.errors import ConfigurationError
 from test import version
 from test.test_connection import get_connection, host, port
-from test.utils import delay
+from test.utils import delay, is_mongos
 
 N = 50
 DB = "pymongo-pooling-tests"
@@ -609,7 +609,7 @@ class _TestPooling(_TestPoolingBase):
     def test_socket_reclamation(self):
         if sys.platform.startswith('java'):
             raise SkipTest("Jython can't do socket reclamation")
-        
+
         # Check that if a thread starts a request and dies without ending
         # the request, that the socket is reclaimed into the pool.
         cx_pool = self.get_pool(
@@ -776,10 +776,6 @@ class _TestPoolSocketSharing(_TestPoolingBase):
         )
 
         db = cx.pymongo_test
-        if not version.at_least(db.connection, (1, 7, 2)):
-            raise SkipTest("Need at least MongoDB version 1.7.2 to use"
-                           " db.eval(nolock=True)")
-        
         db.test.remove(safe=True)
         db.test.insert({'_id': 1}, safe=True)
 
@@ -806,12 +802,18 @@ class _TestPoolSocketSharing(_TestPoolingBase):
 
             history.append('find_slow start')
 
-            # Javascript function that pauses 5 sec. 'nolock' allows find_fast
-            # to start and finish while we're waiting for this.
-            fn = delay(5)
-            self.assertEqual(
-                {'ok': 1.0, 'retval': True},
-                db.command('eval', fn, nolock=True))
+            # Javascript function that pauses N seconds per document
+            fn = delay(10)
+            if (is_mongos(db.connection) or not
+                version.at_least(db.connection, (1, 7, 2))):
+                # mongos doesn't support eval so we have to use $where
+                # which is less reliable in this context.
+                self.assertEqual(1, db.test.find({"$where": fn}).count())
+            else:
+                # 'nolock' allows find_fast to start and finish while we're
+                # waiting for this to complete.
+                self.assertEqual({'ok': 1.0, 'retval': True},
+                                 db.command('eval', fn, nolock=True))
 
             history.append('find_slow done')
 
