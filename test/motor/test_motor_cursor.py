@@ -16,6 +16,7 @@
 
 import unittest
 import time
+import sys
 
 import motor
 if not motor.requirements_satisfied:
@@ -67,6 +68,10 @@ class MotorCursorTest(MotorTest):
         del cursor
 
         while self.get_open_cursors() > self.open_cursors:
+            if 'PyPy' in sys.version:
+                import gc
+                gc.collect()
+
             yield gen.Task(loop.add_timeout, time.time() + 0.5)
 
     def test_each(self):

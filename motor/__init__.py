@@ -60,7 +60,6 @@ __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
 #   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
 # TODO: review open_sync(), does it need to disconnect after success to ensure
 #   all IOStreams with old IOLoop are gone?
-# TODO: note state of gridfs, pypy
 
 
 def check_callable(kallable, required=False):
