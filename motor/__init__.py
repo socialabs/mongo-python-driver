@@ -96,15 +96,12 @@ def motor_sock_method(method):
 
         # This is run by IOLoop on the main greenlet when operation
         # completes; switch back to child to continue processing
-        def callback(result=None, error=None):
+        def callback(result=None):
             self.stream.set_close_callback(None)
             if timeout_object:
                 self.stream.io_loop.remove_timeout(timeout_object)
 
-            if error:
-                child_gr.throw(error)
-            else:
-                child_gr.switch(result)
+            child_gr.switch(result)
 
         # Run on main greenlet
         def closed():
