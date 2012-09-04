@@ -108,9 +108,18 @@ def motor_sock_method(method):
             if timeout_object:
                 self.stream.io_loop.remove_timeout(timeout_object)
 
-            # IOStream.error is a Tornado 2.3 feature
-            error = getattr(self.stream, 'error', None)
-            child_gr.throw(error or socket.error("error"))
+            # The child greenlet might have died, e.g.:
+            # - An operation raised an error within PyMongo
+            # - PyMongo closed the MotorSocket in response
+            # - MotorSocket.close() closed the IOStream
+            # - IOStream scheduled this closed() function on the loop
+            # - PyMongo operation completed (with or without error) and
+            #       its greenlet terminated
+            # - IOLoop runs this function
+            if not child_gr.dead:
+                # IOStream.error is a Tornado 2.3 feature
+                error = getattr(self.stream, 'error', None)
+                child_gr.throw(error or socket.error("error"))
 
         self.stream.set_close_callback(closed)
 
