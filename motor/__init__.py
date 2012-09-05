@@ -400,6 +400,8 @@ class MotorBase(object):
     slave_okay              = ReadWriteDelegateProperty()
     safe                    = ReadWriteDelegateProperty()
     read_preference         = ReadWriteDelegateProperty()
+    tag_sets                = ReadWriteDelegateProperty()
+    secondary_acceptable_latency_ms = ReadWriteDelegateProperty()
 
     def __repr__(self):
         return '%s(%s)' % (self.__class__.__name__, repr(self.delegate))
@@ -415,6 +417,8 @@ class MotorConnectionBase(MotorBase):
     disconnect     = ReadOnlyDelegateProperty()
     tz_aware       = ReadOnlyDelegateProperty()
     close          = ReadOnlyDelegateProperty()
+    is_primary     = ReadOnlyDelegateProperty()
+    is_mongos      = ReadOnlyDelegateProperty()
     max_bson_size  = ReadOnlyDelegateProperty()
     max_pool_size  = ReadOnlyDelegateProperty()
 
@@ -695,20 +699,17 @@ class MotorReplicaSetConnection(MotorConnectionBase):
         return args, kwargs
 
     def _get_pools(self):
-        # TODO: expose the PyMongo pools, or otherwise avoid this
-        pools = []
-        for mongo in self.delegate._ReplicaSetConnection__pools.values():
-            if 'pool' in mongo:
-                pools.append(mongo['pool'])
-
-        return pools
+        # TODO: expose the PyMongo RSC members, or otherwise avoid this
+        return [
+            member.pool for member in
+            self.delegate._ReplicaSetConnection__members.values()]
 
 
 # PyMongo uses a background thread to regularly inspect the replica set and
 # monitor it for changes. In Motor, use a periodic callback on the IOLoop to
 # monitor the set.
 class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
-    def __init__(self, rsc, interval=5):
+    def __init__(self, rsc):
         assert isinstance(
             rsc, pymongo.replica_set_connection.ReplicaSetConnection), (
             "First argument to MotorReplicaSetMonitor must be"
@@ -716,7 +717,7 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
 
         # Fake the event_class: we won't use it
         pymongo.replica_set_connection.Monitor.__init__(
-            self, rsc, interval, event_class=object)
+            self, rsc, event_class=object)
 
         self.timeout_obj = None
 
@@ -736,7 +737,7 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
             return
 
         self.timeout_obj = self.io_loop.add_timeout(
-            time.time() + self.interval, self.async_refresh)
+            time.time() + self._refresh_interval, self.async_refresh)
 
     def start(self):
         """No-op: PyMongo thinks this starts the monitor, but Motor starts
@@ -751,7 +752,14 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
             has_safe_arg=False,
             callback_required=False)
         self.timeout_obj = self.io_loop.add_timeout(
-            time.time() + self.interval, self.async_refresh)
+            time.time() + self._refresh_interval, self.async_refresh)
+
+    def schedule_refresh(self):
+        if self.io_loop and self.async_refresh:
+            if self.timeout_obj:
+                self.io_loop.remove_timeout(self.timeout_obj)
+
+            self.io_loop.add_callback(self.async_refresh)
 
     def join(self, timeout):
         # PyMongo calls join() after shutdown() -- this is not a thread, so
@@ -1251,7 +1259,7 @@ class MotorCursor(MotorBase):
 
         if self.buffer_size > 0:
             the_list.extend(self.delegate._Cursor__data)
-            self.delegate._Cursor__data[:] = []
+            self.delegate._Cursor__data.clear()
 
         if self.alive and (self.cursor_id or not self.started):
             self._get_more(callback=functools.partial(
