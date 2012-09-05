@@ -921,6 +921,7 @@ class MotorCollection(MotorBase):
     distinct          = Async(has_safe_arg=False, cb_required=True)
     inline_map_reduce = Async(has_safe_arg=False, cb_required=True)
     find_one          = Async(has_safe_arg=False, cb_required=True)
+    aggregate         = Async(has_safe_arg=False, cb_required=True)
     uuid_subtype      = ReadWriteDelegateProperty()
     full_name         = ReadOnlyDelegateProperty()
 

@@ -44,7 +44,7 @@ from pymongo import (
 GreenletPool = None
 
 from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool, _closed
-from pymongo.replica_set_connection import _partition_node
+from pymongo.replica_set_connection import _partition_node, Member, Monitor
 
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 10))
 
@@ -354,6 +354,8 @@ class ReplicaSetConnection(Connection):
         self.synchro_connect()
 
     _ReplicaSetConnection__writer = SynchroProperty()
+    _ReplicaSetConnection__members = SynchroProperty()
+    _ReplicaSetConnection__schedule_refresh = SynchroProperty()
 
 class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
@@ -475,6 +477,7 @@ class Cursor(Synchro):
 
     _Cursor__id                = SynchroProperty()
     _Cursor__query_options     = SynchroProperty()
+    _Cursor__query_spec        = SynchroProperty()
     _Cursor__retrieved         = SynchroProperty()
     _Cursor__skip              = SynchroProperty()
     _Cursor__limit             = SynchroProperty()
@@ -489,3 +492,22 @@ class Cursor(Synchro):
     _Cursor__query_flags       = SynchroProperty()
     _Cursor__connection_id     = SynchroProperty()
     _Cursor__read_preference   = SynchroProperty()
+    _Cursor__tag_sets          = SynchroProperty()
+    _Cursor__secondary_acceptable_latency_ms = SynchroProperty()
+
+
+class TimeModule(object):
+    """Fake time module so time.sleep() lets other tasks run on the IOLoop.
+       See e.g. test_schedule_refresh() in test_replica_set_connection.py.
+    """
+    def __getattr__(self, item):
+        def sleep(seconds):
+            loop = IOLoop.instance()
+            assert not loop.running()
+            loop.add_timeout(time.time() + seconds, loop.stop)
+            loop.start()
+
+        if item == 'sleep':
+            return sleep
+        else:
+            return getattr(time, item)

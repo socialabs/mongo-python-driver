@@ -72,6 +72,13 @@ excluded_tests = [
     # PyMongo or Motor
     'TestConnection.test_auto_reconnect_exception_when_read_preference_is_secondary',
 
+    # test_replica_set_connection: No pinning in Motor since there are no
+    # requests
+    'TestConnection.test_pinned_member',
+
+    # test_read_preference: requires patching ReplicaSetConnection specially
+    'TestCommandAndReadPreference.*',
+
     # Motor doesn't support forking or threading
     'TestConnection.test_fork',
     'TestConnection.test_interrupt_signal',
@@ -120,9 +127,13 @@ class SynchroNosePlugin(Plugin):
 
         for excluded_name in excluded_tests:
             suite_name, method_name = excluded_name.split('.')
-            if ((method.im_class.__name__ == suite_name or suite_name == '*')
-                and method.__name__ == method_name
-            ):
+            suite_matches = (
+                method.im_class.__name__ == suite_name or suite_name == '*')
+
+            method_matches = (
+                method.__name__ == method_name or method_name == '*')
+
+            if suite_matches and method_matches:
                 return False
 
         return True
@@ -154,6 +165,11 @@ if __name__ == '__main__':
     import test.test_connection
     test.test_connection.Connection = synchro.Connection
     test.test_connection.Database = synchro.Database
+
+    # Ensure time.sleep() acts as PyMongo's tests expect: background tasks
+    # can run to completion while foreground pauses
+    time_module = synchro.TimeModule()
+    sys.modules['time'] = time_module
 
     # Find our directory
     this_dir = path.dirname(__file__)
