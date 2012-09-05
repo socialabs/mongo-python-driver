@@ -118,6 +118,11 @@ def synchronize(self, async_method, has_safe_arg):
             # delegate not set yet, or no 'safe' attribute
             safe = False
 
+            # Since, as of Tornado 2.3, IOStream tries to divine the error that
+            # closed it using sys.exc_info(), it's important here to clear
+            # spurious errors
+            sys.exc_clear()
+
         safe = (safe or kwargs.get('safe')
             or any(opt in kwargs for opt in SAFE_OPTIONS))
 
