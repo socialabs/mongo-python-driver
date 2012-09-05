@@ -35,6 +35,8 @@ Monitor._refresh_interval = MONITOR_INTERVAL = 0.5
 
 
 class TestSecondaryConnection(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         members = [{}, {}, {'arbiterOnly': True}]
@@ -108,6 +110,8 @@ class TestSecondaryConnection(unittest.TestCase):
 
 
 class TestPassiveAndHidden(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         members = [{},
@@ -158,6 +162,8 @@ class TestPassiveAndHidden(unittest.TestCase):
 
 
 class TestHealthMonitor(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
@@ -236,6 +242,8 @@ class TestHealthMonitor(unittest.TestCase):
 
 
 class TestWritesWithFailover(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
@@ -271,6 +279,8 @@ class TestWritesWithFailover(unittest.TestCase):
 
 
 class TestReadWithFailover(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
@@ -309,6 +319,9 @@ class TestReadWithFailover(unittest.TestCase):
 
 
 class TestReadPreference(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
+
     def setUp(self):
         members = [
             # primary
@@ -610,6 +623,9 @@ class TestReadPreference(unittest.TestCase):
 
 
 class TestReplicaSetAuth(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
+
     def setUp(self):
         members = [
             {},
@@ -657,6 +673,9 @@ class TestReplicaSetAuth(unittest.TestCase):
         ha_tools.kill_all_members()
 
 class TestMongosHighAvailability(unittest.TestCase):
+    # Prevent Nose from automatically running this test
+    __test__ = False
+
     def setUp(self):
         seed_list = ha_tools.create_sharded_cluster()
         self.dbname = 'pymongo_mongos_ha'
