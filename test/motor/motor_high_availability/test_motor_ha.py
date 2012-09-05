@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Test replica set operations and failures. A Motor version of PyMongo's
-   test/replica/test_replica_set.py
+   test/high_availability/test_ha.py
 """
 
 import time
