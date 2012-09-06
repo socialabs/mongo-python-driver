@@ -454,7 +454,6 @@ class MotorConnectionBase(MotorBase):
         check_callable(callback)
 
         if self.connected:
-            # TODO: test this branch, with and without callback
             if callback:
                 self.io_loop.add_callback(
                     functools.partial(callback, self, None))

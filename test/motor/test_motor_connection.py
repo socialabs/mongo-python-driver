@@ -56,6 +56,10 @@ class MotorConnectionTest(MotorTest):
         self.assertEqual(result, cx)
         self.assertTrue(cx.connected)
 
+        # Ensure callback is re-executed if already connected
+        yield AssertEqual(cx, cx.open)
+        self.assertEqual(cx, cx.open_sync())
+
     def test_connection_callback(self):
         cx = motor.MotorConnection(host, port)
         self.check_optional_callback(cx.open)
