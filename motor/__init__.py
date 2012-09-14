@@ -561,7 +561,7 @@ class MotorConnectionBase(MotorBase):
             name_or_database = name_or_database.delegate.name
 
         async_method = asynchronize(
-            self.io_loop, self.delegate.drop_database, False, True)
+            self.get_io_loop(), self.delegate.drop_database, False, True)
         async_method(name_or_database, callback=callback)
 
     def start_request(self):
