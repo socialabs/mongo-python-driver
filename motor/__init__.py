@@ -41,6 +41,8 @@ import pymongo.database
 import pymongo.errors
 import pymongo.pool
 import pymongo.son_manipulator
+import gridfs as pymongo_gridfs
+from gridfs import grid_file as pymongo_gridfile
 
 
 __all__ = ['MotorConnection', 'MotorReplicaSetConnection']
@@ -1369,6 +1371,192 @@ class MotorCursor(MotorBase):
     def __del__(self):
         if self.alive and self.cursor_id:
             self.close()
+
+
+# TODO: doc, explain
+def create_gridfs(database, collection="fs", callback=None, io_loop=None):
+    if not isinstance(database, MotorDatabase):
+        raise TypeError("database must be instance of MotorDatabase, not %s" %
+            repr(database))
+
+    # TODO: test custom IOLoop w/ MotorGridFS
+    if not io_loop:
+        io_loop = ioloop.IOLoop.instance()
+
+    # Run on child greenlet.
+    def _create_gridfs():
+        delegate = MotorGridFS.__delegate_class__(database.delegate, collection)
+        return MotorGridFS(delegate, io_loop)
+
+    async_create_gridfs = asynchronize(
+        io_loop=io_loop,
+        sync_method=_create_gridfs,
+        has_safe_arg=False,
+        callback_required=True)
+
+    async_create_gridfs(callback=callback)
+
+
+class MotorGridFS(object):
+    __metaclass__ = MotorMeta
+    __delegate_class__ = pymongo_gridfs.GridFS
+
+    # TODO: consider a more protected / untempting method
+    def __init__(self, delegate, io_loop):
+        self.delegate = delegate
+        self.io_loop = io_loop
+
+    def get_io_loop(self):
+        return self.io_loop
+
+    def new_file(self, *args, **kwargs):
+        callback = kwargs.get('callback')
+        check_callable(callback, True)
+        
+        def new_file_callback(result, error):
+            if error:
+                callback(None, error)
+            elif isinstance(result, pymongo_gridfile.GridIn):
+                callback(GridIn(result, self.get_io_loop()), None)
+            else:
+                callback(result, None)
+                
+        kwargs['callback'] = new_file_callback
+        async_new_file = asynchronize(
+            io_loop=self.get_io_loop(),
+            sync_method=self.delegate.new_file,
+            has_safe_arg=False,
+            callback_required=True)
+        
+        async_new_file(*args, **kwargs)
+
+    put = Async(has_safe_arg=False, cb_required=False)
+
+    # TODO: refactor
+    def get(self, *args, **kwargs):
+        callback = kwargs.get('callback')
+        check_callable(callback, True)
+        def get_callback(result, error):
+            if error:
+                callback(None, error)
+            elif isinstance(result, pymongo_gridfile.GridOut):
+                callback(GridOut(result, self.get_io_loop()), None)
+            else:
+                callback(result, None)
+
+        kwargs['callback'] = get_callback
+        async_get = asynchronize(
+            io_loop=self.get_io_loop(),
+            sync_method=self.delegate.get,
+            has_safe_arg=False,
+            callback_required=True)
+
+        async_get(*args, **kwargs)
+        
+    # TODO: refactor
+    def get_version(self, *args, **kwargs):
+        callback = kwargs.get('callback')
+        check_callable(callback, True)
+        def get_version_callback(result, error):
+            if error:
+                callback(None, error)
+            elif isinstance(result, pymongo_gridfile.GridOut):
+                callback(GridOut(result, self.get_io_loop()), None)
+            else:
+                callback(result, None)
+
+        kwargs['callback'] = get_version_callback
+        async_get_version = asynchronize(
+            io_loop=self.get_io_loop(),
+            sync_method=self.delegate.get_version,
+            has_safe_arg=False,
+            callback_required=True)
+
+        async_get_version(*args, **kwargs)
+                
+    # TODO: refactor
+    def get_last_version(self, *args, **kwargs):
+        callback = kwargs.get('callback')
+        check_callable(callback, True)
+        def get_last_version_callback(result, error):
+            if error:
+                callback(None, error)
+            elif isinstance(result, pymongo_gridfile.GridOut):
+                callback(GridOut(result, self.get_io_loop()), None)
+            else:
+                callback(result, None)
+
+        kwargs['callback'] = get_last_version_callback
+        async_get_last_version = asynchronize(
+            io_loop=self.get_io_loop(),
+            sync_method=self.delegate.get_last_version,
+            has_safe_arg=False,
+            callback_required=True)
+
+        async_get_last_version(*args, **kwargs)
+        
+    delete = Async(has_safe_arg=False, cb_required=False)
+    list   = Async(has_safe_arg=False, cb_required=True)
+    exists = Async(has_safe_arg=False, cb_required=True)
+
+
+# TODO: refactor
+# TODO: doc no context-mgr protocol, __setattr__
+class GridIn(object):
+    __metaclass__ = MotorMeta
+    __delegate_class__ = pymongo_gridfs.GridIn
+
+    def __init__(self, delegate, io_loop):
+        self.delegate = delegate
+        self.io_loop = io_loop
+
+    def get_io_loop(self):
+        return self.io_loop
+
+    closed = ReadOnlyDelegateProperty()
+    __getattr__ = ReadOnlyDelegateProperty()
+    close = Async(has_safe_arg=False, cb_required=False)
+    write = Async(has_safe_arg=False, cb_required=False)
+    writelines = Async(has_safe_arg=False, cb_required=False)
+
+    def set(self, name, value, callback=None):
+        async_set = asynchronize(
+            io_loop=self.get_io_loop(),
+            sync_method=self.delegate.__setattr__,
+            has_safe_arg=False,
+            callback_required=False)
+        async_set(name, value, callback=callback)
+
+
+# TODO: refactor
+class GridOut(object):
+    __metaclass__ = MotorMeta
+    __delegate_class__ = pymongo_gridfs.GridOut
+
+    def __init__(self, delegate, io_loop):
+        self.delegate = delegate
+        self.io_loop = io_loop
+
+    def get_io_loop(self):
+        return self.io_loop
+
+    __getattr__ = ReadOnlyDelegateProperty()
+    # TODO: doc that we can't set these props as in PyMongo
+    _id = ReadOnlyDelegateProperty()
+    name = ReadOnlyDelegateProperty()
+    content_type = ReadOnlyDelegateProperty()
+    length = ReadOnlyDelegateProperty()
+    chunk_size = ReadOnlyDelegateProperty()
+    upload_date = ReadOnlyDelegateProperty()
+    aliases = ReadOnlyDelegateProperty()
+    metadata = ReadOnlyDelegateProperty()
+    md5 = ReadOnlyDelegateProperty()
+    tell = ReadOnlyDelegateProperty()
+    seek = ReadOnlyDelegateProperty()
+    read = Async(has_safe_arg=False, cb_required=True)
+    readline = Async(has_safe_arg=False, cb_required=True)
+    # TODO: doc that we don't support __iter__, close(), or context-mgr protocol
+
 
 if requirements_satisfied:
     class Op(gen.Task):
