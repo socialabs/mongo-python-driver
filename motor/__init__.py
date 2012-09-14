@@ -1383,7 +1383,6 @@ if requirements_satisfied:
             return result
 
 
-    # TODO: test
     class WaitOp(gen.Wait):
         def get_result(self):
             (result, error), _ = super(WaitOp, self).get_result()
@@ -1393,7 +1392,6 @@ if requirements_satisfied:
             return result
 
 
-    # TODO: test
     class WaitAllOps(gen.WaitAll):
         def get_result(self):
             super_results = super(WaitAllOps, self).get_result()
