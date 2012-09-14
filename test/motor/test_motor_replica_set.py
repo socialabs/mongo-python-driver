@@ -195,12 +195,8 @@ class MotorReplicaSetTest(MotorTest, TestConnectionReplicaSetBase):
         yield motor.Op(cx.open)
         db = cx.pymongo_test
 
-        def raise_socket_error(self, data, callback):
-            ioloop.IOLoop.instance().add_callback(
-                functools.partial(callback, None, socket.error('foo')))
-
         old_write = iostream.IOStream.write
-        iostream.IOStream.write = raise_socket_error
+        iostream.IOStream.write = lambda self, data, callback: self.close()
 
         try:
             cursor = db.test.find(
