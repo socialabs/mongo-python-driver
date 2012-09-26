@@ -46,10 +46,6 @@ excluded_modules = [
     'test.test_pooling_gevent',
     'test.test_paired',
     'test.test_master_slave_connection',
-
-    # TODO:
-    'test.test_grid_file',
-    'test.test_gridfs',
 ]
 
 # TODO: document these variations and omissions b/w PyMongo and the Motor API
@@ -97,6 +93,13 @@ excluded_tests = [
 
     # Motor's tailing works differently
     'TestCursor.test_tailable',
+
+    # Can't iterate a GridOut in Motor
+    'TestGridfs.test_missing_length_iter',
+    'TestGridFile.test_iterator',
+
+    # No context-manager protocol for MotorGridIn
+    'TestGridFile.test_context_manager',
 ]
 
 
@@ -146,19 +149,21 @@ if __name__ == '__main__':
     # real PyMongo
     sys.modules['pymongo'] = synchro
 
-    for submod in [
-        'connection',
-        'collection',
-        'replica_set_connection',
-        'master_slave_connection',
-        'database',
-        'pool',
+    for mod in [
+        'pymongo.connection',
+        'pymongo.collection',
+        'pymongo.replica_set_connection',
+        'pymongo.master_slave_connection',
+        'pymongo.database',
+        'pymongo.pool',
+        'gridfs',
+        'gridfs.grid_file',
     ]:
         # So that e.g. 'from pymongo.connection import Connection' gets the
         # Synchro Connection, not the real one. We include
         # master_slave_connection, even though Motor doesn't support it and
         # we exclude it from tests, so that the import doesn't fail.
-        sys.modules['pymongo.%s' % submod] = synchro
+        sys.modules[mod] = synchro
 
     # Weird special case: because of module-load order, test_connection has
     # already been imported, so monkey-patch it directly

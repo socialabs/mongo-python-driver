@@ -41,7 +41,10 @@ from pymongo import (
     ALL, helpers, OFF, SLOW_ONLY, pool
 )
 
+from gridfs.grid_file import DEFAULT_CHUNK_SIZE, _SEEK_CUR, _SEEK_END
+
 GreenletPool = None
+GridFile = None
 
 from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool, _closed
 from pymongo.replica_set_connection import _partition_node, Member, Monitor
@@ -161,16 +164,18 @@ def wrap_synchro(fn):
 
         # Not all Motor classes appear here, only those we need to return
         # from methods like map_reduce() or create_collection()
-        if isinstance(motor_obj, motor.MotorConnection):
-            connection = Connection()
-            connection.delegate = motor_obj
-            return connection
-        elif isinstance(motor_obj, motor.MotorCollection):
+        if isinstance(motor_obj, motor.MotorCollection):
             connection = Connection(delegate=motor_obj.database.connection)
             database = Database(connection, motor_obj.database.name)
             return Collection(database, motor_obj.name)
         if isinstance(motor_obj, motor.MotorCursor):
             return Cursor(motor_obj)
+        if isinstance(motor_obj, motor.MotorGridFS):
+            return GridFS(motor_obj)
+        if isinstance(motor_obj, motor.MotorGridIn):
+            return GridIn(None, delegate=motor_obj)
+        if isinstance(motor_obj, motor.MotorGridOut):
+            return GridOut(None, delegate=motor_obj)
         else:
             return motor_obj
     return _wrap_synchro
@@ -220,8 +225,8 @@ class SynchroMeta(type):
     - Properties delegated from Motor's classes to PyMongo's, such as ``name``
       or ``host``, are delegated **again** from Synchro's class to Motor's.
 
-    - MotorCursor's methods which return a clone of the MotorCursor are wrapped
-      so they return a Synchro Cursor.
+    - Motor methods which return Motor class instances are wrapped to return
+      Synchro class instances.
 
     - Certain properties that are included only because PyMongo's unittests
       access them, such as _BaseObject__set_slave_okay, are simulated.
@@ -245,7 +250,13 @@ class SynchroMeta(type):
                 # this attribute, e.g. Database.create_collection which is
                 # special-cased. Ignore such attrs.
                 if attrname not in attrs:
-                    if isinstance(delegate_attr, motor.Async):
+                    if isinstance(delegate_attr, motor.AsyncGridFSMethod):
+                        # Re-synchronize the method
+                        sync_method = SynchronizeAndWrapOutgoing(
+                            delegate_attr.has_safe_arg)
+                        sync_method.name = attrname
+                        setattr(new_class, attrname, sync_method)
+                    elif isinstance(delegate_attr, motor.Async):
                         # Re-synchronize the method
                         sync_method = Sync(attrname, delegate_attr.has_safe_arg)
                         setattr(new_class, attrname, sync_method)
@@ -268,7 +279,7 @@ class SynchroMeta(type):
 
 class Synchro(object):
     """
-    Wraps a MotorConnection, MotorDatabase, or MotorCollection and
+    Wraps a MotorConnection, MotorDatabase, MotorCollection, etc. and
     makes it act like the synchronous pymongo equivalent
     """
     __metaclass__ = SynchroMeta
@@ -292,13 +303,13 @@ class Connection(Synchro):
         kwargs.pop('auto_start_request', None)
 
         # So that TestConnection.test_constants and test_types work
-        self.host = host if host is not None else self.HOST
-        self.port = port if port is not None else self.PORT
+        host = host if host is not None else self.HOST
+        port = port if port is not None else self.PORT
         self.delegate = kwargs.pop('delegate', None)
 
         if not self.delegate:
             self.delegate = self.__delegate_class__(
-                self.host, self.port, *args, **kwargs
+                host, port, *args, **kwargs
             )
             self.synchro_connect()
 
@@ -358,8 +369,8 @@ class ReplicaSetConnection(Connection):
 
         self.synchro_connect()
 
-    _ReplicaSetConnection__writer = SynchroProperty()
-    _ReplicaSetConnection__members = SynchroProperty()
+    _ReplicaSetConnection__writer           = SynchroProperty()
+    _ReplicaSetConnection__members          = SynchroProperty()
     _ReplicaSetConnection__schedule_refresh = SynchroProperty()
 
 class Database(Synchro):
@@ -500,6 +511,59 @@ class Cursor(Synchro):
     _Cursor__tag_sets          = SynchroProperty()
     _Cursor__secondary_acceptable_latency_ms = SynchroProperty()
 
+
+class GridFS(Synchro):
+    __delegate_class__ = motor.MotorGridFS
+
+    def __init__(self, database, collection='fs'):
+        if not isinstance(database, Database):
+            raise TypeError(
+                "Expected Database, got %s" % repr(database))
+
+        self.delegate = loop_timeout(functools.partial(
+            motor.MotorGridFS(database.delegate, collection).open))
+
+
+class GridIn(Synchro):
+    __delegate_class__ = motor.MotorGridIn
+
+    def __init__(self, collection, **kwargs):
+        """Can be created with collection and kwargs like a PyMongo GridIn,
+           or with a 'delegate' keyword arg, where delegate is a MotorGridIn.
+        """
+        delegate = kwargs.pop('delegate', None)
+        if delegate:
+            self.delegate = delegate
+        else:
+            if not isinstance(collection, Collection):
+                raise TypeError(
+                    "Expected Collection, got %s" % repr(collection))
+
+            self.delegate = motor.MotorGridIn(collection.delegate, **kwargs)
+            loop_timeout(self.delegate.open)
+
+    write       = SynchronizeAndWrapOutgoing(False)
+    writelines  = SynchronizeAndWrapOutgoing(False)
+
+
+class GridOut(Synchro):
+    __delegate_class__ = motor.MotorGridOut
+    def __init__(
+        self, root_collection, file_id=None, file_document=None, delegate=None
+    ):
+        """Can be created with collection and kwargs like a PyMongo GridOut,
+           or with a 'delegate' keyword arg, where delegate is a MotorGridOut.
+        """
+        if delegate:
+            self.delegate = delegate
+        else:
+            if not isinstance(root_collection, Collection):
+                raise TypeError(
+                    "Expected Collection, got %s" % repr(root_collection))
+
+            self.delegate = motor.MotorGridOut(
+                root_collection.delegate, file_id, file_document)
+            loop_timeout(self.delegate.open)
 
 class TimeModule(object):
     """Fake time module so time.sleep() lets other tasks run on the IOLoop.
