@@ -11,7 +11,6 @@ MongoDB.
 
    differences
    prerequisites
-   limitations
    examples
 
 Classes
