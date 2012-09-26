@@ -188,9 +188,9 @@ Requests
 
 Motor does not support :doc:`requests </examples/requests>`. Requests are
 intended in PyMongo to ensure that a series of operations are performed in
-order by the MongoDB server. In Motor, ordering can be guaranteed by
-registering a callback for each operation and performing the next operation in
-the callback.
+order by the MongoDB server, even with unacknowledged writes. In Motor,
+ordering can be guaranteed by doing acknowledged writes. Register a callback
+for each operation and perform the next operation in the callback:
 
 Motor ignores the ``auto_start_request`` parameter to
 :class:`~motor.MotorConnection` or :class:`~motor.MotorReplicaSetConnection`.
