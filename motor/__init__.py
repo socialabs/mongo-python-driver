@@ -333,7 +333,8 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
 
 
 class DelegateProperty(object):
-    pass
+    def __init__(self):
+        self.name = None
 
 
 class Async(DelegateProperty):
@@ -346,9 +347,9 @@ class Async(DelegateProperty):
          - `has_safe_arg`:    Whether the method takes a 'safe' argument
          - `cb_required`:     Whether callback is required or optional
         """
+        DelegateProperty.__init__(self)
         self.has_safe_arg = has_safe_arg
         self.cb_required = cb_required
-        self.name = None
 
     def __get__(self, obj, objtype):
         # self.name is set by MotorMeta
