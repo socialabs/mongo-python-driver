@@ -55,12 +55,9 @@ __all__ = [
 #   timeouts as efficiently as possible, test performance hit with timeouts
 #   from registering and cancelling timeouts
 # TODO: examine & document what connection and network timeouts mean here
-# TODO: document which versions of greenlet and tornado this has been tested
-#   against, include those in some file that pip or pypi can understand?
 # TODO: is while cursor.alive or while True the right way to iterate with
 #   gen.engine and next_object()?
 # TODO: document, smugly, that Motor has configurable IOLoops
-# TODO: since Tornado uses logging, so can we
 # TODO: test cross-host copydb
 # TODO: perhaps remove versionchanged Sphinx annotations from proxied methods,
 #   unless versionchanged >= 2.3 or so -- whenever Motor joins PyMongo
