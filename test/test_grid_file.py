@@ -18,7 +18,6 @@
 """
 
 import datetime
-import os
 import sys
 import unittest
 sys.path[0:0] = [""]
@@ -27,6 +26,7 @@ from nose.plugins.skip import SkipTest
 
 from bson.objectid import ObjectId
 from bson.py3compat import b, StringIO
+from gridfs import GridFS
 from gridfs.grid_file import (DEFAULT_CHUNK_SIZE,
                               _SEEK_CUR,
                               _SEEK_END,
@@ -103,8 +103,10 @@ class TestGridFile(unittest.TestCase):
         self.assertRaises(AttributeError, setattr, a, "_id", 5)
 
         self.assertEqual(None, a.filename)
+        self.assertEqual(None, a.name)
         a.filename = "my_file"
         self.assertEqual("my_file", a.filename)
+        self.assertEqual("my_file", a.name)
 
         self.assertEqual(None, a.content_type)
         a.content_type = "text/html"
@@ -132,10 +134,14 @@ class TestGridFile(unittest.TestCase):
 
         a.close()
 
+        a.forty_two = 42
+        self.assertEqual(42, a.forty_two)
+
         self.assertTrue(isinstance(a._id, ObjectId))
         self.assertRaises(AttributeError, setattr, a, "_id", 5)
 
         self.assertEqual("my_file", a.filename)
+        self.assertEqual("my_file", a.name)
 
         self.assertEqual("text/html", a.content_type)
 
@@ -155,6 +161,13 @@ class TestGridFile(unittest.TestCase):
         self.assertEqual("d41d8cd98f00b204e9800998ecf8427e", a.md5)
         self.assertRaises(AttributeError, setattr, a, "md5", 5)
 
+        # Make sure custom attributes that were set both before and after
+        # a.close() are reflected in b. PYTHON-411.
+        b = GridFS(self.db).get_last_version(filename=a.filename)
+        self.assertEqual(a.metadata, b.metadata)
+        self.assertEqual(a.aliases, b.aliases)
+        self.assertEqual(a.forty_two, b.forty_two)
+
     def test_grid_in_custom_opts(self):
         self.assertRaises(TypeError, GridIn, "foo")
 
@@ -164,6 +177,7 @@ class TestGridFile(unittest.TestCase):
 
         self.assertEqual(5, a._id)
         self.assertEqual("my_file", a.filename)
+        self.assertEqual("my_file", a.name)
         self.assertEqual("text/html", a.content_type)
         self.assertEqual(1000, a.chunk_size)
         self.assertEqual(["foo"], a.aliases)
@@ -191,6 +205,8 @@ class TestGridFile(unittest.TestCase):
         self.assertEqual(a._id, b._id)
         self.assertEqual(0, b.length)
         self.assertEqual(None, b.content_type)
+        self.assertEqual(None, b.name)
+        self.assertEqual(None, b.filename)
         self.assertEqual(256 * 1024, b.chunk_size)
         self.assertTrue(isinstance(b.upload_date, datetime.datetime))
         self.assertEqual(None, b.aliases)
@@ -210,6 +226,8 @@ class TestGridFile(unittest.TestCase):
 
         two = GridOut(self.db.fs, 5)
 
+        self.assertEqual("my_file", two.name)
+        self.assertEqual("my_file", two.filename)
         self.assertEqual(5, two._id)
         self.assertEqual(11, two.length)
         self.assertEqual("text/html", two.content_type)

@@ -152,6 +152,7 @@ class GridIn(object):
     _id = _create_property("_id", "The ``'_id'`` value for this file.",
                             read_only=True)
     filename = _create_property("filename", "Name of this file.")
+    name = _create_property("filename", "Alias for `filename`.")
     content_type = _create_property("contentType", "Mime-type for this file.")
     length = _create_property("length", "Length (in bytes) of this file.",
                                closed_only=True)
@@ -170,10 +171,18 @@ class GridIn(object):
         raise AttributeError("GridIn object has no attribute '%s'" % name)
 
     def __setattr__(self, name, value):
-        object.__setattr__(self, name, value)
-        if self._closed:
-            self._coll.files.update({"_id": self._file["_id"]},
-                                    {"$set": {name: value}}, safe=True)
+        # For properties of this instance like _buffer, or descriptors set on
+        # the class like filename, use regular __setattr__
+        if name in self.__dict__ or name in self.__class__.__dict__:
+            object.__setattr__(self, name, value)
+        else:
+            # All other attributes are part of the document in db.fs.files.
+            # Store them to be sent to server on close() or if closed, send
+            # them now.
+            self._file[name] = value
+            if self._closed:
+                self._coll.files.update({"_id": self._file["_id"]},
+                                        {"$set": {name: value}}, safe=True)
 
     def __flush_data(self, data):
         """Flush `data` to a chunk.
@@ -299,11 +308,11 @@ class GridIn(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Support for the context manager protocol.
 
-        Close the file and allow exceptions to propogate.
+        Close the file and allow exceptions to propagate.
         """
         self.close()
 
-        # propogate exceptions
+        # propagate exceptions
         return False
 
 
@@ -347,7 +356,8 @@ class GridOut(object):
         self.__position = 0
 
     _id = _create_property("_id", "The ``'_id'`` value for this file.", True)
-    name = _create_property("filename", "Name of this file.", True)
+    filename = _create_property("filename", "Name of this file.", True)
+    name = _create_property("filename", "Alias for `filename`.", True)
     content_type = _create_property("contentType", "Mime-type for this file.",
                                      True)
     length = _create_property("length", "Length (in bytes) of this file.",

@@ -138,8 +138,9 @@ class Connection(common.BaseObject):
             Implies safe=True.
           - `w`: (integer or string) If this is a replica set write operations
             won't return until they have been replicated to the specified
-            number or tagged set of servers.
-            Implies safe=True.
+            number or tagged set of servers. `w` always includes the replica set
+            primary (e.g. w=3 means write to the primary and wait until replicated
+            to **two** secondaries). Implies safe=True.
           - `wtimeout`: Used in conjunction with `j` and/or `w`. Wait this many
             milliseconds for journal acknowledgement and/or write replication.
             Implies safe=True.
@@ -514,8 +515,13 @@ class Connection(common.BaseObject):
         """
         rqst_id, msg, _ = message.query(0, dbname + '.$cmd', 0, -1, spec)
         start = time.time()
-        sock_info.sock.sendall(msg)
-        response = self.__receive_message_on_socket(1, rqst_id, sock_info)
+        try:
+            sock_info.sock.sendall(msg)
+            response = self.__receive_message_on_socket(1, rqst_id, sock_info)
+        except:
+            sock_info.close()
+            raise
+
         end = time.time()
         response = helpers._unpack_response(response)['data'][0]
         msg = "command %r failed: %%s" % spec
@@ -841,6 +847,9 @@ class Connection(common.BaseObject):
         except (ConnectionFailure, socket.error), e:
             self.disconnect()
             raise AutoReconnect(str(e))
+        except:
+            sock_info.close()
+            raise
 
     def __receive_data_on_socket(self, length, sock_info):
         """Lowest level receive operation.
@@ -850,12 +859,7 @@ class Connection(common.BaseObject):
         """
         chunks = []
         while length:
-            try:
-                chunk = sock_info.sock.recv(length)
-            except:
-                # recv was interrupted
-                self.__pool.discard_socket(sock_info)
-                raise
+            chunk = sock_info.sock.recv(length)
             if chunk == EMPTY:
                 raise ConnectionFailure("connection closed")
             length -= len(chunk)
@@ -880,8 +884,12 @@ class Connection(common.BaseObject):
         """Send a message on the given socket and return the response data.
         """
         (request_id, data) = self.__check_bson_size(message)
-        sock_info.sock.sendall(data)
-        return self.__receive_message_on_socket(1, request_id, sock_info)
+        try:
+            sock_info.sock.sendall(data)
+            return self.__receive_message_on_socket(1, request_id, sock_info)
+        except:
+            sock_info.close()
+            raise
 
     # we just ignore _must_use_master here: it's only relevant for
     # MasterSlaveConnection instances.

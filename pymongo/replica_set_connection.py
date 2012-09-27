@@ -39,6 +39,7 @@ import threading
 import time
 import warnings
 import weakref
+import atexit
 
 from bson.py3compat import b
 from bson.son import SON
@@ -60,6 +61,31 @@ from pymongo.errors import (AutoReconnect,
 EMPTY = b("")
 MAX_BSON_SIZE = 4 * 1024 * 1024
 MAX_RETRY = 3
+
+MONITORS = set()
+
+def register_monitor(monitor):
+    ref = weakref.ref(monitor, _on_monitor_deleted)
+    MONITORS.add(ref)
+
+def _on_monitor_deleted(ref):
+    """Remove the weakreference from the set
+    of active MONITORS. We no longer
+    care about keeping track of it
+    """
+    MONITORS.remove(ref)
+
+def shutdown_monitors():
+    # Keep a local copy of MONITORS as
+    # shutting down threads has a side effect
+    # of removing them from the MONITORS set()
+    monitors = list(MONITORS)
+    for ref in monitors:
+        monitor = ref()
+        if monitor:
+            monitor.shutdown()
+            monitor.join()
+atexit.register(shutdown_monitors)
 
 def _partition_node(node):
     """Split a host:port string returned from mongod/s into
@@ -84,7 +110,7 @@ class Monitor(object):
         self.event = event_class()
         self.stopped = False
 
-    def shutdown(self, dummy):
+    def shutdown(self, dummy=None):
         """Signal the monitor to shutdown.
         """
         self.stopped = True
@@ -278,8 +304,9 @@ class ReplicaSetConnection(common.BaseObject):
             journaling. Implies safe=True.
           - `w`: (integer or string) If this is a replica set write operations
             won't return until they have been replicated to the specified
-            number or tagged set of servers.
-            Implies safe=True.
+            number or tagged set of servers. `w` always includes the replica set
+            primary (e.g. w=3 means write to the primary and wait until replicated
+            to **two** secondaries). Implies safe=True.
           - `wtimeoutMS`: Used in conjunction with `j` and/or `w`. Wait this
             many milliseconds for journal acknowledgement and/or write
             replication. Implies safe=True.
@@ -438,16 +465,9 @@ class ReplicaSetConnection(common.BaseObject):
         elif self.__opts.get('use_greenlets', False):
             self.__monitor = MonitorGreenlet(self)
         else:
-            # NOTE: Don't ever make this a daemon thread in CPython. Daemon
-            # threads in CPython cause serious issues when the interpreter is
-            # torn down. Symptoms range from random exceptions to the
-            # interpreter dumping core.
             self.__monitor = MonitorThread(self)
-            # Sadly, weakrefs aren't totally reliable in PyPy and Jython
-            # so use a daemon thread there.
-            if (sys.platform.startswith('java') or
-                'PyPy' in sys.version):
-                self.__monitor.setDaemon(True)
+            self.__monitor.setDaemon(True)
+        register_monitor(self.__monitor)
         self.__monitor.start()
 
     def _cached(self, dbname, coll, index):
@@ -642,8 +662,13 @@ class ReplicaSetConnection(common.BaseObject):
         """
         rqst_id, msg, _ = message.query(0, dbname + '.$cmd', 0, -1, spec)
         start = time.time()
-        sock_info.sock.sendall(msg)
-        response = self.__recv_msg(1, rqst_id, sock_info)
+        try:
+            sock_info.sock.sendall(msg)
+            response = self.__recv_msg(1, rqst_id, sock_info)
+        except:
+            sock_info.close()
+            raise
+
         end = time.time()
         response = helpers._unpack_response(response)['data'][0]
         msg = "command %r failed: %%s" % spec
@@ -1017,7 +1042,7 @@ class ReplicaSetConnection(common.BaseObject):
                 self.disconnect()
             raise AutoReconnect(str(why))
         except:
-            member.pool.discard_socket(sock_info)
+            sock_info.close()
             raise
 
     def __send_and_receive(self, member, msg, **kwargs):
@@ -1044,7 +1069,7 @@ class ReplicaSetConnection(common.BaseObject):
             member.pool.discard_socket(sock_info)
             raise AutoReconnect("%s:%d: %s" % (host, port, str(why)))
         except:
-            member.pool.discard_socket(sock_info)
+            sock_info.close()
             raise
 
     def __try_read(self, member, msg, **kwargs):
