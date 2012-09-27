@@ -20,11 +20,8 @@ if not motor.requirements_satisfied:
     from nose.plugins.skip import SkipTest
     raise SkipTest("Tornado or greenlet not installed")
 
-import datetime
 import unittest
 from functools import partial
-
-from tornado import gen
 
 from bson.py3compat import b, StringIO
 from gridfs.errors import FileExists, NoFile
@@ -122,22 +119,6 @@ class MotorGridfsTest(MotorTest):
                          set((yield motor.Op(fs.list))))
 
     @async_test_engine()
-    def test_empty_file(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        oid = yield motor.Op(fs.put, b(""))
-        gridout = yield motor.Op(fs.get, oid)
-        self.assertEqual(b(""), (yield motor.Op(gridout.read)))
-        self.assertEqual(1, (yield motor.Op(self.db.fs.files.count)))
-        self.assertEqual(0, (yield motor.Op(self.db.fs.chunks.count)))
-
-        raw = yield motor.Op(self.db.fs.files.find_one)
-        self.assertEqual(0, raw["length"])
-        self.assertEqual(oid, raw["_id"])
-        self.assertTrue(isinstance(raw["uploadDate"], datetime.datetime))
-        self.assertEqual(256 * 1024, raw["chunkSize"])
-        self.assertTrue(isinstance(raw["md5"], basestring))
-
-    @async_test_engine()
     def test_alt_collection(self):
         alt = yield motor.Op(motor.MotorGridFS(self.db, 'alt').open)
         oid = yield motor.Op(alt.put, b("hello world"))
@@ -165,162 +146,6 @@ class MotorGridfsTest(MotorTest):
                          set((yield motor.Op(alt.list))))
 
     @async_test_engine()
-    def test_threaded_reads(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        yield motor.Op(fs.put, b("hello"), _id="test")
-        n = 10
-        results = []
-
-        @gen.engine
-        def read(callback):
-            for _ in range(n):
-                file = yield motor.Op(fs.get, "test")
-                results.append((yield motor.Op(file.read)))
-            callback()
-
-        for i in range(10):
-            read(callback=(yield gen.Callback(i))) # spawn task
-
-        yield gen.WaitAll(range(10))
-
-        self.assertEqual(
-            n * 10 * [b('hello')],
-            results)
-
-    @async_test_engine()
-    def test_threaded_writes(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        n = 10
-
-        @gen.engine
-        def write(callback):
-            for _ in range(n):
-                file = yield motor.Op(fs.new_file, filename="test")
-                yield motor.Op(file.write, b("hello"))
-                yield motor.Op(file.close)
-            callback()
-
-        for i in range(10):
-            write(callback=(yield gen.Callback(i))) # spawn task
-
-        yield gen.WaitAll(range(10))
-
-        f = yield motor.Op(fs.get_last_version, "test")
-        self.assertEqual((yield motor.Op(f.read)), b("hello"))
-
-        # Should have created 100 versions of 'test' file
-        self.assertEqual(
-            100,
-            (yield motor.Op(self.db.fs.files.find({'filename':'test'}).count)))
-
-    @async_test_engine(timeout_sec=99999)
-    def test_get_last_version(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        one = yield motor.Op(fs.put, b("foo"), filename="test")
-        two = yield motor.Op(fs.new_file, filename="test")
-        yield motor.Op(two.write, b("bar"))
-        yield motor.Op(two.close)
-        two = two._id
-        three = yield motor.Op(fs.put, b("baz"), filename="test")
-
-        # TODO refactor
-        @gen.engine
-        def glv(callback):
-            last = yield motor.Op(fs.get_last_version, "test")
-            last.read(callback=callback)
-
-        self.assertEqual(b("baz"), (yield motor.Op(glv)))
-        yield motor.Op(fs.delete, three)
-        self.assertEqual(b("bar"), (yield motor.Op(glv)))
-        yield motor.Op(fs.delete, two)
-        self.assertEqual(b("foo"), (yield motor.Op(glv)))
-        yield motor.Op(fs.delete, one)
-        yield AssertRaises(NoFile, fs.get_last_version, "test")
-
-    @async_test_engine()
-    def test_get_last_version_with_metadata(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        one = yield motor.Op(fs.put, b("foo"), filename="test", author="author")
-        two = yield motor.Op(fs.put, b("bar"), filename="test", author="author")
-
-        # TODO refactor
-        @gen.engine
-        def version(callback, **kwargs):
-            gridout = yield motor.Op(fs.get_version, **kwargs)
-            gridout.read(callback=callback)
-            
-        self.assertEqual(b("bar"), (yield motor.Op(version, author="author")))
-        fs.delete(two)
-        self.assertEqual(b("foo"), (yield motor.Op(version, author="author")))
-        fs.delete(one)
-
-        one = yield motor.Op(fs.put, b("foo"), filename="test", author="author1")
-        two = yield motor.Op(fs.put, b("bar"), filename="test", author="author2")
-
-        self.assertEqual(b("foo"), (yield motor.Op(version, author="author1")))
-        self.assertEqual(b("bar"), (yield motor.Op(version, author="author2")))
-        self.assertEqual(b("bar"), (yield motor.Op(version, filename="test")))
-
-        yield AssertRaises(NoFile, fs.get_last_version, author="author3")
-        yield AssertRaises(NoFile, fs.get_last_version, filename="nottest", author="author1")
-
-        fs.delete(one)
-        fs.delete(two)
-
-    @async_test_engine()
-    def test_get_version(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        yield motor.Op(fs.put, b("foo"), filename="test")
-        yield motor.Op(fs.put, b("bar"), filename="test")
-        yield motor.Op(fs.put, b("baz"), filename="test")
-
-        # TODO refactor
-        @gen.engine
-        def version(*args, **kwargs):
-            callback = kwargs.pop('callback')
-            gridout = yield motor.Op(fs.get_version, *args, **kwargs)
-            gridout.read(callback=callback)
-            
-        self.assertEqual(b("foo"), (yield motor.Op(version, "test", 0)))
-        self.assertEqual(b("bar"), (yield motor.Op(version, "test", 1)))
-        self.assertEqual(b("baz"), (yield motor.Op(version, "test", 2)))
-
-        self.assertEqual(b("baz"), (yield motor.Op(version, "test", -1)))
-        self.assertEqual(b("bar"), (yield motor.Op(version, "test", -2)))
-        self.assertEqual(b("foo"), (yield motor.Op(version, "test", -3)))
-
-        yield AssertRaises(NoFile, fs.get_version, "test", 3)
-        yield AssertRaises(NoFile, fs.get_version, "test", -4)
-
-    @async_test_engine()
-    def test_get_version_with_metadata(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        one = yield motor.Op(fs.put, b("foo"), filename="test", author="author1")
-        two = yield motor.Op(fs.put, b("bar"), filename="test", author="author1")
-        three = yield motor.Op(fs.put, b("baz"), filename="test", author="author2")
-
-        # TODO refactor
-        @gen.engine
-        def version(callback, **kwargs):
-            gridout = yield motor.Op(fs.get_version, **kwargs)
-            gridout.read(callback=callback)
-
-        self.assertEqual(b("foo"), (yield motor.Op(version, filename="test", author="author1", version=-2)))
-        self.assertEqual(b("bar"), (yield motor.Op(version, filename="test", author="author1", version=-1)))
-        self.assertEqual(b("foo"), (yield motor.Op(version, filename="test", author="author1", version=0)))
-        self.assertEqual(b("bar"), (yield motor.Op(version, filename="test", author="author1", version=1)))
-        self.assertEqual(b("baz"), (yield motor.Op(version, filename="test", author="author2", version=0)))
-        self.assertEqual(b("baz"), (yield motor.Op(version, filename="test", version=-1)))
-        self.assertEqual(b("baz"), (yield motor.Op(version, filename="test", version=2)))
-
-        yield AssertRaises(NoFile, fs.get_version, filename="test", author="author3")
-        yield AssertRaises(NoFile, fs.get_version, filename="test", author="author1", version=2)
-
-        yield motor.Op(fs.delete, one)
-        yield motor.Op(fs.delete, two)
-        yield motor.Op(fs.delete, three)
-
-    @async_test_engine()
     def test_put_filelike(self):
         fs = yield motor.Op(motor.MotorGridFS(self.db).open)
         oid = yield motor.Op(fs.put, StringIO(b("hello world")), chunk_size=1)
@@ -333,49 +158,6 @@ class MotorGridfsTest(MotorTest):
         fs = yield motor.Op(motor.MotorGridFS(self.db).open)
         oid = yield motor.Op(fs.put, b("hello"))
         yield AssertRaises(FileExists, fs.put, "world", _id=oid)
-
-    @async_test_engine()
-    def test_exists(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        oid = yield motor.Op(fs.put, b("hello"))
-        self.assertTrue((yield motor.Op(fs.exists, oid)))
-        self.assertTrue((yield motor.Op(fs.exists, {"_id": oid})))
-        self.assertTrue((yield motor.Op(fs.exists, _id=oid)))
-
-        self.assertFalse((yield motor.Op(fs.exists, filename="mike")))
-        self.assertFalse((yield motor.Op(fs.exists, "mike")))
-
-        oid = yield motor.Op(fs.put, b("hello"), filename="mike", foo=12)
-        self.assertTrue((yield motor.Op(fs.exists, oid)))
-        self.assertTrue((yield motor.Op(fs.exists, {"_id": oid})))
-        self.assertTrue((yield motor.Op(fs.exists, _id=oid)))
-        self.assertTrue((yield motor.Op(fs.exists, filename="mike")))
-        self.assertTrue((yield motor.Op(fs.exists, {"filename": "mike"})))
-        self.assertTrue((yield motor.Op(fs.exists, foo=12)))
-        self.assertTrue((yield motor.Op(fs.exists, {"foo": 12})))
-        self.assertTrue((yield motor.Op(fs.exists, foo={"$gt": 11})))
-        self.assertTrue((yield motor.Op(fs.exists, {"foo": {"$gt": 11}})))
-
-        self.assertFalse((yield motor.Op(fs.exists, foo=13)))
-        self.assertFalse((yield motor.Op(fs.exists, {"foo": 13})))
-        self.assertFalse((yield motor.Op(fs.exists, foo={"$gt": 12})))
-        self.assertFalse((yield motor.Op(fs.exists, {"foo": {"$gt": 12}})))
-
-    @async_test_engine()
-    def test_put_unicode(self):
-        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
-        yield AssertRaises(TypeError, fs.put, u"hello")
-
-        oid = yield motor.Op(fs.put, u"hello", encoding="utf-8")
-        gridout = yield motor.Op(fs.get, oid)
-        self.assertEqual(b("hello"), (yield motor.Op(gridout.read)))
-        self.assertEqual("utf-8", gridout.encoding)
-
-        oid = yield motor.Op(fs.put, u"aé", encoding="iso-8859-1")
-        gridout = yield motor.Op(fs.get, oid)
-        self.assertEqual(
-            u"aé".encode("iso-8859-1"), (yield motor.Op(gridout.read)))
-        self.assertEqual("iso-8859-1", gridout.encoding)
 
 
 class TestGridfsReplicaSet(MotorTest, TestConnectionReplicaSetBase):

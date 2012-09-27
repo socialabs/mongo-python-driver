@@ -14,7 +14,6 @@
 # limitations under the License.
 
 """Test GridFS with Motor, an asynchronous driver for MongoDB and Tornado."""
-from tornado import gen
 
 import motor
 if not motor.requirements_satisfied:
@@ -26,15 +25,11 @@ import unittest
 from functools import partial
 
 from bson.objectid import ObjectId
-from bson.py3compat import b, StringIO
+from bson.py3compat import b
 from gridfs.errors import NoFile
-from gridfs.grid_file import DEFAULT_CHUNK_SIZE, _SEEK_CUR, _SEEK_END
 
-from test import qcheck
 from test.motor import MotorTest, async_test_engine, host, port, AssertRaises
 
-
-# TODO: test the files from gfs are already open when expected
 
 class MotorGridFileTest(MotorTest):
     def _reset(self):
@@ -97,13 +92,6 @@ class MotorGridFileTest(MotorTest):
 
         g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
         self.assertEqual(b(""), (yield motor.Op(g.read)))
-
-    @async_test_engine()
-    def test_md5(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-        yield motor.Op(f.write, b("hello world\n"))
-        yield motor.Op(f.close)
-        self.assertEqual("6f5902ac237024bdd0c176cb93063dc4", f.md5)
 
     @async_test_engine()
     def test_alternate_collection(self):
@@ -287,7 +275,8 @@ class MotorGridFileTest(MotorTest):
 
         self.assertEqual(b("foo bar"), (yield motor.Op(three.read)))
 
-        yield AssertRaises(NoFile, motor.MotorGridOut(self.db.fs, file_document={}).open)
+        yield AssertRaises(
+            NoFile, motor.MotorGridOut(self.db.fs, file_document={}).open)
 
     @async_test_engine()
     def test_write_file_like(self):
@@ -304,184 +293,10 @@ class MotorGridFileTest(MotorTest):
         four = yield motor.Op(motor.MotorGridOut(self.db.fs, three._id).open)
         self.assertEqual(b("hello world"), (yield motor.Op(four.read)))
 
-        five = yield motor.Op(motor.MotorGridIn(self.db.fs, chunk_size=2).open)
-        yield motor.Op(five.write, b("hello"))
-        buffer = StringIO(b(" world"))
-        yield motor.Op(five.write, buffer)
-        yield motor.Op(five.write, b(" and mongodb"))
-        yield motor.Op(five.close)
-        self.assertEqual(
-            b("hello world and mongodb"),
-            (yield motor.Op((
-                yield motor.Op(motor.MotorGridOut(self.db.fs, five._id).open)
-                ).read)))
-
-    @async_test_engine()
-    def test_write_lines(self):
-        a = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-        yield motor.Op(a.writelines, [b("hello "), b("world")])
-        yield motor.Op(a.close)
-
-        gout = yield motor.Op(motor.MotorGridOut(self.db.fs, a._id).open)
-        self.assertEqual(b("hello world"), (yield motor.Op(gout.read)))
-
-    @async_test_engine()
-    def test_close(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-        yield motor.Op(f.close)
-        yield AssertRaises(ValueError, f.write, "test")
-        yield motor.Op(f.close)
-
-    @async_test_engine()
-    def test_multi_chunk_file(self):
-        random_string = qcheck.gen_string(qcheck.lift(300000))()
-
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-        yield motor.Op(f.write, random_string)
-        yield motor.Op(f.close)
-
-        self.assertEqual(1, (yield motor.Op(self.db.fs.files.find().count)))
-        self.assertEqual(2, (yield motor.Op(self.db.fs.chunks.find().count)))
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(random_string, (yield motor.Op(g.read)))
-
-    @async_test_engine()
-    def test_small_chunks(self):
-        data = 'whatever' * 100
-
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=1).open)
-        yield motor.Op(f.write, data)
-        yield motor.Op(f.close)
-
-        self.assertEqual(1, (yield motor.Op(self.db.fs.files.find().count)))
-        self.assertEqual(
-            len(data), (yield motor.Op(self.db.fs.chunks.find().count)))
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(data, (yield motor.Op(g.read)))
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(data,
-            (yield motor.Op(g.read, len(data) / 2)) +
-            (yield motor.Op(g.read, len(data) / 2)))
-
-    @async_test_engine()
-    def test_seek(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=3).open)
-        yield motor.Op(f.write, b("hello world"))
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(b("hello world"), (yield motor.Op(g.read)))
-        g.seek(0)
-        self.assertEqual(b("hello world"), (yield motor.Op(g.read)))
-        g.seek(1)
-        self.assertEqual(b("ello world"), (yield motor.Op(g.read)))
-        self.assertRaises(IOError, g.seek, -1)
-
-        g.seek(-3, _SEEK_END)
-        self.assertEqual(b("rld"), (yield motor.Op(g.read)))
-        g.seek(0, _SEEK_END)
-        self.assertEqual(b(""), (yield motor.Op(g.read)))
-        self.assertRaises(IOError, g.seek, -100, _SEEK_END)
-
-        g.seek(3)
-        g.seek(3, _SEEK_CUR)
-        self.assertEqual(b("world"), (yield motor.Op(g.read)))
-        self.assertRaises(IOError, g.seek, -100, _SEEK_CUR)
-
-    @async_test_engine()
-    def test_tell(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=3).open)
-        yield motor.Op(f.write, b("hello world"))
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(0, g.tell())
-        yield motor.Op(g.read, 0)
-        self.assertEqual(0, g.tell())
-        yield motor.Op(g.read, 1)
-        self.assertEqual(1, g.tell())
-        (yield motor.Op(g.read, 2))
-        self.assertEqual(3, g.tell())
-        (yield motor.Op(g.read))
-        self.assertEqual(g.length, g.tell())
-
-    @async_test_engine()
-    def test_multiple_reads(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=3).open)
-        yield motor.Op(f.write, b("hello world"))
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(b("he"), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b("ll"), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b("o "), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b("wo"), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b("rl"), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b("d"), (yield motor.Op(g.read, 2)))
-        self.assertEqual(b(""), (yield motor.Op(g.read, 2)))
-
-    @async_test_engine()
-    def test_readline(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=5).open)
-        yield motor.Op(f.write, b("""Hello world,
-How are you?
-Hope all is well.
-Bye"""))
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(b("H"), (yield motor.Op(g.read, 1)))
-        self.assertEqual(b("ello world,\n"), (yield motor.Op(g.readline, )))
-        self.assertEqual(b("How a"), (yield motor.Op(g.readline, 5)))
-        self.assertEqual(b(""), (yield motor.Op(g.readline, 0)))
-        self.assertEqual(b("re you?\n"), (yield motor.Op(g.readline, )))
-        self.assertEqual(b("Hope all is well.\n"), (yield motor.Op(g.readline, 1000)))
-        self.assertEqual(b("Bye"), (yield motor.Op(g.readline, )))
-        self.assertEqual(b(""), (yield motor.Op(g.readline, )))
-
-    @async_test_engine()
-    def test_read_chunks_unaligned_buffer_size(self):
-        in_data = b("This is a text that doesn't "
-                    "quite fit in a single 16-byte chunk.")
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, chunkSize=16).open)
-        yield motor.Op(f.write, in_data)
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        out_data = b('')
-        while 1:
-            s = yield motor.Op(g.read, 13)
-            if not s:
-                break
-            out_data += s
-
-        self.assertEqual(in_data, out_data)
-
-    @async_test_engine()
-    def test_write_unicode(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-        self.assertRaises(TypeError, f.write, u"foo")
-
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, encoding="utf-8").open)
-        yield motor.Op(f.write, u"foo")
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(b("foo"), (yield motor.Op(g.read)))
-
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, encoding="iso-8859-1").open)
-        yield motor.Op(f.write, u"aé")
-        yield motor.Op(f.close)
-
-        g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
-        self.assertEqual(u"aé".encode("iso-8859-1"), (yield motor.Op(g.read)))
-
     @async_test_engine()
     def test_set_after_close(self):
-        f = yield motor.Op(motor.MotorGridIn(self.db.fs, _id="foo", bar="baz").open)
+        f = yield motor.Op(
+            motor.MotorGridIn(self.db.fs, _id="foo", bar="baz").open)
 
         self.assertEqual("foo", f._id)
         self.assertEqual("baz", f.bar)
@@ -514,37 +329,6 @@ Bye"""))
         self.assertEqual("b", g.baz)
         # Versions 2.0.1 and older saved a _closed field for some reason.
         self.assertRaises(AttributeError, getattr, g, "_closed")
-
-    @async_test_engine()
-    def test_prechunked_string(self):
-
-        @gen.engine
-        def write_me(s, chunk_size, callback):
-            buf = StringIO(s)
-            infile = yield motor.Op(motor.MotorGridIn(self.db.fs).open)
-            while True:
-                to_write = buf.read(chunk_size)
-                if to_write == b(''):
-                    break
-                yield motor.Op(infile.write, to_write)
-            yield motor.Op(infile.close)
-            buf.close()
-
-            outfile = yield motor.Op(
-                motor.MotorGridOut(self.db.fs, infile._id).open)
-            data = (yield motor.Op(outfile.read))
-            self.assertEqual(s, data)
-            callback()
-
-        s = b('x' * DEFAULT_CHUNK_SIZE * 4)
-        # Test with default chunk size
-        yield gen.Task(write_me, s, DEFAULT_CHUNK_SIZE)
-        # Multiple
-
-        yield gen.Task(write_me, s, DEFAULT_CHUNK_SIZE * 3)
-
-        # Custom
-        yield gen.Task(write_me, s, 262300)
 
 
 if __name__ == "__main__":
