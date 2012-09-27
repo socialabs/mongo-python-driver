@@ -52,105 +52,22 @@ from pymongo.replica_set_connection import _partition_node, Member, Monitor
 timeout_sec = float(os.environ.get('TIMEOUT_SEC', 10))
 
 
-# TODO: better name or iface, document
-# TODO: maybe just get rid of this and put it all in synchronize()?
-def loop_timeout(kallable, exc=None, seconds=timeout_sec, name="<anon>"):
-    loop = IOLoop.instance()
-    assert not loop.running(), "Loop already running in method %s" % name
-    loop._callbacks[:] = []
-    loop._timeouts[:] = []
-    outcome = {}
-
-    def raise_timeout_err():
-        loop.stop()
-        outcome['error'] = (exc or TimeoutError("timeout"))
-
-    timeout = loop.add_timeout(time.time() + seconds, raise_timeout_err)
-
-    def callback(result, error):
-        try:
-            loop.stop()
-            loop.remove_timeout(timeout)
-            outcome['result'] = result
-            outcome['error'] = error
-        except Exception:
-            traceback.print_exc(sys.stderr)
-            raise
-
-    kallable(callback=callback)
-    try:
-        loop.start()
-        if outcome.get('error'):
-            raise outcome['error']
-
-        return outcome['result']
-    finally:
-        if loop.running():
-            loop.stop()
-
-
-class Sync(object):
-    def __init__(self, name, has_safe_arg):
-        self.name = name
-        self.has_safe_arg = has_safe_arg
-
-    def __get__(self, obj, objtype):
-        async_method = getattr(obj.delegate, self.name)
-        return synchronize(obj, async_method, has_safe_arg=self.has_safe_arg)
-
-
-def synchronize(self, async_method, has_safe_arg):
-    """
-    @param self:                A Synchro object, e.g. synchro.Connection
-    @param async_method:        Bound method of a MotorConnection,
-                                MotorDatabase, etc.
-    @param has_safe_arg:        Whether the method takes a 'safe' argument
-    @return:                    A synchronous wrapper around the method
-    """
-    assert isinstance(self, Synchro), (
-        "First argument to synchronize must be Synchro, not %s" % repr(self))
-
-    @functools.wraps(async_method)
-    def synchronized_method(*args, **kwargs):
-        assert 'callback' not in kwargs, (
-            "Cannot pass callback to synchronized method")
-
-        try:
-            safe = self.delegate.safe
-        except (AttributeError, InvalidOperation):
-            # delegate not set yet, or no 'safe' attribute
-            safe = False
-
-            # Since, as of Tornado 2.3, IOStream tries to divine the error that
-            # closed it using sys.exc_info(), it's important here to clear
-            # spurious errors
-            sys.exc_clear()
-
-        safe = (safe or kwargs.get('safe')
-            or any(opt in kwargs for opt in SAFE_OPTIONS))
-
-        if not safe and has_safe_arg:
-            # By default, Motor passes safe=True if there's a callback, but
-            # we're emulating PyMongo, which defaults safe to False, so we
-            # explicitly override.
-            kwargs['safe'] = False
-
-        return loop_timeout(
-            functools.partial(async_method, *args, **kwargs),
-            name=async_method.func_name)
-
-    return synchronized_method
-
-
 def unwrap_synchro(fn):
     """If first argument to decorated function is a Synchro object, pass the
     wrapped Motor object into the function.
     """
     @functools.wraps(fn)
-    def _unwrap_synchro(self, obj, *args, **kwargs):
-        if isinstance(obj, Synchro):
-            obj = obj.delegate
-        return fn(self, obj, *args, **kwargs)
+    def _unwrap_synchro(*args, **kwargs):
+        def _unwrap_obj(obj):
+            if isinstance(obj, Synchro):
+                return obj.delegate
+            else:
+                return obj
+
+        args = [_unwrap_obj(arg) for arg in args]
+        kwargs = dict([
+            (key, _unwrap_obj(value)) for key, value in kwargs.items()])
+        return fn(*args, **kwargs)
     return _unwrap_synchro
 
 
@@ -178,7 +95,19 @@ def wrap_synchro(fn):
             return GridOut(None, delegate=motor_obj)
         else:
             return motor_obj
+
     return _wrap_synchro
+
+
+class Sync(object):
+    def __init__(self, name, has_safe_arg):
+        self.name = name
+        self.has_safe_arg = has_safe_arg
+
+    def __get__(self, obj, objtype):
+        async_method = getattr(obj.delegate, self.name)
+        return wrap_synchro(unwrap_synchro(
+            obj.synchronize(async_method, has_safe_arg=self.has_safe_arg)))
 
 
 class WrapOutgoing(motor.DelegateProperty):
@@ -189,17 +118,6 @@ class WrapOutgoing(motor.DelegateProperty):
             return wrap_synchro(motor_method)(*args, **kwargs)
 
         return synchro_method
-
-
-class SynchronizeAndWrapOutgoing(motor.DelegateProperty):
-    def __init__(self, has_safe_arg):
-        self.has_safe_arg = has_safe_arg
-
-    def __get__(self, obj, objtype):
-        # self.name is set by SynchroMeta
-        motor_method = getattr(obj.delegate, self.name)
-        synchro_method = synchronize(obj, motor_method, self.has_safe_arg)
-        return wrap_synchro(synchro_method)
 
 
 class SynchroProperty(object):
@@ -250,13 +168,7 @@ class SynchroMeta(type):
                 # this attribute, e.g. Database.create_collection which is
                 # special-cased. Ignore such attrs.
                 if attrname not in attrs:
-                    if isinstance(delegate_attr, motor.AsyncGridFSMethod):
-                        # Re-synchronize the method
-                        sync_method = SynchronizeAndWrapOutgoing(
-                            delegate_attr.has_safe_arg)
-                        sync_method.name = attrname
-                        setattr(new_class, attrname, sync_method)
-                    elif isinstance(delegate_attr, motor.Async):
+                    if isinstance(delegate_attr, motor.Async):
                         # Re-synchronize the method
                         sync_method = Sync(attrname, delegate_attr.has_safe_arg)
                         setattr(new_class, attrname, sync_method)
@@ -291,6 +203,76 @@ class Synchro(object):
     _BaseObject__set_slave_okay = SynchroProperty()
     _BaseObject__set_safe       = SynchroProperty()
 
+    def synchronize(self, async_method, has_safe_arg=False):
+        """
+        @param async_method:        Bound method of a MotorConnection,
+                                    MotorDatabase, etc.
+        @param has_safe_arg:        Whether the method takes a 'safe' argument
+        @return:                    A synchronous wrapper around the method
+        """
+        @functools.wraps(async_method)
+        def synchronized_method(*args, **kwargs):
+            assert 'callback' not in kwargs, (
+                "Cannot pass callback to synchronized method")
+    
+            try:
+                safe = self.delegate.safe
+            except (AttributeError, InvalidOperation):
+                # delegate not set yet, or no 'safe' attribute
+                safe = False
+    
+                # Since, as of Tornado 2.3, IOStream tries to divine the error
+                # that closed it using sys.exc_info(), it's important here to
+                # clear spurious errors
+                sys.exc_clear()
+    
+            safe = (safe or kwargs.get('safe')
+                or any(opt in kwargs for opt in SAFE_OPTIONS))
+    
+            if not safe and has_safe_arg:
+                # By default, Motor passes safe=True if there's a callback, but
+                # we're emulating PyMongo, which defaults safe to False, so we
+                # explicitly override.
+                kwargs['safe'] = False
+    
+            loop = IOLoop.instance()
+            assert not loop.running(), \
+                "Loop already running in method %s" % async_method.func_name
+            loop._callbacks[:] = []
+            loop._timeouts[:] = []
+            outcome = {}
+    
+            def raise_timeout_err():
+                loop.stop()
+                outcome['error'] = TimeoutError("timeout")
+    
+            timeout = loop.add_timeout(
+                time.time() + timeout_sec, raise_timeout_err)
+    
+            def callback(result, error):
+                try:
+                    loop.stop()
+                    loop.remove_timeout(timeout)
+                    outcome['result'] = result
+                    outcome['error'] = error
+                except Exception:
+                    traceback.print_exc(sys.stderr)
+                    raise
+    
+            kwargs['callback'] = callback
+            async_method(*args, **kwargs)
+            try:
+                loop.start()
+                if outcome.get('error'):
+                    raise outcome['error']
+    
+                return outcome['result']
+            finally:
+                if loop.running():
+                    loop.stop()
+    
+        return synchronized_method
+
 
 class Connection(Synchro):
     HOST = 'localhost'
@@ -316,13 +298,7 @@ class Connection(Synchro):
     def synchro_connect(self):
         # Try to connect the MotorConnection before continuing; raise
         # ConnectionFailure if it times out.
-        sync_method = synchronize(self, self.delegate.open, has_safe_arg=False)
-        sync_method()
-
-    @unwrap_synchro
-    def drop_database(self, name_or_database):
-        sync_method = synchronize(self, self.delegate.drop_database, has_safe_arg=False)
-        return sync_method(name_or_database)
+        self.synchronize(self.delegate.open)()
 
     def start_request(self):
         raise NotImplementedError()
@@ -331,7 +307,7 @@ class Connection(Synchro):
 
     @property
     def is_locked(self):
-        return synchronize(self, self.delegate.is_locked, has_safe_arg=False)()
+        return self.synchronize(self.delegate.is_locked)()
 
     def __enter__(self):
         return self
@@ -373,6 +349,7 @@ class ReplicaSetConnection(Connection):
     _ReplicaSetConnection__members          = SynchroProperty()
     _ReplicaSetConnection__schedule_refresh = SynchroProperty()
 
+
 class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
 
@@ -395,25 +372,6 @@ class Database(Synchro):
 
         self.delegate.add_son_manipulator(manipulator)
 
-    @unwrap_synchro
-    def drop_collection(self, name_or_collection):
-        sync_method = synchronize(
-            self, self.delegate.drop_collection, has_safe_arg=False)
-        return sync_method(name_or_collection)
-
-    @unwrap_synchro
-    def validate_collection(self, name_or_collection, *args, **kwargs):
-        sync_method = synchronize(
-            self, self.delegate.validate_collection, has_safe_arg=False)
-        return sync_method(name_or_collection, *args, **kwargs)
-
-    @wrap_synchro
-    def create_collection(self, *args, **kwargs):
-        sync_method = synchronize(
-            self, self.delegate.create_collection, has_safe_arg=False)
-
-        return sync_method(*args, **kwargs)
-
     def __getattr__(self, name):
         return Collection(self, name)
 
@@ -422,6 +380,8 @@ class Database(Synchro):
 
 class Collection(Synchro):
     __delegate_class__ = motor.MotorCollection
+
+    find = WrapOutgoing()
 
     def __init__(self, database, name):
         assert isinstance(database, Database), (
@@ -433,9 +393,6 @@ class Collection(Synchro):
         assert isinstance(self.delegate, motor.MotorCollection), (
             "Expected to get synchro Collection from Database,"
             " got %s" % repr(self.delegate))
-
-    find       = WrapOutgoing()
-    map_reduce = SynchronizeAndWrapOutgoing(has_safe_arg=False)
 
     def __getattr__(self, name):
         # Access to collections with dotted names, like db.test.mike
@@ -449,10 +406,6 @@ class Cursor(Synchro):
 
     rewind                     = WrapOutgoing()
     clone                      = WrapOutgoing()
-    where                      = WrapOutgoing()
-    sort                       = WrapOutgoing()
-    close                      = SynchronizeAndWrapOutgoing(has_safe_arg=False)
-    explain                    = SynchronizeAndWrapOutgoing(has_safe_arg=False)
 
     def __init__(self, motor_cursor):
         self.delegate = motor_cursor
@@ -461,7 +414,7 @@ class Cursor(Synchro):
         return self
 
     def next(self):
-        sync_next = synchronize(self, self.delegate.next_object, has_safe_arg=False)
+        sync_next = self.synchronize(self.delegate.next_object)
         rv = sync_next()
         if rv is not None:
             return rv
@@ -472,11 +425,8 @@ class Cursor(Synchro):
         if isinstance(index, slice):
             return Cursor(self.delegate[index])
         else:
-            sync_next = synchronize(
-                self, self.delegate[index].next_object, has_safe_arg=False)
-            return sync_next()
+            return self.synchronize(self.delegate[index].next_object)()
 
-    # Return MotorCollection wrapped in Synchro Collection
     @property
     @wrap_synchro
     def collection(self):
@@ -520,8 +470,8 @@ class GridFS(Synchro):
             raise TypeError(
                 "Expected Database, got %s" % repr(database))
 
-        self.delegate = loop_timeout(functools.partial(
-            motor.MotorGridFS(database.delegate, collection).open))
+        self.delegate = self.synchronize(
+            motor.MotorGridFS(database.delegate, collection).open)()
 
 
 class GridIn(Synchro):
@@ -540,14 +490,15 @@ class GridIn(Synchro):
                     "Expected Collection, got %s" % repr(collection))
 
             self.delegate = motor.MotorGridIn(collection.delegate, **kwargs)
-            loop_timeout(self.delegate.open)
+            self.synchronize(self.delegate.open)()
 
-    write       = SynchronizeAndWrapOutgoing(False)
-    writelines  = SynchronizeAndWrapOutgoing(False)
+    def __getattr__(self, item):
+        return getattr(self.delegate, item)
 
 
 class GridOut(Synchro):
     __delegate_class__ = motor.MotorGridOut
+
     def __init__(
         self, root_collection, file_id=None, file_document=None, delegate=None
     ):
@@ -563,7 +514,11 @@ class GridOut(Synchro):
 
             self.delegate = motor.MotorGridOut(
                 root_collection.delegate, file_id, file_document)
-            loop_timeout(self.delegate.open)
+            self.synchronize(self.delegate.open)()
+
+    def __getattr__(self, item):
+        return getattr(self.delegate, item)
+
 
 class TimeModule(object):
     """Fake time module so time.sleep() lets other tasks run on the IOLoop.

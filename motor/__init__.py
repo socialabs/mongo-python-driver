@@ -35,17 +35,21 @@ except ImportError:
 
 
 import pymongo
-import pymongo.collection
 import pymongo.cursor
-import pymongo.database
 import pymongo.errors
 import pymongo.pool
 import pymongo.son_manipulator
-import gridfs as pymongo_gridfs
-from gridfs import grid_file as pymongo_gridfile
+import gridfs
+
+from pymongo.database import Database
+from pymongo.collection import Collection
+from gridfs import grid_file
 
 
-__all__ = ['MotorConnection', 'MotorReplicaSetConnection']
+__all__ = [
+    'MotorConnection', 'MotorReplicaSetConnection', 'Op', 'WaitOp',
+    'WaitAllOps'
+]
 
 # TODO: document that default timeout is None, ensure we're doing
 #   timeouts as efficiently as possible, test performance hit with timeouts
@@ -288,6 +292,9 @@ class MotorPool(pymongo.pool.GreenletPool):
 
 def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     """
+    Decorate `sync_method` so it's run on a child greenlet and executes
+    `callback` with (result, error) arguments when greenlet completes.
+
     :Parameters:
      - `io_loop`:           A Tornado IOLoop
      - `sync_method`:       Bound method of pymongo Collection, Database,
@@ -298,14 +305,10 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
     assert isinstance(io_loop, ioloop.IOLoop), (
         "First argument to asynchronize must be IOLoop, not %s" % repr(io_loop))
 
-    # TODO doc
     @functools.wraps(sync_method)
     def method(*args, **kwargs):
-        callback = kwargs.get('callback')
+        callback = kwargs.pop('callback', None)
         check_callable(callback, required=callback_required)
-
-        # Don't pass callback to sync_method
-        kwargs.pop('callback', None)
 
         # Safe writes if callback is passed and safe=False not passed explicitly
         if 'safe' not in kwargs and has_safe_arg:
@@ -333,12 +336,16 @@ def asynchronize(io_loop, sync_method, has_safe_arg, callback_required):
 
 
 class DelegateProperty(object):
-    def __init__(self):
-        self.name = None
+    def __init__(self, name=None):
+        self.name = name
+
+    def set_name(self, name):
+        if not self.name:
+            self.name = name
 
 
 class Async(DelegateProperty):
-    def __init__(self, has_safe_arg, cb_required):
+    def __init__(self, has_safe_arg, cb_required, name=None):
         """
         A descriptor that wraps a PyMongo method, such as insert or remove, and
         returns an asynchronous version of the method, which takes a callback.
@@ -346,54 +353,139 @@ class Async(DelegateProperty):
         :Parameters:
          - `has_safe_arg`:    Whether the method takes a 'safe' argument
          - `cb_required`:     Whether callback is required or optional
+         - `name`:            (optional) Name of wrapped method
         """
-        DelegateProperty.__init__(self)
+        DelegateProperty.__init__(self, name)
         self.has_safe_arg = has_safe_arg
         self.cb_required = cb_required
 
     def __get__(self, obj, objtype):
-        # self.name is set by MotorMeta
         sync_method = getattr(obj.delegate, self.name)
         return asynchronize(
             obj.get_io_loop(),
             sync_method,
             has_safe_arg=self.has_safe_arg,
-            callback_required=self.cb_required
-        )
+            callback_required=self.cb_required)
+    
+    def wrap(self, original_class):
+        # TODO: doc
+        return Wrap(self, original_class)
+
+    def unwrap(self, motor_class):
+        # TODO: doc
+        return Unwrap(self, motor_class)
 
 
-class AsyncGridFSMethod(Async):
-    def __init__(self):
+class Wrap(Async):
+    def __init__(self, async, original_class):
         """
-        A descriptor that wraps a GridFS, GridIn, or GridOut method such as
-        GridFS.new_file or GridOut.read. Returns an asynchronous version of the
-        method that takes a callback, and wraps a returned GridIn or GridOut
-        in a MotorGridIn or MotorGridOut.
+        A descriptor that wraps a Motor method and wraps its return value in a
+        Motor class. E.g., wrap Motor's map_reduce to return a MotorCollection
+        instead of a PyMongo Collection. Calls the wrap() method on the owner
+        object to do the actual wrapping at invocation time.
         """
-        super(AsyncGridFSMethod, self).__init__(
-            has_safe_arg=False, cb_required=True)
+        DelegateProperty.__init__(self)
+        self.async = async
+        self.has_safe_arg = async.has_safe_arg
+        self.original_class = original_class
 
     def __get__(self, obj, objtype):
-        # TODO: simplify?
-        async_method = super(AsyncGridFSMethod, self).__get__(obj, objtype)
-        def wrap_outgoing(callback, result, error):
-            if error:
-                callback(None, error)
-            elif isinstance(result, pymongo_gridfile.GridIn):
-                callback(MotorGridIn(result, io_loop=obj.get_io_loop()), None)
-            elif isinstance(result, pymongo_gridfile.GridOut):
-                callback(MotorGridOut(result, io_loop=obj.get_io_loop()), None)
-            else:
-                callback(result, None)
+        f = self.async.__get__(obj, objtype)
+        original_class = self.original_class
 
-        @functools.wraps(async_method)
-        def fn(*args, **kwargs):
+        @functools.wraps(f)
+        def _f(*args, **kwargs):
             callback = kwargs.pop('callback', None)
-            check_callable(callback, True)
-            kwargs['callback'] = functools.partial(wrap_outgoing, callback)
-            async_method(*args, **kwargs)
+            check_callable(callback, self.async.cb_required)
+            if callback:
+                def _callback(result, error):
+                    if error:
+                        callback(None, error)
+                        return
 
-        return fn
+                    # Don't call isinstance(), not checking subclasses
+                    if result.__class__ is original_class:
+                        # Delegate to the current object to wrap the result
+                        new_object = obj.wrap(result)
+                    else:
+                        new_object = result
+
+                    callback(new_object, None)
+                kwargs['callback'] = _callback
+            f(*args, **kwargs)
+        return _f
+
+    def set_name(self, name):
+        self.async.set_name(name)
+
+
+class Unwrap(Async):
+    def __init__(self, async, motor_class):
+        """
+        A descriptor that wraps a Motor method and unwraps its arguments. E.g.,
+        wrap Motor's drop_database and if a MotorDatabase is passed in, unwrap
+        it and pass in a pymongo.database.Database instead.
+        """
+        DelegateProperty.__init__(self)
+        self.async = async
+        self.has_safe_arg = async.has_safe_arg
+        self.motor_class = motor_class
+
+    def __get__(self, obj, objtype):
+        f = self.async.__get__(obj, objtype)
+        if isinstance(self.motor_class, basestring):
+            # Delayed reference - e.g., drop_database is defined before
+            # MotorDatabase is, so it was initialized with
+            # unwrap('MotorDatabase') instead of unwrap(MotorDatabase).
+            motor_class = globals()[self.motor_class]
+        else:
+            motor_class = self.motor_class
+
+        @functools.wraps(f)
+        def _f(*args, **kwargs):
+            def _unwrap_obj(obj):
+                # Don't call isinstance(), not checking subclasses
+                if obj.__class__ is motor_class:
+                    return obj.delegate
+                else:
+                    return obj
+
+            # Call _unwrap_obj on each arg and kwarg before invoking f
+            args = [_unwrap_obj(arg) for arg in args]
+            kwargs = dict([
+                (key, _unwrap_obj(value)) for key, value in kwargs.items()])
+            f(*args, **kwargs)
+
+        return _f
+
+    def set_name(self, name):
+        self.async.set_name(name)
+
+
+class AsyncRead(Async):
+    def __init__(self, name=None):
+        """
+        A descriptor that wraps a PyMongo read method like find_one() that
+        requires a callback.
+        """
+        Async.__init__(self, has_safe_arg=False, cb_required=True, name=name)
+
+
+class AsyncWrite(Async):
+    def __init__(self, name=None):
+        """
+        A descriptor that wraps a PyMongo write method like update() that
+        accepts optional safe and callback arguments.
+        """
+        Async.__init__(self, has_safe_arg=True, cb_required=False, name=name)
+
+
+class AsyncCommand(Async):
+    def __init__(self, name=None):
+        """
+        A descriptor that wraps a PyMongo command like copy_database()
+        """
+        Async.__init__(self, has_safe_arg=False, cb_required=False, name=name)
 
 
 class ReadOnlyDelegateProperty(DelegateProperty):
@@ -425,7 +517,7 @@ class MotorMeta(type):
         # Set DelegateProperties' names
         for name, attr in attrs.items():
             if isinstance(attr, DelegateProperty):
-                attr.name = name
+                attr.set_name(name)
 
         return new_class
 
@@ -438,15 +530,15 @@ class MotorBase(object):
             return self.delegate == other.delegate
         return NotImplemented
 
-    get_lasterror_options   = ReadOnlyDelegateProperty()
-    set_lasterror_options   = ReadOnlyDelegateProperty()
-    unset_lasterror_options = ReadOnlyDelegateProperty()
-    name                    = ReadOnlyDelegateProperty()
-    document_class          = ReadWriteDelegateProperty()
-    slave_okay              = ReadWriteDelegateProperty()
-    safe                    = ReadWriteDelegateProperty()
-    read_preference         = ReadWriteDelegateProperty()
-    tag_sets                = ReadWriteDelegateProperty()
+    get_lasterror_options           = ReadOnlyDelegateProperty()
+    set_lasterror_options           = ReadOnlyDelegateProperty()
+    unset_lasterror_options         = ReadOnlyDelegateProperty()
+    name                            = ReadOnlyDelegateProperty()
+    document_class                  = ReadWriteDelegateProperty()
+    slave_okay                      = ReadWriteDelegateProperty()
+    safe                            = ReadWriteDelegateProperty()
+    read_preference                 = ReadWriteDelegateProperty()
+    tag_sets                        = ReadWriteDelegateProperty()
     secondary_acceptable_latency_ms = ReadWriteDelegateProperty()
 
     def __repr__(self):
@@ -529,10 +621,11 @@ class MotorOpenable(object):
 class MotorConnectionBase(MotorOpenable, MotorBase):
     """MotorConnection and MotorReplicaSetConnection common functionality.
     """
-    database_names = Async(has_safe_arg=False, cb_required=True)
-    close_cursor   = Async(has_safe_arg=False, cb_required=False)
-    server_info    = Async(has_safe_arg=False, cb_required=False)
-    copy_database  = Async(has_safe_arg=False, cb_required=False)
+    database_names = AsyncRead()
+    server_info    = AsyncRead()
+    close_cursor   = AsyncCommand()
+    copy_database  = AsyncCommand()
+    drop_database  = AsyncCommand().unwrap('MotorDatabase')
     disconnect     = ReadOnlyDelegateProperty()
     tz_aware       = ReadOnlyDelegateProperty()
     close          = ReadOnlyDelegateProperty()
@@ -598,27 +691,6 @@ class MotorConnectionBase(MotorOpenable, MotorBase):
 
     __getitem__ = __getattr__
 
-    def drop_database(self, name_or_database, callback):
-        """Drop a database.
-
-        Raises :class:`TypeError` if `name_or_database` is not an instance of
-        :class:`basestring` (:class:`str` in python 3),
-        :class:`~pymongo.database.Database`,
-        or :class:`MotorDatabase`.
-
-        :Parameters:
-          - `name_or_database`: the name of a database to drop, or a
-            :class:`~pymongo.database.Database` instance representing the
-            database to drop
-          - `callback`: Optional function taking parameters (connection, error)
-        """
-        if isinstance(name_or_database, MotorDatabase):
-            name_or_database = name_or_database.delegate.name
-
-        async_method = asynchronize(
-            self.get_io_loop(), self.delegate.drop_database, False, True)
-        async_method(name_or_database, callback=callback)
-
     def start_request(self):
         raise NotImplementedError("Motor doesn't implement requests")
 
@@ -642,9 +714,9 @@ class MotorConnectionBase(MotorOpenable, MotorBase):
 class MotorConnection(MotorConnectionBase):
     __delegate_class__ = pymongo.connection.Connection
 
-    kill_cursors = Async(has_safe_arg=False, cb_required=True)
-    fsync        = Async(has_safe_arg=False, cb_required=False)
-    unlock       = Async(has_safe_arg=False, cb_required=False)
+    kill_cursors = AsyncCommand()
+    fsync        = AsyncCommand()
+    unlock       = AsyncCommand()
     nodes        = ReadOnlyDelegateProperty()
     host         = ReadOnlyDelegateProperty()
     port         = ReadOnlyDelegateProperty()
@@ -831,115 +903,54 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
 
 
 class MotorDatabase(MotorBase):
-    __delegate_class__ = pymongo.database.Database
+    __delegate_class__ = Database
 
-    # list of overridden async operations on a MotorDatabase instance
-    set_profiling_level = Async(has_safe_arg=False, cb_required=False)
-    reset_error_history = Async(has_safe_arg=False, cb_required=False)
-    add_user            = Async(has_safe_arg=False, cb_required=False)
-    remove_user         = Async(has_safe_arg=False, cb_required=False)
-    logout              = Async(has_safe_arg=False, cb_required=False)
-    command             = Async(has_safe_arg=False, cb_required=False)
-    authenticate        = Async(has_safe_arg=False, cb_required=True)
-    collection_names    = Async(has_safe_arg=False, cb_required=True)
-    current_op          = Async(has_safe_arg=False, cb_required=True)
-    profiling_level     = Async(has_safe_arg=False, cb_required=True)
-    profiling_info      = Async(has_safe_arg=False, cb_required=True)
-    error               = Async(has_safe_arg=False, cb_required=True)
-    last_status         = Async(has_safe_arg=False, cb_required=True)
-    previous_error      = Async(has_safe_arg=False, cb_required=True)
-    dereference         = Async(has_safe_arg=False, cb_required=True)
-    eval                = Async(has_safe_arg=False, cb_required=True)
+    set_profiling_level = AsyncCommand()
+    reset_error_history = AsyncCommand()
+    add_user            = AsyncCommand()
+    remove_user         = AsyncCommand()
+    logout              = AsyncCommand()
+    command             = AsyncCommand()
+    authenticate        = AsyncCommand()
+    eval                = AsyncCommand()
+    # TODO: test that this raises an error if collection exists in Motor, and
+    # test creating capped coll
+    create_collection   = AsyncCommand().wrap(Collection)
+    drop_collection     = AsyncCommand().unwrap('MotorCollection')
+    # TODO: test
+    validate_collection = AsyncRead().unwrap('MotorCollection')
+    # TODO: test that this raises an error if collection exists in Motor, and
+    # test creating capped coll
+    collection_names    = AsyncRead()
+    current_op          = AsyncRead()
+    profiling_level     = AsyncRead()
+    profiling_info      = AsyncRead()
+    error               = AsyncRead()
+    last_status         = AsyncRead()
+    previous_error      = AsyncRead()
+    dereference         = AsyncRead()
 
     incoming_manipulators         = ReadOnlyDelegateProperty()
     incoming_copying_manipulators = ReadOnlyDelegateProperty()
     outgoing_manipulators         = ReadOnlyDelegateProperty()
     outgoing_copying_manipulators = ReadOnlyDelegateProperty()
 
-    def __init__(self, connection, name, *args, **kwargs):
-        # *args and **kwargs are not currently supported by pymongo Database,
-        # but it doesn't cost us anything to include them and future-proof
-        # this method.
+    def __init__(self, connection, name):
         if not isinstance(connection, MotorConnectionBase):
             raise TypeError("First argument to MotorDatabase must be "
                             "MotorConnectionBase, not %s" % repr(connection))
 
         self.connection = connection
-        self.delegate = pymongo.database.Database(
-            connection.delegate, name, *args, **kwargs
-        )
+        self.delegate = Database(connection.delegate, name)
 
     def __getattr__(self, name):
         return MotorCollection(self, name)
 
     __getitem__ = __getattr__
 
-    # TODO: refactor
-    def drop_collection(self, name_or_collection, callback):
-        """Drop a collection.
-
-        :Parameters:
-          - `name_or_collection`: the name of a collection to drop or the
-            collection object itself
-          - `callback`: Optional function taking parameters (result, error)
-        """
-
-        name = name_or_collection
-        if isinstance(name, MotorCollection):
-            name = name.delegate.name
-
-        sync_method = self.delegate.drop_collection
-        async_method = asynchronize(
-            self.get_io_loop(), sync_method, False, False)
-        async_method(name, callback=callback)
-
-    # TODO: refactor, test
-    def validate_collection(self, name_or_collection, *args, **kwargs):
-        """Validate a collection.
-
-        Takes same arguments as
-        :meth:`~pymongo.database.Database.validate_collection`, plus:
-
-        :Parameters:
-          - `callback`: Optional function taking parameters (result, error)
-        """
-        name = name_or_collection
-        if isinstance(name, MotorCollection):
-            name = name.delegate.name
-
-        sync_method = self.delegate.validate_collection
-        async_method = asynchronize(
-            self.get_io_loop(), sync_method, False, True)
-        async_method(name, **kwargs)
-
-    # TODO: refactor
-    # TODO: test that this raises an error if collection exists in Motor, and
-    # test creating capped coll
-    def create_collection(self, name, *args, **kwargs):
-        """Create a new collection in this database. Takes same arguments as
-        :meth:`~pymongo.database.Database.create_collection`, plus callback,
-        which receives a MotorCollection.
-
-        :Parameters:
-          - `callback`: Optional function taking parameters (collection, error)
-        """
-        # We override create_collection to wrap the Collection it returns in a
-        # MotorCollection.
-        callback = kwargs.pop('callback', None)
-        check_callable(callback)
-
-        def create_collection_callback(collection, error):
-            if isinstance(collection, pymongo.collection.Collection):
-                collection = MotorCollection(self, name)
-
-            callback(collection, error)
-
-        kwargs['callback'] = create_collection_callback
-        sync_method = self.delegate.create_collection
-        async_method = asynchronize(
-            self.get_io_loop(), sync_method, False, False)
-
-        async_method(name, *args, **kwargs)
+    def wrap(self, collection):
+        # Replace pymongo.collection.Collection with MotorCollection
+        return self[collection.name]
 
     def add_son_manipulator(self, manipulator):
         """Add a new son manipulator to this database.
@@ -963,39 +974,42 @@ class MotorDatabase(MotorBase):
 
 
 class MotorCollection(MotorBase):
-    __delegate_class__ = pymongo.collection.Collection
+    __delegate_class__ = Collection
 
-    create_index      = Async(has_safe_arg=False, cb_required=False)
-    drop_indexes      = Async(has_safe_arg=False, cb_required=False)
-    drop_index        = Async(has_safe_arg=False, cb_required=False)
-    drop              = Async(has_safe_arg=False, cb_required=False)
-    ensure_index      = Async(has_safe_arg=False, cb_required=False)
-    reindex           = Async(has_safe_arg=False, cb_required=False)
-    rename            = Async(has_safe_arg=False, cb_required=False)
-    find_and_modify   = Async(has_safe_arg=False, cb_required=False)
-    update            = Async(has_safe_arg=True, cb_required=False)
-    insert            = Async(has_safe_arg=True, cb_required=False)
-    remove            = Async(has_safe_arg=True, cb_required=False)
-    save              = Async(has_safe_arg=True, cb_required=False)
-    index_information = Async(has_safe_arg=False, cb_required=True)
-    count             = Async(has_safe_arg=False, cb_required=True)
-    options           = Async(has_safe_arg=False, cb_required=True)
-    group             = Async(has_safe_arg=False, cb_required=True)
-    distinct          = Async(has_safe_arg=False, cb_required=True)
-    inline_map_reduce = Async(has_safe_arg=False, cb_required=True)
-    find_one          = Async(has_safe_arg=False, cb_required=True)
-    aggregate         = Async(has_safe_arg=False, cb_required=True)
+    create_index      = AsyncCommand()
+    drop_indexes      = AsyncCommand()
+    drop_index        = AsyncCommand()
+    drop              = AsyncCommand()
+    ensure_index      = AsyncCommand()
+    reindex           = AsyncCommand()
+    rename            = AsyncCommand()
+    find_and_modify   = AsyncCommand()
+    map_reduce        = AsyncCommand().wrap(Collection)
+    update            = AsyncWrite()
+    insert            = AsyncWrite()
+    remove            = AsyncWrite()
+    save              = AsyncWrite()
+    index_information = AsyncRead()
+    count             = AsyncRead()
+    options           = AsyncRead()
+    group             = AsyncRead()
+    distinct          = AsyncRead()
+    inline_map_reduce = AsyncRead()
+    find_one          = AsyncRead()
+    aggregate         = AsyncRead()
     uuid_subtype      = ReadWriteDelegateProperty()
     full_name         = ReadOnlyDelegateProperty()
 
-    def __init__(self, database, name, *args, **kwargs):
-        if not isinstance(database, MotorDatabase):
+    def __init__(self, database, name=None, *args, **kwargs):
+        if isinstance(database, Collection):
+            # Short cut
+            self.delegate = Collection
+        elif not isinstance(database, MotorDatabase):
             raise TypeError("First argument to MotorCollection must be "
                             "MotorDatabase, not %s" % repr(database))
-
-        self.database = database
-        self.delegate = pymongo.collection.Collection(
-            self.database.delegate, name)
+        else:
+            self.database = database
+            self.delegate = Collection(self.database.delegate, name)
 
     def __getattr__(self, name):
         # dotted collection name, like foo.bar
@@ -1011,45 +1025,21 @@ class MotorCollection(MotorBase):
         Note that :meth:`find` does not take a `callback` parameter -- pass
         a callback to the :class:`MotorCursor`'s methods such as
         :meth:`MotorCursor.find`.
+
+        # TODO: examples of to_list and next
         """
         if 'callback' in kwargs:
             raise pymongo.errors.InvalidOperation(
-                "Pass a callback to next_object, each, to_list, count, or tail, not"
-                " to find"
+                "Pass a callback to next_object, each, to_list, count, or tail,"
+                "not to find"
             )
 
         cursor = self.delegate.find(*args, **kwargs)
         return MotorCursor(cursor, self)
 
-    def map_reduce(self, *args, **kwargs):
-        """Perform a map/reduce operation on this collection.
-
-        If `full_response` is ``False`` (default) passes a
-        :class:`MotorCollection` instance containing
-        the results of the operation to ``callback``.
-        Otherwise, returns the full
-        response from the server to the `map reduce command`_.
-
-        Takes same arguments as
-        :meth:`~pymongo.collection.Collection.map_reduce`,
-        as well as:
-
-        :Parameters:
-         - `callback`: function taking parameters (result, error)
-
-        .. _map reduce command: http://www.mongodb.org/display/DOCS/MapReduce
-        """
-        callback = kwargs.pop('callback', None)
-
-        def map_reduce_callback(result, error):
-            if isinstance(result, pymongo.collection.Collection):
-                result = self.database[result.name]
-            callback(result, error)
-
-        kwargs['callback'] = map_reduce_callback
-        sync_method = self.delegate.map_reduce
-        async_mr = asynchronize(self.get_io_loop(), sync_method, False, True)
-        async_mr(*args, **kwargs)
+    def wrap(self, collection):
+        # Replace pymongo.collection.Collection with MotorCollection
+        return self.database[collection.name]
 
     def get_io_loop(self):
         return self.database.get_io_loop()
@@ -1057,7 +1047,6 @@ class MotorCollection(MotorBase):
 
 class MotorCursorChainingMethod(DelegateProperty):
     def __get__(self, obj, objtype):
-        # self.name is set by MotorMeta
         method = getattr(obj.delegate, self.name)
 
         @functools.wraps(method)
@@ -1071,11 +1060,11 @@ class MotorCursorChainingMethod(DelegateProperty):
 class MotorCursor(MotorBase):
     __delegate_class__ = pymongo.cursor.Cursor
     # TODO: test all these in test_motor_cursor.py
-    count         = Async(has_safe_arg=False, cb_required=True)
-    distinct      = Async(has_safe_arg=False, cb_required=True)
-    explain       = Async(has_safe_arg=False, cb_required=True)
-    _refresh      = Async(has_safe_arg=False, cb_required=True)
-    close         = Async(has_safe_arg=False, cb_required=False)
+    count         = AsyncRead()
+    distinct      = AsyncRead()
+    explain       = AsyncRead()
+    _refresh      = AsyncRead()
+    close         = AsyncCommand()
     alive         = ReadOnlyDelegateProperty()
     cursor_id     = ReadOnlyDelegateProperty()
     batch_size    = MotorCursorChainingMethod()
@@ -1435,148 +1424,9 @@ class MotorCursor(MotorBase):
             self.close()
 
 
-# TODO: test 3 Motor gfs classes' ioloops
-class MotorGridFS(MotorOpenable):
-    __delegate_class__ = pymongo_gridfs.GridFS
-
-    new_file            = AsyncGridFSMethod()
-    get                 = AsyncGridFSMethod()
-    get_version         = AsyncGridFSMethod()
-    get_last_version    = AsyncGridFSMethod()
-    put                 = Async(has_safe_arg=False, cb_required=False)
-    delete              = Async(has_safe_arg=False, cb_required=False)
-    list                = Async(has_safe_arg=False, cb_required=True)
-    exists              = Async(has_safe_arg=False, cb_required=True)
-
-    def __init__(self, database, collection="fs", io_loop=None):
-        if not isinstance(database, MotorDatabase):
-            raise TypeError("First argument to MotorGridFS must be "
-                            "MotorDatabase, not %s" % repr(database))
-
-        MotorOpenable.__init__(
-            self, database.delegate, collection, io_loop=None)
-
-
-# TODO: doc no context-mgr protocol, __setattr__
-class MotorGridIn(MotorOpenable):
-    __delegate_class__ = pymongo_gridfs.GridIn
-
-    def __init__(self, root_collection, **kwargs):
-        if isinstance(root_collection, pymongo_gridfile.GridIn):
-            # Short cut
-            MotorOpenable.__init__(
-                self, delegate=root_collection,
-                io_loop=kwargs.pop('io_loop', None))
-        else:
-            if not isinstance(root_collection, MotorCollection):
-                raise TypeError("First argument to MotorGridIn must be "
-                                "MotorCollection, not %s" % repr(root_collection))
-
-            MotorOpenable.__init__(self, root_collection.delegate, **kwargs)
-
-    closed          = ReadOnlyDelegateProperty()
-    __getattr__     = ReadOnlyDelegateProperty()
-    close           = Async(has_safe_arg=False, cb_required=False)
-    # TODO: doc that callable required, unlike for MotorCollection's
-    #   write methods, because safe is always on
-
-    # TODO: refactor
-    def write(self, data, callback):
-        """Write data to the file. There is no return value.
-
-        `data` can be either a string of bytes or a file-like object
-        (implementing :meth:`read`). If the file has an
-        :attr:`encoding` attribute, `data` can also be a
-        :class:`unicode` (:class:`str` in python 3) instance, which
-        will be encoded as :attr:`encoding` before being written.
-
-        Due to buffering, the data may not actually be written to the
-        database until the :meth:`close` method is called. Raises
-        :class:`ValueError` if this file is already closed. Raises
-        :class:`TypeError` if `data` is not an instance of
-        :class:`str` (:class:`bytes` in python 3), a file-like object,
-        or an instance of :class:`unicode` (:class:`str` in python 3).
-        Unicode data is only allowed if the file has an :attr:`encoding`
-        attribute.
-
-        :Parameters:
-         - `data`: string of bytes or file-like object to be written
-           to the file
-         - `callback`: function taking parameters (result, error)
-        """
-        async_write = asynchronize(
-            io_loop=self.get_io_loop(),
-            sync_method=self.delegate.write,
-            has_safe_arg=False,
-            callback_required=False)
-
-        if isinstance(data, MotorGridOut):
-            data = data.delegate
-
-        async_write(data, callback=callback)
-
-    # TODO: refactor
-    def writelines(self, data, callback):
-        """Write a sequence of strings to the file.
-
-        Does not add separators.
-
-        :Parameters:
-         - `data`: string of bytes or file-like object to be written
-           to the file
-         - `callback`: function taking parameters (result, error)
-        """
-        async_writelines = asynchronize(
-            io_loop=self.get_io_loop(),
-            sync_method=self.delegate.writelines,
-            has_safe_arg=False,
-            callback_required=False)
-
-        if isinstance(data, MotorGridOut):
-            data = data.delegate
-
-        async_writelines(data, callback=callback)
-
-    _id             = ReadOnlyDelegateProperty()
-    md5             = ReadOnlyDelegateProperty()
-    # TODO: doc that we can't set these props as in PyMongo
-    filename        = ReadOnlyDelegateProperty()
-    content_type    = ReadOnlyDelegateProperty()
-    length          = ReadOnlyDelegateProperty()
-    chunk_size      = ReadOnlyDelegateProperty()
-    upload_date     = ReadOnlyDelegateProperty()
-
-    def set(self, name, value, callback):
-        # TODO: doc
-        async_set = asynchronize(
-            io_loop=self.get_io_loop(),
-            sync_method=self.delegate.__setattr__,
-            has_safe_arg=False,
-            callback_required=False)
-        async_set(name, value, callback=callback)
-
-
-# TODO: refactor
 # TODO: doc not really a file-like object
 class MotorGridOut(MotorOpenable):
-    __delegate_class__ = pymongo_gridfs.GridOut
-
-    def __init__(
-        self, root_collection, file_id=None, file_document=None,
-        io_loop=None
-    ):
-        if isinstance(root_collection, pymongo_gridfile.GridOut):
-            # Short cut
-            MotorOpenable.__init__(
-                self, delegate=root_collection, io_loop=io_loop)
-        else:
-            if not isinstance(root_collection, MotorCollection):
-                raise TypeError("First argument to MotorGridOut must be "
-                                "MotorCollection, not %s" % repr(root_collection))
-
-            MotorOpenable.__init__(
-                self, root_collection.delegate, file_id, file_document,
-                io_loop=io_loop)
+    __delegate_class__ = gridfs.GridOut
 
     __getattr__     = ReadOnlyDelegateProperty()
     # TODO: doc that we can't set these props as in PyMongo
@@ -1591,9 +1441,91 @@ class MotorGridOut(MotorOpenable):
     md5             = ReadOnlyDelegateProperty()
     tell            = ReadOnlyDelegateProperty()
     seek            = ReadOnlyDelegateProperty()
-    read            = Async(has_safe_arg=False, cb_required=True)
-    readline        = Async(has_safe_arg=False, cb_required=True)
+    read            = AsyncRead()
+    readline        = AsyncRead()
     # TODO: doc that we don't support __iter__, close(), or context-mgr protocol
+
+    def __init__(
+        self, root_collection, file_id=None, file_document=None,
+        io_loop=None
+    ):
+        if isinstance(root_collection, grid_file.GridOut):
+            # Short cut
+            MotorOpenable.__init__(
+                self, delegate=root_collection, io_loop=io_loop)
+        else:
+            if not isinstance(root_collection, MotorCollection):
+                raise TypeError(
+                    "First argument to MotorGridOut must be "
+                    "MotorCollection, not %s" % repr(root_collection))
+
+            MotorOpenable.__init__(
+                self, root_collection.delegate, file_id, file_document,
+                io_loop=io_loop)
+
+
+# TODO: doc no context-mgr protocol, __setattr__
+class MotorGridIn(MotorOpenable):
+    __delegate_class__ = gridfs.GridIn
+
+    __getattr__     = ReadOnlyDelegateProperty()
+    closed          = ReadOnlyDelegateProperty()
+    close           = AsyncCommand()
+    # TODO: test passing MotorGridOut to write or writelines
+    write           = AsyncCommand().unwrap(MotorGridOut)
+    writelines      = AsyncCommand().unwrap(MotorGridOut)
+    _id             = ReadOnlyDelegateProperty()
+    md5             = ReadOnlyDelegateProperty()
+    # TODO: doc that we can't set these props as in PyMongo
+    filename        = ReadOnlyDelegateProperty()
+    content_type    = ReadOnlyDelegateProperty()
+    length          = ReadOnlyDelegateProperty()
+    chunk_size      = ReadOnlyDelegateProperty()
+    upload_date     = ReadOnlyDelegateProperty()
+    # TODO: doc
+    set             = AsyncCommand(name='__setattr__')
+
+    def __init__(self, root_collection, **kwargs):
+        if isinstance(root_collection, grid_file.GridIn):
+            # Short cut
+            MotorOpenable.__init__(
+                self, delegate=root_collection,
+                io_loop=kwargs.pop('io_loop', None))
+        else:
+            if not isinstance(root_collection, MotorCollection):
+                raise TypeError(
+                    "First argument to MotorGridIn must be "
+                    "MotorCollection, not %s" % repr(root_collection))
+
+            MotorOpenable.__init__(self, root_collection.delegate, **kwargs)
+
+
+# TODO: test 3 Motor gfs classes' ioloops
+class MotorGridFS(MotorOpenable):
+    __delegate_class__ = gridfs.GridFS
+
+    new_file            = AsyncRead().wrap(grid_file.GridIn)
+    get                 = AsyncRead().wrap(grid_file.GridOut)
+    get_version         = AsyncRead().wrap(grid_file.GridOut)
+    get_last_version    = AsyncRead().wrap(grid_file.GridOut)
+    list                = AsyncRead()
+    exists              = AsyncRead()
+    put                 = AsyncCommand()
+    delete              = AsyncCommand()
+
+    def __init__(self, database, collection="fs", io_loop=None):
+        if not isinstance(database, MotorDatabase):
+            raise TypeError("First argument to MotorGridFS must be "
+                            "MotorDatabase, not %s" % repr(database))
+
+        MotorOpenable.__init__(
+            self, database.delegate, collection, io_loop=io_loop)
+
+    def wrap(self, obj):
+        if obj.__class__ is grid_file.GridIn:
+            return MotorGridIn(obj, io_loop=self.get_io_loop())
+        elif obj.__class__ is grid_file.GridOut:
+            return MotorGridOut(obj, io_loop=self.get_io_loop())
 
 
 if requirements_satisfied:
