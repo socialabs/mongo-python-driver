@@ -505,8 +505,8 @@ Bye"""))
         self.assertTrue(f.uploadDate)
 
         self.assertRaises(AttributeError, setattr, f, "_id", 5)
-        f.bar = "a"
-        f.baz = "b"
+        yield motor.Op(f.set, "bar", "a")
+        yield motor.Op(f.set, "baz", "b")
         self.assertRaises(AttributeError, setattr, f, "upload_date", 5)
 
         g = yield motor.Op(motor.MotorGridOut(self.db.fs, f._id).open)
