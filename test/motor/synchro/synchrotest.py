@@ -60,6 +60,7 @@ excluded_tests = [
     'TestConnection.test_auto_start_request',
     'TestConnection.test_contextlib_auto_start_request',
     'TestConnection.test_with_start_request',
+    'TestConnection.test_operation_failure_with_request',
     'TestDatabase.test_authenticate_and_request',
     'TestGridfs.test_request',
 
