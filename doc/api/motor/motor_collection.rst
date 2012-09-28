@@ -44,7 +44,7 @@
   .. automotormethod:: group
   .. automotormethod:: rename
   .. automotormethod:: distinct
-  .. automethod:: map_reduce
+  .. automotormethod:: map_reduce
   .. automotormethod:: inline_map_reduce
   .. automotormethod:: find_and_modify
 

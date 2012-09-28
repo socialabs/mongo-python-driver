@@ -340,6 +340,9 @@ class DelegateProperty(object):
         if not self.name:
             self.name = name
 
+    def get_name(self):
+        return self.name
+
 
 class Async(DelegateProperty):
     def __init__(self, has_safe_arg, cb_required, name=None):
@@ -365,15 +368,29 @@ class Async(DelegateProperty):
             callback_required=self.cb_required)
     
     def wrap(self, original_class):
-        # TODO: doc
         return Wrap(self, original_class)
 
     def unwrap(self, motor_class):
-        # TODO: doc
         return Unwrap(self, motor_class)
 
+    def get_cb_required(self):
+        return self.cb_required
 
-class Wrap(Async):
+
+class WrapBase(Async):
+    def __init__(self, async):
+        """Wraps an Async for further processing"""
+        Async.__init__(self, async.has_safe_arg, async.cb_required)
+        self.async = async
+
+    def set_name(self, name):
+        self.async.set_name(name)
+
+    def get_name(self):
+        return self.async.name
+
+
+class Wrap(WrapBase):
     def __init__(self, async, original_class):
         """
         A descriptor that wraps a Motor method and wraps its return value in a
@@ -381,9 +398,8 @@ class Wrap(Async):
         instead of a PyMongo Collection. Calls the wrap() method on the owner
         object to do the actual wrapping at invocation time.
         """
-        DelegateProperty.__init__(self)
+        WrapBase.__init__(self, async)
         self.async = async
-        self.has_safe_arg = async.has_safe_arg
         self.original_class = original_class
 
     def __get__(self, obj, objtype):
@@ -412,18 +428,15 @@ class Wrap(Async):
             f(*args, **kwargs)
         return _f
 
-    def set_name(self, name):
-        self.async.set_name(name)
 
-
-class Unwrap(Async):
+class Unwrap(WrapBase):
     def __init__(self, async, motor_class):
         """
         A descriptor that wraps a Motor method and unwraps its arguments. E.g.,
         wrap Motor's drop_database and if a MotorDatabase is passed in, unwrap
         it and pass in a pymongo.database.Database instead.
         """
-        DelegateProperty.__init__(self)
+        WrapBase.__init__(self, async)
         self.async = async
         self.has_safe_arg = async.has_safe_arg
         self.motor_class = motor_class
@@ -454,9 +467,6 @@ class Unwrap(Async):
             f(*args, **kwargs)
 
         return _f
-
-    def set_name(self, name):
-        self.async.set_name(name)
 
 
 class AsyncRead(Async):
@@ -853,7 +863,7 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
 
         self.timeout_obj = None
 
-    def shutdown(self, dummy):
+    def shutdown(self, dummy=None):
         if self.timeout_obj:
             self.io_loop.remove_timeout(self.timeout_obj)
 
@@ -893,7 +903,7 @@ class MotorReplicaSetMonitor(pymongo.replica_set_connection.Monitor):
 
             self.io_loop.add_callback(self.async_refresh)
 
-    def join(self, timeout):
+    def join(self, timeout=None):
         # PyMongo calls join() after shutdown() -- this is not a thread, so
         # shutdown works immediately and join is unnecessary
         pass
@@ -1423,11 +1433,18 @@ class MotorCursor(MotorBase):
 
 # TODO: doc not really a file-like object
 class MotorGridOut(MotorOpenable):
+    """Class to read data out of GridFS.
+
+       Application developers should generally not need to
+       instantiate this class directly - instead see the methods
+       provided by :class:`~motor.MotorGridFS`.
+    """
     __delegate_class__ = gridfs.GridOut
 
     __getattr__     = ReadOnlyDelegateProperty()
     # TODO: doc that we can't set these props as in PyMongo
     _id             = ReadOnlyDelegateProperty()
+    filename        = ReadOnlyDelegateProperty()
     name            = ReadOnlyDelegateProperty()
     content_type    = ReadOnlyDelegateProperty()
     length          = ReadOnlyDelegateProperty()
@@ -1463,18 +1480,24 @@ class MotorGridOut(MotorOpenable):
 
 # TODO: doc no context-mgr protocol, __setattr__
 class MotorGridIn(MotorOpenable):
+    """Class to write data to GridFS.
+
+       Application developers should generally not need to
+       instantiate this class directly - instead see the methods
+       provided by :class:`~motor.MotorGridFS`.
+    """
     __delegate_class__ = gridfs.GridIn
 
     __getattr__     = ReadOnlyDelegateProperty()
     closed          = ReadOnlyDelegateProperty()
     close           = AsyncCommand()
-    # TODO: test passing MotorGridOut to write or writelines
     write           = AsyncCommand().unwrap(MotorGridOut)
     writelines      = AsyncCommand().unwrap(MotorGridOut)
     _id             = ReadOnlyDelegateProperty()
     md5             = ReadOnlyDelegateProperty()
     # TODO: doc that we can't set these props as in PyMongo
     filename        = ReadOnlyDelegateProperty()
+    name            = ReadOnlyDelegateProperty()
     content_type    = ReadOnlyDelegateProperty()
     length          = ReadOnlyDelegateProperty()
     chunk_size      = ReadOnlyDelegateProperty()
@@ -1499,6 +1522,8 @@ class MotorGridIn(MotorOpenable):
 
 # TODO: test 3 Motor gfs classes' ioloops
 class MotorGridFS(MotorOpenable):
+    """An instance of GridFS on top of a single Database.
+    """
     __delegate_class__ = gridfs.GridFS
 
     new_file            = AsyncRead().wrap(grid_file.GridIn)

@@ -72,7 +72,7 @@ class MotorAttribute(object):
             # We'll use that line to determine the indentation depth at which
             # to insert ' - `callback`'
             params_doc = doc[match.start():match.end()]
-            param_match = re.search('^([ \t]*)-\s*`\S+`\s*:.*$', params_doc, re.M)
+            param_match = re.search('^([ \t]*)-\s*`\S+`.*?:.*$', params_doc, re.M)
             if param_match:
                 indent = param_match.groups()[0]
 
@@ -127,7 +127,8 @@ def get_pymongo_attr(obj, name, *defargs):
                 attr = cls.__dict__[name]
                 if isinstance(attr, motor.DelegateProperty):
                     # 'name' set by MotorMeta
-                    assert attr.name == name
+                    assert attr.get_name() == name, (
+                        "Expected name %s, got %s" % (name, attr.get_name()))
                     return MotorAttribute(obj, name, attr)
     return safe_getattr(obj, name, *defargs)
 
