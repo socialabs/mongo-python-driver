@@ -22,7 +22,7 @@ import warnings
 # So that 'setup.py doc' can import this module without Tornado or greenlet
 requirements_satisfied = True
 try:
-    from tornado import ioloop, iostream, gen, stack_context
+    from tornado import ioloop, iostream, gen
 except ImportError:
     requirements_satisfied = False
     warnings.warn("Tornado not installed", ImportWarning)
