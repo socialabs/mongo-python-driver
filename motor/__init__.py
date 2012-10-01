@@ -67,6 +67,10 @@ __all__ = [
 #   including in a FAQ, and update check_callable
 #   Common symptom: "TypeError: close() takes exactly 1 argument (2 given)"
 #   ... or: 'callable is required'
+# TODO: what do safe=True and other get_last_error options mean when creating
+#   a MotorConnection or MotorReplicaSetConnection?
+# TODO: ensure all documented methods return MotorGridOut, not GridOut,
+#   MotorCollection, not Collection, etc.
 
 
 def check_callable(kallable, required=False):
