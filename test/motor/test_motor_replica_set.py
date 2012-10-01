@@ -14,8 +14,6 @@
 
 """Test Motor, an asynchronous driver for MongoDB and Tornado."""
 
-import functools
-import socket
 import unittest
 
 import motor
