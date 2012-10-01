@@ -339,6 +339,9 @@ class MotorGridFileTest(MotorTest):
             def write(self, data):
                 self.n_written += len(data)
 
+            def flush(self):
+                pass
+
         fs = yield motor.Op(motor.MotorGridFS(self.db).open)
 
         for content_length in (0, 1, 100, 100 * 1000):

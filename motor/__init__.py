@@ -1491,8 +1491,10 @@ class MotorGridOut(MotorOpenable):
     @gen.engine
     def stream_to_handler(self, request_handler, callback=None):
         """Write the contents of this file to a
-        :class:`tornado.web.RequestHandler`. For a more complete example see
-        the implementation of :class:`~motor.web.GridFSHandler`.
+        :class:`tornado.web.RequestHandler`. This method will call `flush` on
+        the RequestHandler, so ensure all headers have already been set.
+        For a more complete example see the implementation of
+        :class:`~motor.web.GridFSHandler`.
 
         .. code-block:: python
 
@@ -1521,7 +1523,11 @@ class MotorGridOut(MotorOpenable):
             while written < self.length:
                 # Reading chunk_size at a time minimizes buffering
                 chunk = yield Op(self.read, self.chunk_size)
+
+                # write() simply appends the output to a list; flush() sends it
+                # over the network and minimizes buffering in the handler.
                 request_handler.write(chunk)
+                request_handler.flush()
                 written += len(chunk)
             if callback:
                 callback(None, None)

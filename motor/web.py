@@ -131,11 +131,10 @@ class GridFSHandler(tornado.web.RequestHandler):
             self.finish()
             raise StopIteration
 
+        self.set_header("Content-Length", gridout.length)
         if include_body:
             yield motor.Op(gridout.stream_to_handler, self)
-        else:
-            assert self.request.method == "HEAD"
-            self.set_header("Content-Length", gridout.length)
+
         self.finish()
 
     def head(self, path):
