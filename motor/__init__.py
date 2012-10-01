@@ -1481,19 +1481,57 @@ class MotorGridOut(MotorOpenable):
                     "First argument to MotorGridOut must be "
                     "MotorCollection, not %s" % repr(root_collection))
 
+            assert io_loop is None, \
+                "Can't override IOLoop for MotorGridOut"
+
             MotorOpenable.__init__(
                 self, root_collection.delegate, file_id, file_document,
-                io_loop=io_loop)
+                io_loop=root_collection.get_io_loop())
+
+    @gen.engine
+    def stream_to_handler(self, request_handler, callback=None):
+        """Write the contents of this file to a
+        :class:`tornado.web.RequestHandler`. For a more complete example see
+        the implementation of :class:`~motor.web.GridFSHandler`.
+
+        .. code-block:: python
+
+            class FileHandler(tornado.web.RequestHandler):
+                @tornado.web.asynchronous
+                @gen.engine
+                def get(self, filename):
+                    db = self.settings['db']
+                    fs = yield motor.Op(motor.MotorGridFS(db).open)
+                    try:
+                        gridout = yield motor.Op(fs.get_last_version, filename)
+                    except gridfs.NoFile:
+                        raise tornado.web.HTTPError(404)
+
+                    self.set_header("Content-Type", gridout.content_type)
+                    self.set_header("Content-Length", gridout.length)
+                    yield motor.Op(gridout.stream_to_handler, self)
+                    self.finish()
+
+        .. seealso:: Tornado `RequestHandler <http://www.tornadoweb.org/documentation/web.html#request-handlers>`_
+        """
+        check_callable(callback, False)
+
+        try:
+            written = 0
+            while written < self.length:
+                # Reading chunk_size at a time minimizes buffering
+                chunk = yield Op(self.read, self.chunk_size)
+                request_handler.write(chunk)
+                written += len(chunk)
+            if callback:
+                callback(None, None)
+        except Exception, e:
+            if callback:
+                callback(None, e)
 
 
 # TODO: doc no context-mgr protocol, __setattr__
 class MotorGridIn(MotorOpenable):
-    """Class to write data to GridFS.
-
-       Application developers should generally not need to
-       instantiate this class directly - instead see the methods
-       provided by :class:`~motor.MotorGridFS`.
-    """
     __delegate_class__ = gridfs.GridIn
 
     __getattr__     = ReadOnlyDelegateProperty()
@@ -1514,6 +1552,41 @@ class MotorGridIn(MotorOpenable):
     set             = AsyncCommand(name='__setattr__')
 
     def __init__(self, root_collection, **kwargs):
+        """
+        Class to write data to GridFS. If instantiating directly, you must call
+        :meth:`open` before using the `MotorGridIn` object. However, application
+        developers should generally not need to instantiate this class - instead
+        see the methods provided by :class:`~motor.MotorGridFS`.
+
+        Any of the file level options specified in the `GridFS Spec
+        <http://dochub.mongodb.org/core/gridfsspec>`_ may be passed as
+        keyword arguments. Any additional keyword arguments will be
+        set as additional fields on the file document. Valid keyword
+        arguments include:
+
+          - ``"_id"``: unique ID for this file (default:
+            :class:`~bson.objectid.ObjectId`) - this ``"_id"`` must
+            not have already been used for another file
+
+          - ``"filename"``: human name for the file
+
+          - ``"contentType"`` or ``"content_type"``: valid mime-type
+            for the file
+
+          - ``"chunkSize"`` or ``"chunk_size"``: size of each of the
+            chunks, in bytes (default: 256 kb)
+
+          - ``"encoding"``: encoding used for this file. In Python 2,
+            any :class:`unicode` that is written to the file will be
+            converted to a :class:`str`. In Python 3, any :class:`str`
+            that is written to the file will be converted to
+            :class:`bytes`.
+
+        :Parameters:
+          - `root_collection`: A :class:`MotorCollection`, the root collection
+             to write to
+          - `**kwargs` (optional): file level options (see above)
+        """
         if isinstance(root_collection, grid_file.GridIn):
             # Short cut
             MotorOpenable.__init__(
@@ -1525,13 +1598,13 @@ class MotorGridIn(MotorOpenable):
                     "First argument to MotorGridIn must be "
                     "MotorCollection, not %s" % repr(root_collection))
 
+            assert 'io_loop' not in kwargs, \
+                "Can't override IOLoop for MotorGridIn"
+            kwargs['io_loop'] = root_collection.get_io_loop()
             MotorOpenable.__init__(self, root_collection.delegate, **kwargs)
 
 
-# TODO: test 3 Motor gfs classes' ioloops
 class MotorGridFS(MotorOpenable):
-    """An instance of GridFS on top of a single Database.
-    """
     __delegate_class__ = gridfs.GridFS
 
     new_file            = AsyncRead().wrap(grid_file.GridIn)
@@ -1543,13 +1616,24 @@ class MotorGridFS(MotorOpenable):
     put                 = AsyncCommand()
     delete              = AsyncCommand()
 
-    def __init__(self, database, collection="fs", io_loop=None):
+    def __init__(self, database, collection="fs"):
+        """
+        An instance of GridFS on top of a single Database. You must call
+        :meth:`open` before using the `MotorGridFS` object.
+
+        :Parameters:
+          - `database`: a :class:`MotorDatabase`
+          - `collection` (optional): A string, name of root collection to use,
+            such as "fs" or "my_files"
+
+        .. mongodoc:: gridfs
+        """
         if not isinstance(database, MotorDatabase):
             raise TypeError("First argument to MotorGridFS must be "
                             "MotorDatabase, not %s" % repr(database))
 
         MotorOpenable.__init__(
-            self, database.delegate, collection, io_loop=io_loop)
+            self, database.delegate, collection, io_loop=database.get_io_loop())
 
     def wrap(self, obj):
         if obj.__class__ is grid_file.GridIn:

@@ -25,3 +25,4 @@ Classes
    motor_cursor
    gridfs
    generator_interface
+   web

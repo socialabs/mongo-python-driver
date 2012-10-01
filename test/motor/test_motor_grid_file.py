@@ -330,6 +330,25 @@ class MotorGridFileTest(MotorTest):
         # Versions 2.0.1 and older saved a _closed field for some reason.
         self.assertRaises(AttributeError, getattr, g, "_closed")
 
+    @async_test_engine()
+    def test_stream_to_handler(self):
+        class MockRequestHandler(object):
+            def __init__(self):
+                self.n_written = 0
+
+            def write(self, data):
+                self.n_written += len(data)
+
+        fs = yield motor.Op(motor.MotorGridFS(self.db).open)
+
+        for content_length in (0, 1, 100, 100 * 1000):
+            _id = yield motor.Op(fs.put, 'a' * content_length)
+            gridout = yield motor.Op(fs.get, _id)
+            handler = MockRequestHandler()
+            yield motor.Op(gridout.stream_to_handler, handler)
+            self.assertEqual(content_length, handler.n_written)
+            yield motor.Op(fs.delete, _id)
+
 
 if __name__ == "__main__":
     unittest.main()

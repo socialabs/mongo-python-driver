@@ -1,6 +1,8 @@
 Motor GridFS Examples
 =====================
 
+.. seealso:: :ref:`gridfs-handler`
+
 Writing a file to GridFS with :meth:`~motor.MotorGridFS.put`
 ------------------------------------------------------------
 
@@ -85,13 +87,15 @@ Reading from GridFS with :class:`~motor.MotorGridOut`
         gridout = yield motor.Op(fs.get, file_id)
         content = yield motor.Op(gridout.read)
 
-        # Or read in chunks
+        # Or read in chunks - every chunk_size bytes is one MongoDB document
+        # in the db.fs.chunks collection
         gridout = yield motor.Op(fs.get, file_id)
-        CHUNK_SIZE = 10
-        content = chunk = yield motor.Op(gridout.read, CHUNK_SIZE)
+        content = ''
         while len(content) < gridout.length:
-            content += (yield motor.Op(gridout.read, CHUNK_SIZE))
+            content += (yield motor.Op(gridout.read, gridout.chunk_size))
 
         # Get a file by name
         gridout = yield motor.Op(fs.get_last_version, filename='my_file')
         content = yield motor.Op(gridout.read)
+
+.. TODO: examples of static-url generation

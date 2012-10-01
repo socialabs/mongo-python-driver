@@ -30,7 +30,7 @@ from pymongo.read_preferences import ReadPreference
 
 from test.test_replica_set_connection import TestConnectionReplicaSetBase
 from test.motor import (
-    MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises)
+    MotorTest, async_test_engine, host, port, AssertEqual, AssertRaises, puritanical)
 
 
 class MotorGridfsTest(MotorTest):
@@ -84,6 +84,44 @@ class MotorGridfsTest(MotorTest):
         self.check_callback_handling(partial(fs.delete, 1), False)
         self.check_callback_handling(fs.list, True)
         self.check_callback_handling(fs.exists, True)
+
+    def test_custom_io_loop(self):
+        loop = puritanical.PuritanicalIOLoop()
+
+        @async_test_engine(io_loop=loop)
+        def test(self):
+            cx = motor.MotorConnection(host, port, io_loop=loop)
+            yield motor.Op(cx.open)
+
+            fs = motor.MotorGridFS(cx.test)
+            self.assertFalse(fs.delegate)
+
+            # Make sure we can do async things with the custom loop
+            yield motor.Op(fs.open)
+            self.assertTrue(fs.delegate)
+            file_id0 = yield motor.Op(fs.put, 'foo')
+
+            gridin1 = yield motor.Op(fs.new_file)
+            yield motor.Op(gridin1.write, 'bar')
+            yield motor.Op(gridin1.close)
+            file_id1 = gridin1._id
+
+            gridin2 = motor.MotorGridIn(cx.test.fs, filename='fn')
+            yield motor.Op(gridin2.open)
+            yield motor.Op(gridin2.write, 'baz')
+            yield motor.Op(gridin2.close)
+
+            gridout0 = yield motor.Op(fs.get, file_id0)
+            yield AssertEqual('foo', gridout0.read)
+
+            gridout1 = motor.MotorGridOut(cx.test.fs, file_id1)
+            yield motor.Op(gridout1.open)
+            yield AssertEqual('bar', gridout1.read)
+
+            gridout2 = yield motor.Op(fs.get_last_version, 'fn')
+            yield AssertEqual('baz', gridout2.read)
+
+        test(self)
 
     @async_test_engine()
     def test_basic(self):
