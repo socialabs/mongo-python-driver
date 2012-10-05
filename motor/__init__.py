@@ -1099,6 +1099,13 @@ class MotorCursor(MotorBase):
         :Parameters:
          - `cursor`:      PyMongo :class:`~pymongo.cursor.Cursor`
          - `collection`:  :class:`MotorCollection`
+
+        .. note::
+          There is no need to manually close cursors; they are closed
+          by the server after being fully iterated
+          with :meth:`to_list`, :meth:`each`, or :meth:`next_object`, or
+          automatically closed by the client when the :class:`MotorCursor` is
+          cleaned up by the garbage collector.
         """
         if not isinstance(cursor, pymongo.cursor.Cursor):
             raise TypeError(
