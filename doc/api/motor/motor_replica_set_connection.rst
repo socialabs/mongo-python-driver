@@ -33,6 +33,8 @@
   .. automotorattribute:: primary
   .. automotorattribute:: secondaries
   .. automotorattribute:: read_preference
+  .. automotorattribute:: tag_sets
+  .. automotorattribute:: secondary_acceptable_latency_ms
   .. automotorattribute:: max_pool_size
   .. automotorattribute:: document_class
   .. automotorattribute:: tz_aware

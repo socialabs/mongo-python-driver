@@ -16,8 +16,10 @@
   .. automotormethod:: drop_collection
   .. automotormethod:: validate_collection
   .. automethod:: add_son_manipulator
-  .. automotorattribute:: slave_okay
   .. automotorattribute:: read_preference
+  .. automotorattribute:: tag_sets
+  .. automotorattribute:: secondary_acceptable_latency_ms
+  .. automotorattribute:: slave_okay
   .. automotorattribute:: safe
   .. automotormethod:: get_lasterror_options
   .. automotormethod:: set_lasterror_options

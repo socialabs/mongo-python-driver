@@ -34,6 +34,8 @@
   .. automotorattribute:: document_class
   .. automotorattribute:: tz_aware
   .. automotorattribute:: read_preference
+  .. automotorattribute:: tag_sets
+  .. automotorattribute:: secondary_acceptable_latency_ms
   .. automotorattribute:: slave_okay
   .. automotorattribute:: safe
   .. automotorattribute:: is_locked
