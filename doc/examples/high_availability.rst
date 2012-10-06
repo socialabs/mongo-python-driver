@@ -1,3 +1,5 @@
+.. _high-availability-and-pymongo:
+
 High Availability and PyMongo
 =============================
 

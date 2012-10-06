@@ -1141,49 +1141,42 @@ class MotorCursor(MotorBase):
         """Asynchronously retrieve the next document in the result set,
         fetching a batch of results from the server if necessary.
 
-        .. testsetup::
+        .. testsetup:: next_object
 
           import sys
 
           from pymongo.connection import Connection
-          Connection().test.test_collection.remove()
+          Connection().test.test_collection.remove(safe=True)
 
+          import motor
           from motor import MotorConnection
           from tornado.ioloop import IOLoop
-          connection = MotorConnection().open_sync()
-          collection = connection.test.test_collection
+          from tornado import gen
+          collection = MotorConnection().open_sync().test.test_collection
 
-        .. doctest::
+        .. doctest:: next_object
 
-          >>> cursor = None
-          >>> def inserted(result, error):
-          ...     global cursor
-          ...     if error:
-          ...         raise error
+          >>> @gen.engine
+          ... def f():
+          ...     yield motor.Op(collection.insert,
+          ...         [{'_id': i} for i in range(5)])
           ...     cursor = collection.find().sort([('_id', 1)])
-          ...     cursor.next_object(callback=on_next)
+          ...     doc = yield motor.Op(cursor.next_object)
+          ...     while doc:
+          ...         sys.stdout.write(str(doc['_id']) + ', ')
+          ...         doc = yield motor.Op(cursor.next_object)
+          ...     print 'done'
+          ...     IOLoop.instance().stop()
           ...
-          >>> def on_next(result, error):
-          ...     if error:
-          ...         raise error
-          ...     elif result:
-          ...         sys.stdout.write(str(result['_id']) + ', ')
-          ...         cursor.next_object(callback=on_next)
-          ...     else:
-          ...         # Iteration complete
-          ...         IOLoop.instance().stop()
-          ...         print 'done'
-          ...
-          >>> collection.insert(
-          ...     [{'_id': i} for i in range(5)], callback=inserted)
+          >>> f()
           >>> IOLoop.instance().start()
           0, 1, 2, 3, 4, done
 
         In the example above there is no need to call :meth:`close`,
         because the cursor is iterated to completion. If you cancel iteration
         before exhausting the cursor, call :meth:`close` to immediately free
-        server resources. Otherwise, the garbage-collector will eventually
-        close the cursor when deleting it.
+        server resources. Otherwise, the cursor will eventually close itself
+        on the server when the garbage-collector deletes the object.
 
         :Parameters:
          - `callback`: function taking (document, error)
@@ -1229,20 +1222,19 @@ class MotorCursor(MotorBase):
         resources for the cursor. It is unnecessary to close a cursor after
         iterating it completely.
 
-        .. testsetup::
+        .. testsetup:: each
 
           import sys
 
           from pymongo.connection import Connection
           Connection().test.test_collection.remove()
-
           from motor import MotorConnection
           from tornado.ioloop import IOLoop
-          connection = MotorConnection().open_sync()
-          collection = connection.test.test_collection
+          collection = MotorConnection().open_sync().test.test_collection
 
-        .. doctest::
+        .. doctest:: each
 
+          >>> Connection().test.test_collection.remove()
           >>> cursor = None
           >>> def inserted(result, error):
           ...     global cursor
