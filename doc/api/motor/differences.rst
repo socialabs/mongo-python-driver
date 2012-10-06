@@ -1,3 +1,4 @@
+=====================================
 Differences between Motor and PyMongo
 =====================================
 
@@ -89,6 +90,8 @@ To find multiple documents, Motor provides :meth:`~motor.MotorCursor.each` and
             print 'Done'
 
     db.users.find().each(callback=each_user)
+
+.. _motor-acknowledged-writes:
 
 Acknowledged Writes
 -------------------

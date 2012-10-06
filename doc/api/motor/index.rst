@@ -11,6 +11,8 @@ MongoDB.
 
    differences
    prerequisites
+   motor_installation
+   tutorial
    examples/index
 
 Classes

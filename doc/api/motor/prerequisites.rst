@@ -1,5 +1,5 @@
-Prerequisites
-=============
+Installation Prerequisites
+==========================
 
 * `Tornado <http://www.tornadoweb.org/>`_
 * `Greenlet <http://pypi.python.org/pypi/greenlet>`_

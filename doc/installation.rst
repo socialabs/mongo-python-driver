@@ -1,3 +1,5 @@
+.. _pymongo-installation:
+
 Installing / Upgrading
 ======================
 .. highlight:: bash

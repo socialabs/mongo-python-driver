@@ -88,6 +88,8 @@ they are created lazily - none of the above commands have actually
 performed any operations on the MongoDB server. Collections and
 databases are created when the first document is inserted into them.
 
+.. _tutorial-documents:
+
 Documents
 ---------
 Data in MongoDB is represented (and stored) using JSON-style
@@ -225,6 +227,8 @@ not a regular str.
 
 `You can read more about Python unicode strings here
 <http://docs.python.org/howto/unicode.html>`_.
+
+.. _bulk-inserts:
 
 Bulk Inserts
 ------------
