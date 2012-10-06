@@ -144,10 +144,7 @@ class GridFSHandler(tornado.web.RequestHandler):
         """Override to customize cache control behavior.
 
         Return a positive number of seconds to trigger aggressive caching or 0
-        to mark resource as cacheable, only.
-
-        By default returns cache expiry of 10 years for resources requested
-        with "v" argument.
+        to mark resource as cacheable, only. 0 is the default.
         """
         return 0
 
