@@ -37,6 +37,8 @@ non-blocking driver.
 
 Tutorial Prerequisites
 ----------------------
+You can learn about MongoDB with the `MongoDB Tutorial`_ before you learn Motor.
+
 Make sure that you've
 :doc:`installed the version of PyMongo that includes Motor <motor_installation>`.
 In the Python shell, the following should run without raising an exception:
@@ -53,6 +55,8 @@ can start it like so:
 .. code-block:: bash
 
   $ mongod
+
+.. _MongoDB Tutorial: http://api.mongodb.org/wiki/current/Tutorial.html
 
 Making a Connection
 -------------------
