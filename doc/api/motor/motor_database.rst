@@ -12,6 +12,7 @@
 
      Raises :class:`~pymongo.errors.InvalidName` if an invalid collection name is used.
 
+  .. automotormethod:: command
   .. automotormethod:: create_collection
   .. automotormethod:: drop_collection
   .. automotormethod:: validate_collection
