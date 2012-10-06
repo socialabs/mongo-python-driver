@@ -43,6 +43,7 @@
   .. automotormethod:: reindex
   .. automotormethod:: index_information
   .. automotormethod:: options
+  .. automotormethod:: aggregate
   .. automotormethod:: group
   .. automotormethod:: rename
   .. automotormethod:: distinct
