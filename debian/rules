@@ -1,22 +1,19 @@
 #!/usr/bin/make -f
 export DH_VERBOSE=1
 
+PYTHON2=2.7
+
 %:
 	dh $@ --with python2
 
 override_dh_auto_build:
 	dh_auto_build
-	sphinx-build -b html doc debian/html
 	rm -rf debian/html/_sources/
 	rm -f debian/python-pymongo-doc/usr/share/doc/python-pymongo-doc/html/_static/jquery.js
 	rm -rf debian/python-pymongo-doc/usr/share/doc/python-pymongo-doc/html/.doctrees
 
 override_dh_installchangelogs:
 	dh_installchangelogs doc/changelog.rst
-
-override_dh_installdocs:
-	dh_installdocs
-	dh_installdocs -A doc/contributors.rst
 
 override_dh_auto_clean:
 	rm -rf debian/html

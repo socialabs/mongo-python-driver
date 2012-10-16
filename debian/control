@@ -5,11 +5,11 @@ Maintainer: Federico Ceratto <federico.ceratto@gmail.com>
 Uploaders: Janos Guljas <janos@resenje.org>
 DM-Upload-Allowed: yes
 Build-Depends: debhelper (>= 9~),
- python-all-dev (>= 2.6.6-3~),
+ python-dev (>= 2.7),
  python-setuptools (>= 0.6.14),
  python-sphinx
 Standards-Version: 3.9.3
-X-Python-Version: >= 2.5
+X-Python-Version: >= 2.7
 Homepage: http://api.mongodb.org/python/
 Vcs-Git: git://git.debian.org/git/collab-maint/pymongo.git
 Vcs-Browser: http://git.debian.org/?p=collab-maint/pymongo.git
@@ -38,17 +38,6 @@ Provides: ${python:Provides}
 Description: C-coded extension to the python-pymongo package
  Pymongo provides an interface to easily access MongoDB from Python.
  This package contains an extension written in C for higher performance.
-
-Package: python-pymongo-doc
-Architecture: all
-Depends: ${misc:Depends}, libjs-jquery, libjs-underscore
-Section: doc
-Description: Python interface to the MongoDB document-oriented database (documentation)
- MongoDB is a high-performance, open source, schema-free
- document-oriented data store. Pymongo provides an interface
- to easily access it from Python.
- .
- This package contains the HTML documentation.
 
 Package: python-gridfs
 Architecture: all
