@@ -1,2 +1,3 @@
+usr/lib/python*/*-packages/motor/*.py
 usr/lib/python*/*-packages/pymongo*/*.py
 usr/lib/python*/*-packages/pymongo*/*.txt
