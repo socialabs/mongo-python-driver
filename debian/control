@@ -15,7 +15,7 @@ Vcs-Browser: http://git.debian.org/?p=collab-maint/pymongo.git
 
 Package: python-pymongo
 Architecture: any
-Depends: python-bson (= ${binary:Version}), ${python:Depends}, ${misc:Depends}
+Depends: python-bson (= ${binary:Version}), python-greenlet, ${python:Depends}, ${misc:Depends}
 Recommends: python-gridfs (>= ${source:Version})
  , python-pymongo-ext [any-i386 any-ia64 any-amd64]
 Provides: ${python:Provides}

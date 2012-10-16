@@ -1,3 +1,9 @@
+pymongo (2.3.2) UNRELEASED; urgency=low
+
+  * Greenlet dependency
+
+ -- Serge S. Koval <serge.koval@gmail.com>  Tue, 16 Oct 2012 09:44:11 -0400
+
 pymongo (2.3.1) UNRELEASED; urgency=low
 
   * Fixed installation script
